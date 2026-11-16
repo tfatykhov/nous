@@ -3,7 +3,7 @@
   import { Button } from '../../lib/ui/button';
   import { fmtUtc } from '../../lib/harness';
   import {
-    ACTION_TEXT, DRIVER_OFF_TEXT, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
+    ACTION_TEXT, DRIVER_OFF_TEXT, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
     deadlineProblem, typedNumber,
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
@@ -56,6 +56,25 @@
     });
   });
 
+  /** A change whose answer was lost: once a later read shows evidence of that very change (`changeLanded`), its usual
+   * result line replaces "No answer came back". Any other change of the goal leaves the sentence in place. */
+  let lost = $state<LostChange | null>(null);
+  $effect(() => {
+    const was = lost;
+    if (!was || !changeLanded(was, goal)) return;
+    const state = goal.state;
+    untrack(() => {
+      lost = null;
+      if (was.action === 'note') {
+        noteResult = { text: ACTION_TEXT.note.done, ok: true };
+        if (noteText === was.text) noteText = '';
+      } else {
+        result = { text: ACTION_TEXT[was.action].done, ok: true, expect: state };
+      }
+    });
+  });
+  const answerLost = (err: unknown) => (err as { status?: number } | null)?.status === undefined;
+
   function closed(step: PlanStep): boolean {
     return step.closed_session !== undefined || step.status === 'done' || step.status === 'closed';
   }
@@ -101,19 +120,25 @@
     // The goal's ids are read now: after the awaits below, this pane may show another answer or none.
     const ref = goal.ref;
     const opener = `goal-a.${ref}.${action}`;
+    const before = beforeChange(goal);
+    const at = Date.now();
     busy = action;
     confirming = null;
     result = null;
+    lost = null;
     let outcome: Note;
+    let unanswered = false;
     try {
       const changed = await goalAction(ref, action, body);
       outcome = { text: ACTION_TEXT[action].done, ok: true, expect: changed.state };
     } catch (err) {
       outcome = { text: refusalText(err), ok: false };
+      unanswered = answerLost(err);
     }
     await onChanged();
     busy = null;
     result = outcome;
+    if (unanswered) lost = { action, at, before, ...(body as { total?: number; day?: number; days?: number } | undefined) };
     await tick();
     (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }
@@ -134,18 +159,25 @@
     if (busy || !noteText.trim()) return;
     busy = 'note';
     noteResult = null;
+    lost = null;
     const ref = goal.ref;
+    const sent = noteText;
+    const before = beforeChange(goal);
+    const at = Date.now();
     let outcome: Note;
+    let unanswered = false;
     try {
-      await goalAction(ref, 'note', { text: noteText });
+      await goalAction(ref, 'note', { text: sent });
       noteText = '';
       outcome = { text: ACTION_TEXT.note.done, ok: true };
     } catch (err) {
       outcome = { text: refusalText(err), ok: false };
+      unanswered = answerLost(err);
     }
     await onChanged();
     busy = null;
     noteResult = outcome;
+    if (unanswered) lost = { action: 'note', at, before, text: sent };
   }
 
   const YES: Record<Action, string> = {

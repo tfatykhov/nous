@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  ACTION_TEXT, ACTIONS, PENDING_TEXT, RESUME_BLOCKED_TEXT, actorWord, asksFirst, budgetProblem, confirmText, createBody,
+  ACTION_TEXT, ACTIONS, PENDING_TEXT, RESUME_BLOCKED_TEXT, actorWord, asksFirst, beforeChange, budgetProblem, changeLanded,
+  confirmText, createBody,
   createProblems, deadlineProblem, typedNumber,
   deadlineText, formatTokens, goalAction, haltState, journalKindWord, limitFields, listGoals, getGoal, nextSessionText,
-  refusalText, resumeLabel, sessionOutcomeWord, spanText, stateWord, type Action, type CreateForm, type GoalState, type PauseReason,
+  refusalText, resumeLabel, sessionOutcomeWord, spanText, stateWord, type Action, type CreateForm, type GoalDetail, type GoalState, type LostChange, type PauseReason,
 } from './goals';
 import * as goals from './goals';
 import { DETAIL_KEYS, NOW, OPTIONS, SPEND_NOTE, goalDetail, goalRow } from './testing/goalFixtures';
@@ -286,5 +287,62 @@ describe('the budget and deadline forms', () => {
   it('typed numbers are whole numbers or not a number', () => {
     expect([typedNumber(' 42 '), typedNumber('-3')]).toEqual([42, -3]);
     for (const bad of ['', '1.5', '1e3', '12a']) expect(Number.isNaN(typedNumber(bad)), bad).toBe(true);
+  });
+});
+
+describe('a lost answer is replaced only on evidence of that change', () => {
+  const at = NOW;
+  const lostOf = (action: Action, goal: GoalDetail, sent: Partial<LostChange> = {}): LostChange => ({ action, at, before: beforeChange(goal), ...sent });
+  const row = (seq: number, kind: string, actor: string, text: string) => ({ seq, session_n: null, kind, actor, text, evidence: [], created_at: null });
+
+  it('a note: an owner_note row newer than the change, with the text as sent (trimmed)', () => {
+    const goal = goalDetail();
+    const lost = lostOf('note', goal, { text: '  Use the 2024 folder first.  ' });
+    const top = goal.journal[0].seq;
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'owner_note', 'owner', 'Use the 2024 folder first.'), ...goal.journal] })).toBe(true);
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'report', 'chain', 'Use the 2024 folder first.'), ...goal.journal] })).toBe(false);
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'owner_note', 'owner', 'Something else'), ...goal.journal] })).toBe(false);
+    expect(changeLanded(lost, goal)).toBe(false);
+  });
+
+  it('state changes: only what the action produces, from what it was', () => {
+    const active = goalDetail({ state: 'active' });
+    expect(changeLanded(lostOf('pause', active), { ...active, state: 'paused', pause_reason: 'owner' })).toBe(true);
+    expect(changeLanded(lostOf('pause', active), { ...active, state: 'paused', pause_reason: 'error' })).toBe(false);
+    expect(changeLanded(lostOf('pause', active), { ...active, spent_today: 5 })).toBe(false);
+    expect(changeLanded(lostOf('stop', active), { ...active, state: 'paused', pause_reason: 'owner' })).toBe(true);
+    const pausedWithSession = goalDetail({ state: 'paused', pause_reason: 'owner', open_session: 2 });
+    expect(changeLanded(lostOf('stop', pausedWithSession), { ...pausedWithSession, pending_request: 'stop' })).toBe(true);
+    expect(changeLanded(lostOf('stop', pausedWithSession), pausedWithSession)).toBe(false);
+    expect(changeLanded(lostOf('resume', pausedWithSession), { ...pausedWithSession, state: 'active', pause_reason: null })).toBe(true);
+    const draft = goalDetail({ state: 'draft' });
+    expect(changeLanded(lostOf('approve', draft), { ...draft, state: 'active' })).toBe(true);
+    expect(changeLanded(lostOf('approve', draft), { ...draft, state: 'cancelled' })).toBe(false);
+    expect(changeLanded(lostOf('cancel', draft), { ...draft, state: 'cancelled' })).toBe(true);
+    const waiting = goalDetail({ state: 'paused', pause_reason: 'waiting_for_owner' });
+    expect(changeLanded(lostOf('confirm-done', waiting), { ...waiting, state: 'done', pause_reason: null })).toBe(true);
+    expect(changeLanded(lostOf('confirm-done', waiting), { ...waiting, state: 'active', pause_reason: null })).toBe(false);
+  });
+
+  it('run now: the pending request, or a newer session with the owner\'s trigger', () => {
+    const goal = goalDetail();
+    const lost = lostOf('run-now', goal);
+    expect(changeLanded(lost, { ...goal, pending_request: 'run_now' })).toBe(true);
+    expect(changeLanded(lost, { ...goal, sessions: [...goal.sessions, { ...goal.sessions[0], n: 2, trigger: 'run_now' }] })).toBe(true);
+    expect(changeLanded(lost, { ...goal, sessions: [...goal.sessions, { ...goal.sessions[0], n: 2, trigger: 'timer' }] })).toBe(false);
+  });
+
+  it('budget and deadline: the limits equal what was sent', () => {
+    const goal = goalDetail({ total_budget: 10_000_000, day_budget: 2_000_000, deadline_at: '2026-11-21T12:00:00+00:00' });
+    const budget = lostOf('budget', goal, { total: 20_000_000 });
+    expect(changeLanded(budget, { ...goal, total_budget: 20_000_000 })).toBe(true);
+    expect(changeLanded(budget, { ...goal, total_budget: 15_000_000 })).toBe(false);
+    expect(changeLanded(budget, goal)).toBe(false);
+    const deadline = lostOf('deadline', goal, { days: 3 });
+    expect(changeLanded(deadline, { ...goal, deadline_at: '2026-11-24T12:00:00+00:00' })).toBe(true);
+    expect(changeLanded(deadline, { ...goal, deadline_at: '2026-11-22T12:00:00+00:00' })).toBe(false);
+    const draft = goalDetail({ state: 'draft', deadline_at: null, deadline_days: 10 });
+    expect(changeLanded(lostOf('deadline', draft, { days: 4 }), { ...draft, deadline_days: 14 })).toBe(true);
+    expect(changeLanded(lostOf('deadline', draft, { days: 4 }), { ...draft, deadline_days: 11 })).toBe(false);
   });
 });

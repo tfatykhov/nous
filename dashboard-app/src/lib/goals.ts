@@ -335,6 +335,86 @@ export function deadlineProblem(days: number, options: GoalOptions): string | nu
 /** What is typed in a number field, as a number: NaN unless it is a whole number. */
 export const typedNumber = (raw: string) => (/^-?\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN);
 
+/** A change whose answer was lost: the goal as it was just before it was sent, and what was sent. */
+export interface LostChange {
+  action: Action;
+  /** When it was sent (this browser's clock). */
+  at: number;
+  before: Pick<GoalDetail, 'state' | 'pause_reason' | 'pending_request' | 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at'> & {
+    /** The newest journal row's seq, and the newest session's number, before the change. */
+    top: number;
+    lastSession: number;
+  };
+  /** A note's text, a budget's new values, a deadline's added days, as sent. */
+  text?: string;
+  total?: number;
+  day?: number;
+  days?: number;
+}
+
+const DAY_MS = 86_400_000;
+/** How far a moved deadline may be from the one this browser expects (the server's clock decides it). */
+const DEADLINE_SLACK_MS = 10 * 60_000;
+
+/** The goal as it is before a change is sent, for `changeLanded`. */
+export function beforeChange(goal: GoalDetail): LostChange['before'] {
+  return {
+    state: goal.state,
+    pause_reason: goal.pause_reason,
+    pending_request: goal.pending_request,
+    total_budget: goal.total_budget,
+    day_budget: goal.day_budget,
+    deadline_days: goal.deadline_days,
+    deadline_at: goal.deadline_at,
+    top: goal.journal[0]?.seq ?? 0,
+    lastSession: goal.sessions.reduce((n, s) => Math.max(n, s.n), 0),
+  };
+}
+
+/** Whether `goal`, read after a change whose answer was lost, shows that very change was made: what that action
+ * produces, and not what it was before. Anything else (a session's own journal rows, the harness pausing the goal for
+ * another reason, a spend) is no evidence, and "No answer came back" stays. */
+export function changeLanded(lost: LostChange, goal: GoalDetail): boolean {
+  const b = lost.before;
+  switch (lost.action) {
+    case 'note': {
+      const sent = (lost.text ?? '').trim();
+      return goal.journal.some((row) => row.seq > b.top && row.kind === 'owner_note' && row.actor === 'owner' && row.text === sent);
+    }
+    case 'pause':
+      return b.state === 'active' && goal.state === 'paused' && goal.pause_reason === 'owner';
+    case 'stop':
+      return (b.state === 'active' && goal.state === 'paused' && goal.pause_reason === 'owner')
+        || (b.pending_request !== 'stop' && goal.pending_request === 'stop');
+    case 'resume':
+      return b.state === 'paused' && goal.state === 'active';
+    case 'approve':
+      return b.state === 'draft' && goal.state === 'active';
+    case 'cancel':
+      return b.state !== 'cancelled' && goal.state === 'cancelled';
+    case 'confirm-done':
+      return b.state !== 'done' && goal.state === 'done';
+    case 'run-now':
+      return (b.pending_request !== 'run_now' && goal.pending_request === 'run_now')
+        || goal.sessions.some((s) => s.n > b.lastSession && s.trigger === 'run_now');
+    case 'budget':
+      return (lost.total !== undefined || lost.day !== undefined)
+        && (lost.total === undefined || goal.total_budget === lost.total)
+        && (lost.day === undefined || goal.day_budget === lost.day)
+        && (goal.total_budget !== b.total_budget || goal.day_budget !== b.day_budget);
+    case 'deadline': {
+      const days = lost.days ?? 0;
+      if (days < 1) return false;
+      if (b.deadline_at === null) return goal.deadline_at === null && goal.deadline_days === b.deadline_days + days;
+      if (!goal.deadline_at) return false;
+      const expected = Math.max(Date.parse(b.deadline_at), lost.at) + days * DAY_MS;
+      return Math.abs(Date.parse(goal.deadline_at) - expected) <= DEADLINE_SLACK_MS;
+    }
+    default:
+      return false;
+  }
+}
+
 /** The hint beside a Resume that the store would refuse. */
 export const RESUME_BLOCKED_TEXT: Record<'budget' | 'deadline', string> = {
   budget: 'Raise the budget first.',
