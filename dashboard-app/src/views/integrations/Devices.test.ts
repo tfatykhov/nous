@@ -434,6 +434,22 @@ describe('Devices: a pairing code', () => {
     expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
   });
 
+  it('a try refused while a read ended the code on screen says only the refusal', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    let answer!: (a: Answer) => void;
+    handlers['POST /a2ui/devices/pairings'] = () => new Promise<Answer>((r) => { answer = r; });
+    await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    answer([409, { error: 'revoke a device first' }]);
+    await vi.waitFor(() => expect(s.getByRole('alert').textContent).toBe('Revoke a device first.'));
+    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+  });
+
   it('a new code with no answer takes the code on screen away: a new one may have replaced it', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     opening();
