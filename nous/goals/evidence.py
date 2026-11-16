@@ -35,7 +35,8 @@ from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.storage.models import ExecutionDAG, ExecutionLedgerEntry, Intention, Subtask
 
 PREFIX_CHARS = 8
-FILES_LISTED = 30  # the files under the root's directory the citeable list reads at most
+FILES_LISTED = 30  # the files under the root's directory the citeable list gives at most
+FILES_SCANNED = 500  # the directory entries it looks at, at most (a file not looked at is still citeable by path)
 REF_ECHO_CHARS = 80  # a refused ref, as the refusal repeats it
 # A file's time is the file system's clock and the session's start is the database's: a file written in the
 # session's first seconds may read as a little older than the start when the two clocks differ.
@@ -216,15 +217,20 @@ async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeabl
 
 
 def _files(scope: Scope) -> list[Citeable]:
-    """Files under the root's directory changed since the session started, at most ``FILES_LISTED``."""
+    """Files under the root's directory changed since the session started, at most ``FILES_LISTED`` of the first
+    ``FILES_SCANNED`` entries."""
     try:
         workspace = Path(scope.workspace_dir).resolve()
         root_dir = workspace / "intentions" / str(scope.root_id)
         if not root_dir.is_dir():
             return []
         listed: list[Citeable] = []
+        scanned = 0
         for base, _dirs, names in os.walk(root_dir):
             for name in sorted(names):
+                scanned += 1
+                if scanned > FILES_SCANNED:
+                    return listed
                 checked = _check_file(scope, name, str(Path(base, name)))
                 if checked.ref is not None:
                     listed.append(Citeable(checked.ref, "a file this work wrote"))

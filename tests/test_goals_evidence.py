@@ -237,3 +237,15 @@ async def test_the_citeable_list_has_the_sessions_refs_with_full_ids_and_nothing
     ]
     for item in listed:  # every listed ref passes the check
         assert (await _check(w, item.ref)).ref == item.ref
+
+
+async def test_the_citeable_list_looks_at_a_bounded_number_of_files(runner_env, tmp_path, monkeypatch):  # noqa: F811
+    w = await _session(runner_env, tmp_path)
+    w.dir.mkdir(parents=True)
+    for name in ("a.md", "b.md", "c.md"):
+        (w.dir / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(evidence, "FILES_SCANNED", 2)
+    async with w.db.session() as s:
+        listed = await evidence.citeable(s, w.scope, limit=10)
+    assert [c.ref for c in listed] == [f"file:intentions/{w.root.id}/a.md", f"file:intentions/{w.root.id}/b.md"]
+    assert (await _check(w, f"file:intentions/{w.root.id}/c.md")).ref is not None  # still citeable by its path
