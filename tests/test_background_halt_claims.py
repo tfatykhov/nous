@@ -586,6 +586,7 @@ async def test_a_halt_that_lands_during_a_dag_tick_stops_it_at_the_next_dag():
     assert orchestrator._advance_dag.await_count == 1
 
 
+@pytest.mark.postgres_only  # the cancelled row's usage is written with GREATEST, which SQLite lacks
 async def test_a_legacy_inline_run_spanning_a_halt_and_a_resume_is_cancelled_not_completed(runner_env):  # noqa: F811
     from nous.api.execution_context import ExecutionContext
 

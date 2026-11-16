@@ -334,6 +334,7 @@ async def test_restart_while_halted_and_resume_does_not_restart_cancelled_work(e
     assert rows == {"was running": "cancelled", "left pending across the restart": "cancelled"}  # nothing restarted
 
 
+@pytest.mark.postgres_only  # the whole app on one SQLite connection: "cannot commit transaction" there
 async def test_interactive_chat_still_works_while_halted(runner_env):  # noqa: F811
     from nous.api.rest import create_app
 

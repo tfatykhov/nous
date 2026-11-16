@@ -509,6 +509,7 @@ async def test_a_chat_turn_spanning_a_halt_and_a_resume_can_still_run_spawn_sync
     assert row.status == "completed" and row.final_outcome == "completed"
 
 
+@pytest.mark.postgres_only  # the cancelled row's usage is written with GREATEST, which SQLite lacks
 async def test_a_background_turns_inline_run_keeps_its_epoch_after_a_halt_and_a_resume(runner_env):  # noqa: F811
     halt = _install()
     env = await runner_env(subtask_hardening_enabled=False)  # no model step: the inline run makes no model call
