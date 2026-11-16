@@ -177,7 +177,7 @@ async def test_a_file_in_the_sessions_own_directory_is_evidence(runner_env, tmp_
     assert (await _check(w, f"file:intentions/{w.root.id}/sub/../notes.md")).ref == want
 
 
-async def test_a_file_outside_the_sessions_directory_or_missing_or_old_is_refused(runner_env, tmp_path):  # noqa: F811
+async def test_a_file_outside_the_sessions_directory_or_missing_is_refused(runner_env, tmp_path):  # noqa: F811
     w = await _session(runner_env, tmp_path)
     other_root, _ = await _other_session(w)
     w.dir.mkdir(parents=True)
@@ -187,10 +187,6 @@ async def test_a_file_outside_the_sessions_directory_or_missing_or_old_is_refuse
     (theirs / "notes.md").write_text("x", encoding="utf-8")
     (tmp_path / "research").mkdir()
     (tmp_path / "research" / "notes.md").write_text("x", encoding="utf-8")
-    old = w.dir / "old.md"
-    old.write_text("x", encoding="utf-8")
-    long_ago = time.time() - 3 * 86400
-    os.utime(old, (long_ago, long_ago))
     for ref in (
         f"file:intentions/{w.root.id}/../../outside.md",
         f"file:{tmp_path / 'outside.md'}",
@@ -198,11 +194,10 @@ async def test_a_file_outside_the_sessions_directory_or_missing_or_old_is_refuse
         "file:research/notes.md",  # an owner's shared directory
         f"file:intentions/{w.root.id}/missing.md",
         f"file:intentions/{w.root.id}",  # the directory itself
-        f"file:intentions/{w.root.id}/old.md",  # older than the session
         f"file:intentions/{w.root.id}/notes\x00.md",
     ):
         checked = await _check(w, ref)
-        assert checked.ref is None and "is not a file this work wrote" in checked.refusal, ref
+        assert checked.ref is None and "is not a file of this work" in checked.refusal, ref
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows rarely grants")
@@ -259,3 +254,42 @@ async def test_a_recorded_calls_label_never_names_its_tool(runner_env, tmp_path)
     async with w.db.session() as s:
         (listed,) = [c for c in await evidence.citeable(s, w.scope, limit=10) if c.ref.startswith("ledger:")]
     assert listed.label.startswith("a recorded call") and "owner" not in listed.label and "mcp" not in listed.label
+
+
+async def test_a_file_older_than_the_session_is_evidence_and_two_spellings_are_one_file(runner_env, tmp_path):  # noqa: F811
+    """A file's time proves nothing, so it is not read. Two spellings of one file give one canonical ref and one
+    identity."""
+    w = await _session(runner_env, tmp_path)
+    (w.dir / "sub").mkdir(parents=True)
+    old = w.dir / "old.md"
+    old.write_text("x", encoding="utf-8")
+    long_ago = time.time() - 3 * 86400
+    os.utime(old, (long_ago, long_ago))
+    first = await _check(w, f"file:intentions/{w.root.id}/old.md")
+    second = await _check(w, f"file:intentions/{w.root.id}/sub/../old.md")
+    assert first.ref == second.ref == f"file:intentions/{w.root.id}/old.md"
+    assert first.identity == second.identity is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows rarely grants")
+async def test_a_symlink_inside_the_sessions_directory_is_refused_too(runner_env, tmp_path):  # noqa: F811
+    w = await _session(runner_env, tmp_path)
+    w.dir.mkdir(parents=True)
+    (w.dir / "real.md").write_text("x", encoding="utf-8")
+    (w.dir / "link.md").symlink_to(w.dir / "real.md")
+    assert (await _check(w, f"file:intentions/{w.root.id}/link.md")).ref is None
+    assert (await _check(w, f"file:intentions/{w.root.id}/real.md")).ref is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a file's identity is its device and inode on POSIX only")
+async def test_a_hard_link_is_the_same_file(runner_env, tmp_path):  # noqa: F811
+    w = await _session(runner_env, tmp_path)
+    w.dir.mkdir(parents=True)
+    (w.dir / "a.md").write_text("x", encoding="utf-8")
+    os.link(w.dir / "a.md", w.dir / "b.md")
+    a = await _check(w, f"file:intentions/{w.root.id}/a.md")
+    b = await _check(w, f"file:intentions/{w.root.id}/b.md")
+    assert a.ref != b.ref and a.identity == b.identity
+    async with w.db.session() as s:
+        listed = [c.ref for c in await evidence.citeable(s, w.scope, limit=10) if c.ref.startswith("file:")]
+    assert listed == [a.ref]  # listed once

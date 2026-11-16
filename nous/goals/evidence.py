@@ -8,8 +8,9 @@ intention under it, its lineage):
   the lineage (the root's continuation thread, a lineage subtask, or a lineage DAG's nodes);
 - ``subtask:<uuid>``: a subtask of the lineage that completed (the evidence a read-only step can have);
 - ``dag:<uuid>``: a DAG of the lineage that completed;
-- ``file:<path>``: an existing file under the root's own ``intentions/<root id>/`` directory of the workspace,
-  symlinks followed, changed since the session started.
+- ``file:<path>``: an existing regular file under the root's own ``intentions/<root id>/`` directory of the
+  workspace, named by a path with no symbolic link and no step out of that directory. A file is one ref however it
+  is named: by its device and inode on POSIX (a hard link is the same file), by its resolved path elsewhere.
 
 An id may be given in full or by its first 8 characters when exactly one ref of that kind in scope starts with them.
 A ref that names a row of another agent, another root or another goal is refused like one that names nothing. The
@@ -38,9 +39,6 @@ PREFIX_CHARS = 8
 FILES_LISTED = 30  # the files under the root's directory the citeable list gives at most
 FILES_SCANNED = 500  # the directory entries it looks at, at most (a file not looked at is still citeable by path)
 REF_ECHO_CHARS = 80  # a refused ref, as the refusal repeats it
-# A file's time is the file system's clock and the session's start is the database's: a file written in the
-# session's first seconds may read as a little older than the start when the two clocks differ.
-FILE_CLOCK_GRACE_SECONDS = 60
 FORMS = (
     "ledger:<id>, subtask:<id> or dag:<id> (a full id, or its first 8 characters) from the goal block's list, or "
     "file:intentions/<root id>/<name> for a file this work wrote"
@@ -74,10 +72,12 @@ class Citeable:
 
 @dataclass(frozen=True)
 class Checked:
-    """A checked ref: ``ref`` is its canonical form when it was accepted, else ``refusal`` says why."""
+    """A checked ref: ``ref`` is its canonical form when it was accepted, else ``refusal`` says why. ``identity`` is
+    what one-use compares (``identity``)."""
 
     ref: str | None = None
     refusal: str | None = None
+    identity: str | None = None
 
 
 def _echo(raw: str) -> str:
@@ -155,16 +155,39 @@ async def _check_id(s: AsyncSession, scope: Scope, kind: str, raw: str, value: s
         found = list((await s.execute(select(table.id).where(*where(scope), table.id == UUID(text_id)))).scalars())
     if not found:
         return Checked(refusal=f"{_echo(raw)} is not {_WHAT[kind]}.")
-    return Checked(ref=f"{kind}:{found[0]}")
+    ref = f"{kind}:{found[0]}"
+    return Checked(ref=ref, identity=ref)
+
+
+def _file_identity(path: Path) -> str:
+    """One file however it is named: its device and inode on POSIX, its resolved path elsewhere."""
+    if os.name == "posix":
+        stat = path.stat()
+        return f"file#{stat.st_dev}:{stat.st_ino}"
+    return f"file#{os.path.normcase(str(path))}"
+
+
+def identity(scope: Scope, ref: str) -> str:
+    """What one-use compares a stored canonical ref by: for a file ref, the file it names while it exists (a hard
+    link of it, or another spelling, is the same); for anything else, the ref itself."""
+    if not ref.startswith("file:"):
+        return ref
+    try:
+        target = (Path(scope.workspace_dir).resolve() / ref[len("file:") :]).resolve()
+        if target.is_file():
+            return _file_identity(target)
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return ref
 
 
 def _check_file(scope: Scope, raw: str, value: str) -> Checked:
-    """A file under the root's own directory, resolved the way write_file resolves a path (relative to the
-    workspace, symlinks and ``..`` followed), that exists and changed since the session started."""
+    """An existing regular file under the root's own directory, named relative to the workspace (or absolutely) by
+    a path that, once ``..`` is collapsed, stays in that directory and reaches the file with no symbolic link."""
     refused = Checked(
         refusal=(
-            f"{_echo(raw)} is not a file this work wrote: a file ref names an existing file under "
-            f"{scope.root_dir}/ changed since this session started."
+            f"{_echo(raw)} is not a file of this work: a file ref names an existing regular file under "
+            f"{scope.root_dir}/, by a path with no symbolic link and no step out of that directory."
         )
     )
     if not value or "\x00" in value:  # Windows' realpath drops a NUL instead of raising (gh-106242)
@@ -172,13 +195,15 @@ def _check_file(scope: Scope, raw: str, value: str) -> Checked:
     try:
         workspace = Path(scope.workspace_dir).resolve()
         root_dir = workspace / "intentions" / str(scope.root_id)
-        target = Path(value).resolve() if Path(value).is_absolute() else (workspace / value).resolve()
-        if not target.is_relative_to(root_dir) or not target.is_file():
+        given = Path(value)
+        spelled = Path(os.path.normpath(given if given.is_absolute() else workspace / given))
+        if not spelled.is_relative_to(root_dir):
             return refused
-        if target.stat().st_mtime < scope.started_at.timestamp() - FILE_CLOCK_GRACE_SECONDS:
+        real = spelled.resolve(strict=True)
+        if real != spelled or not real.is_file():  # a symbolic link on the way, or not a regular file
             return refused
-        return Checked(ref=f"file:{target.relative_to(workspace).as_posix()}")
-    except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop
+        return Checked(ref=f"file:{real.relative_to(workspace).as_posix()}", identity=_file_identity(real))
+    except (OSError, ValueError, RuntimeError):  # missing, unresolvable, a link loop
         return refused
 
 
@@ -198,8 +223,8 @@ async def check(s: AsyncSession, scope: Scope, raw: Any) -> Checked:
 
 async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeable]:
     """The refs the session's lineage can cite now, at most ``limit`` of each kind: its completed subtasks and DAGs,
-    then its successful recorded calls newest first, then the files under its directory changed since it
-    started (at most ``FILES_LISTED``)."""
+    then its successful recorded calls newest first, then the files under its directory (at most
+    ``FILES_LISTED``)."""
     found: list[Citeable] = []
     for kind in ("subtask", "dag"):
         table, where = _TABLES[kind]
@@ -219,14 +244,15 @@ async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeabl
 
 
 def _files(scope: Scope) -> list[Citeable]:
-    """Files under the root's directory changed since the session started, at most ``FILES_LISTED`` of the first
-    ``FILES_SCANNED`` entries."""
+    """Files under the root's directory (each once, however many names it has), at most ``FILES_LISTED`` of the
+    first ``FILES_SCANNED`` entries."""
     try:
         workspace = Path(scope.workspace_dir).resolve()
         root_dir = workspace / "intentions" / str(scope.root_id)
         if not root_dir.is_dir():
             return []
         listed: list[Citeable] = []
+        seen: set[str | None] = set()
         scanned = 0
         for base, _dirs, names in os.walk(root_dir):
             for name in sorted(names):
@@ -234,7 +260,8 @@ def _files(scope: Scope) -> list[Citeable]:
                 if scanned > FILES_SCANNED:
                     return listed
                 checked = _check_file(scope, name, str(Path(base, name)))
-                if checked.ref is not None:
+                if checked.ref is not None and checked.identity not in seen:
+                    seen.add(checked.identity)
                     listed.append(Citeable(checked.ref, "a file this work wrote"))
                 if len(listed) >= FILES_LISTED:
                     return listed
