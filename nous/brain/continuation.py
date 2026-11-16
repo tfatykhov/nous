@@ -328,7 +328,7 @@ async def insert_report(
     Keyed to ``channel`` (never NULL: section 4.3 item 4); its ``source_id`` is
     ``report_id`` (a fresh uuid unless the caller needs the write to be
     idempotent) and its generation 0. Returns ``report_id``. ``root_id`` is for
-    the log only: the table has no root column (contract C2).
+    the log and the goals' REPORT channel (``set_goal_report_channel``): the table has no root column (contract C2).
     """
     if kind not in REPORT_KINDS:
         raise ValueError(f"an owner-facing row is one of {REPORT_KINDS}, not {kind!r}")
