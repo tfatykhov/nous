@@ -52,11 +52,11 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 
+from nous.api.safe_fetch import is_public_address as _is_public
 from nous.mcp_client.bridge import ServerErrorReply
 from nous.mcp_client.config import BlockedAddress, url_problem
 
 _METADATA_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")})
-_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 # The SDK's own defaults: 30 s for a request, 5 minutes between events of a server-sent stream.
 _HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
 DEFAULT_MAX_RESPONSE_BYTES = 2_000_000  # NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES's default
@@ -111,24 +111,13 @@ for _logger_name in ("mcp.client.streamable_http", "client", ""):
 
 
 def is_public_address(ip: str) -> bool:
-    """Whether ``ip`` is a public unicast address. An IPv4 address carried inside IPv6 (mapped, 6to4, NAT64) is
-    judged as that IPv4 address; anything that does not parse is not public."""
+    """Whether ``ip`` is a public unicast address, by the rule web_fetch uses (``safe_fetch.is_public_address``);
+    anything that does not parse is not public."""
     try:
-        addr: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip)
+        addr = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    if isinstance(addr, ipaddress.IPv6Address):
-        if addr in _METADATA_ADDRESSES:
-            return False
-        if addr.ipv4_mapped is not None:
-            addr = addr.ipv4_mapped
-        elif addr.sixtofour is not None:
-            addr = addr.sixtofour
-        elif addr in _NAT64:
-            addr = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
-    if addr in _METADATA_ADDRESSES:
-        return False
-    return addr.is_global and not (addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+    return _is_public(addr) and addr not in _METADATA_ADDRESSES
 
 
 async def _resolve(host: str, port: int) -> list[str]:

@@ -27,6 +27,8 @@ from collections.abc import Callable
 from typing import Any, NoReturn, Protocol
 from urllib.parse import urlsplit
 
+from nous.api.safe_fetch import is_public_address
+
 logger = logging.getLogger(__name__)
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -47,12 +49,12 @@ _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
 def _permitted_address(host: str, address: IPAddress) -> bool:
-    """The address rule: only globally routable unicast addresses (`is_global` alone admits multicast).
+    """The address rule: only public unicast addresses (`safe_fetch.is_public_address`), and no NAT64 address.
     Tests replace this function to reach a local server; no setting, tool argument or environment variable
     can change it."""
     if isinstance(address, ipaddress.IPv6Address) and address in _NAT64:
         return False  # a NAT64 gateway would turn it into any IPv4 address, private ones included
-    return address.is_global and not address.is_multicast
+    return is_public_address(address)
 
 
 def address_permitted(host: str, address: IPAddress) -> bool:

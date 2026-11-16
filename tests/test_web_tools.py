@@ -6,6 +6,7 @@ Imports from nous.api.web_tools are done inline to tolerate the file being
 written in parallel.
 """
 
+import contextlib
 import importlib
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from fetch_support import patched_fetch_client
 from nous.api.tools import ToolDispatcher
 from nous.config import Settings
 
@@ -66,6 +68,22 @@ def _mock_http_client(response: MagicMock | None = None) -> AsyncMock:
     return client
 
 
+@contextlib.contextmanager
+def _serve(*, status: int = 200, text: str = "", headers: dict | None = None, raises: Exception | None = None):
+    """Fetch clients talk to a mock transport, and every name resolves to one public address.
+
+    Yields the list of requests the transport saw.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if raises is not None:
+            raise raises
+        return httpx.Response(status, headers=headers or {}, text=text)
+
+    with patch("nous.api.safe_fetch._resolve_host", return_value=["93.184.216.34"]), patched_fetch_client(handler) as log:
+        yield log.requests
+
+
 def _brave_search_response(results: list[dict] | None = None) -> dict:
     """Build a Brave Search API response payload."""
     if results is None:
@@ -116,15 +134,15 @@ class TestIsUrlSafe:
         mock_dns.return_value = [(2, 1, 6, "", ("127.0.0.1", 0))]
         safe, error = self._is_url_safe("http://127.0.0.1/secret")
         assert safe is False
-        assert "blocked" in error.lower() or "127" in error
+        assert "public internet address" in error and "127" not in error
 
     @patch("socket.getaddrinfo")
     def test_blocks_metadata_ip(self, mock_dns):
         """169.254.169.254 (cloud metadata) is blocked."""
         mock_dns.return_value = [(2, 1, 6, "", ("169.254.169.254", 0))]
-        safe, error = self._is_url_safe("http://169.254.169.254/latest/meta-data/")
+        safe, error = self._is_url_safe("http://169.254.169.254/page")
         assert safe is False
-        assert "blocked" in error.lower()
+        assert "public internet address" in error and "169" not in error
 
     @patch("socket.getaddrinfo")
     def test_blocks_ipv6_loopback(self, mock_dns):
@@ -426,15 +444,9 @@ class TestWebFetch:
         wt = _import_web_tools()
         settings = _make_settings()
         html = "<html><body><h1>Hello World</h1><p>This is content.</p></body></html>"
-        response = _mock_response(
-            status_code=200,
-            text=html,
-            headers={"content-type": "text/html; charset=utf-8"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com", _settings=settings, _http=client)
+        with _serve(text=html, headers={"content-type": "text/html; charset=utf-8"}):
+            result = await wt._web_fetch("https://example.com", _settings=settings)
 
         text = _extract_text(result)
         assert "Hello World" in text
@@ -446,14 +458,9 @@ class TestWebFetch:
         """Binary content type (image/png) is rejected with error."""
         wt = _import_web_tools()
         settings = _make_settings()
-        response = _mock_response(
-            status_code=200,
-            headers={"content-type": "image/png"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com/image.png", _settings=settings, _http=client)
+        with _serve(headers={"content-type": "image/png"}):
+            result = await wt._web_fetch("https://example.com/image.png", _settings=settings)
 
         text = _extract_text(result)
         assert "binary" in text.lower() or "Cannot extract" in text
@@ -464,31 +471,23 @@ class TestWebFetch:
         """SSRF URL (localhost) is blocked before any HTTP request."""
         wt = _import_web_tools()
         settings = _make_settings()
-        client = _mock_http_client()
 
-        with patch.object(wt, "_is_url_safe", return_value=(False, "Blocked hostname: localhost")):
-            result = await wt._web_fetch("http://localhost/admin", _settings=settings, _http=client)
+        with _serve() as seen:
+            result = await wt._web_fetch("http://localhost/admin", _settings=settings)
 
         text = _extract_text(result)
         assert "Blocked" in text
         # Should NOT have made any HTTP request
-        client.get.assert_not_called()
+        assert seen == []
 
     @pytest.mark.asyncio
     async def test_content_truncated_at_max_chars(self):
         """Content exceeding max_chars is truncated with marker."""
         wt = _import_web_tools()
         settings = _make_settings(web_fetch_max_chars=100)
-        long_text = "A" * 500
-        response = _mock_response(
-            status_code=200,
-            text=long_text,
-            headers={"content-type": "text/plain"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com/long", max_chars=100, _settings=settings, _http=client)
+        with _serve(text="A" * 500, headers={"content-type": "text/plain"}):
+            result = await wt._web_fetch("https://example.com/long", max_chars=100, _settings=settings)
 
         text = _extract_text(result)
         assert "truncated" in text.lower()
@@ -498,28 +497,26 @@ class TestWebFetch:
         """httpx.TimeoutException returns friendly message."""
         wt = _import_web_tools()
         settings = _make_settings()
-        client = _mock_http_client()
-        client.get.side_effect = httpx.TimeoutException("Read timed out")
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://slow.example.com", _settings=settings, _http=client)
+        with _serve(raises=httpx.ReadTimeout("Read timed out")):
+            result = await wt._web_fetch("https://slow.example.com", _settings=settings)
 
         text = _extract_text(result)
-        assert "timed out" in text.lower()
+        assert text == "Fetch timed out for: https://slow.example.com"
 
     @pytest.mark.asyncio
     async def test_invalid_url_scheme_rejected(self):
         """Non-http/https URL scheme is rejected."""
         wt = _import_web_tools()
         settings = _make_settings()
-        client = _mock_http_client()
 
-        result = await wt._web_fetch("ftp://example.com/file", _settings=settings, _http=client)
+        with _serve() as seen:
+            result = await wt._web_fetch("ftp://example.com/file", _settings=settings)
 
         text = _extract_text(result)
         assert "http" in text.lower()
         # Should NOT have made any HTTP request
-        client.get.assert_not_called()
+        assert seen == []
 
     @pytest.mark.asyncio
     async def test_json_content_type_allowed(self):
@@ -527,15 +524,9 @@ class TestWebFetch:
         wt = _import_web_tools()
         settings = _make_settings()
         json_text = '{"key": "value", "items": [1, 2, 3]}'
-        response = _mock_response(
-            status_code=200,
-            text=json_text,
-            headers={"content-type": "application/json"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://api.example.com/data", _settings=settings, _http=client)
+        with _serve(text=json_text, headers={"content-type": "application/json"}):
+            result = await wt._web_fetch("https://api.example.com/data", _settings=settings)
 
         text = _extract_text(result)
         assert '"key"' in text or "key" in text
@@ -546,15 +537,9 @@ class TestWebFetch:
         """Response is in MCP format."""
         wt = _import_web_tools()
         settings = _make_settings()
-        response = _mock_response(
-            status_code=200,
-            text="Hello",
-            headers={"content-type": "text/plain"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com", _settings=settings, _http=client)
+        with _serve(text="Hello", headers={"content-type": "text/plain"}):
+            result = await wt._web_fetch("https://example.com", _settings=settings)
 
         assert "content" in result
         assert isinstance(result["content"], list)
@@ -565,31 +550,21 @@ class TestWebFetch:
         """httpx.ConnectError returns friendly message."""
         wt = _import_web_tools()
         settings = _make_settings()
-        client = _mock_http_client()
-        client.get.side_effect = httpx.ConnectError("Connection refused")
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://down.example.com", _settings=settings, _http=client)
+        with _serve(raises=httpx.ConnectError("Connection refused")):
+            result = await wt._web_fetch("https://down.example.com", _settings=settings)
 
         text = _extract_text(result)
-        assert "connect" in text.lower() or "Could not" in text
+        assert text == "Could not connect to https://down.example.com"
 
     @pytest.mark.asyncio
     async def test_max_chars_capped_at_hard_ceiling(self):
         """max_chars parameter is capped at the 200K hard ceiling (F069 bumped 50K -> 200K)."""
         wt = _import_web_tools()
         settings = _make_settings(web_fetch_max_chars=300000)
-        # Content just over the 200K ceiling
-        long_text = "B" * 210000
-        response = _mock_response(
-            status_code=200,
-            text=long_text,
-            headers={"content-type": "text/plain"},
-        )
-        client = _mock_http_client(response)
 
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com/huge", max_chars=300000, _settings=settings, _http=client)
+        with _serve(text="B" * 210000, headers={"content-type": "text/plain"}):
+            result = await wt._web_fetch("https://example.com/huge", max_chars=300000, _settings=settings)
 
         text = _extract_text(result)
         assert "truncated" in text.lower()
@@ -741,16 +716,9 @@ class TestRegisterWebTools:
         wt = _import_web_tools()
         dispatcher = ToolDispatcher()
         settings = _make_settings()
-        response = _mock_response(
-            status_code=200,
-            text="Page content here",
-            headers={"content-type": "text/plain"},
-        )
-        client = _mock_http_client(response)
+        wt.register_web_tools(dispatcher, settings, _mock_http_client())
 
-        wt.register_web_tools(dispatcher, settings, client)
-
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
+        with _serve(text="Page content here", headers={"content-type": "text/plain"}):
             result_text, is_error = await dispatcher.dispatch("web_fetch", {"url": "https://example.com"})
 
         assert is_error is False

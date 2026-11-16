@@ -48,7 +48,10 @@ class PushManager(private val context: Context, private val settings: Settings, 
 
     /** Fetch `/a2ui/push/config` (404 == disabled) and cache validated options; then register. */
     suspend fun refreshConfig() {
+        val asked = settings.baseUrl
         val res = try { http.get("/a2ui/push/config") } catch (_: Exception) { status = "server unreachable"; return }
+        // Disconnected, or connected elsewhere, while the request waited: these options are not for this phone's server.
+        if (!settings.configured || settings.baseUrl != asked) return
         if (res.status == 404) { status = "push unavailable (server has no push)"; return }
         if (!res.ok) { status = "push config HTTP ${res.status}"; return }
         val o = runCatching { Json.parseToJsonElement(res.body).jsonObject }.getOrNull() ?: return
@@ -67,6 +70,12 @@ class PushManager(private val context: Context, private val settings: Settings, 
         WorkManager.getInstance(context).enqueueUniqueWork(
             "push-token", ExistingWorkPolicy.REPLACE, OneTimeWorkRequestBuilder<TokenWorker>().build(),
         )
+    }
+
+    /** Drop a registration that has not run yet (Disconnect). The same condition as [registerIfPossible] enqueued it under. */
+    fun cancelRegistration() {
+        if (settings.firebaseOptions == null) return
+        WorkManager.getInstance(context).cancelUniqueWork("push-token")
     }
 
     fun notificationsEnabled(): Boolean {

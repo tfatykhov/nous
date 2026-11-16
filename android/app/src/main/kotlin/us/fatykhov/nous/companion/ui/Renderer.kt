@@ -60,7 +60,7 @@ fun FallbackCard(component: String) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(buildString { append(component); append(" isn't supported in the Android beta yet.") }, color = t.text, fontSize = 14.sp)
-        TextButton(onClick = { UrlOpener.open(host.graph.appContext, host.graph.settings.baseUrl + "/companion/a/" + java.net.URLEncoder.encode(host.surfaceId, "UTF-8")) }) {
+        TextButton(onClick = { UrlOpener.open(host.graph.appContext, host.graph.webBaseUrl() + "/companion/a/" + java.net.URLEncoder.encode(host.surfaceId, "UTF-8")) }) {
             Text("Open in web", color = t.accent, fontWeight = FontWeight.SemiBold)
         }
     }

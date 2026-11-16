@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 
 from nous import cancel_provenance
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
-from nous.api.owner_guard import json_media_type
+from nous.api.owner_guard import DEVICE_TOKEN_REJECTED, DEVICE_TOKEN_REJECTED_CODE, DEVICE_TOKEN_TEXT, json_media_type
 from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -52,6 +52,11 @@ EXPIRED_UNANSWERED_ACTIONS = frozenset({EXPIRED_UNANSWERED, "no_objection"})
 # What a verb registered with owner_proof=True answers (403) when the request did not prove the owner. A client shows
 # the message as it is.
 OWNER_PROOF_TEXT = "This action needs the owner's sign-in. Use the web companion through the login page."
+
+# The action limiter: a 60-second window per caller (owner, proxy, device:<id>, anonymous) of
+# a2ui_action_rate_per_minute, and one window for the whole process of this many times that.
+RATE_CEILING_FACTOR = 4
+RATE_WINDOW_SECONDS = 60.0
 
 
 def is_expired_unanswered(action_name: str | None) -> bool:
@@ -151,8 +156,13 @@ class ActionRouter:
         # read-only; the F092.1 micro-app pair is mutating (see
         # _FunctionMeta) and additionally audited + self-locked.
         self._functions: dict[str, _FunctionMeta] = {}
+        # The action limiter: one window per caller key and one for the process (the ceiling). Keys come from the
+        # route's caller (OwnerGuard.resolve): owner, proxy, device:<id> or anonymous, so the dict stays small, and
+        # an empty window is dropped.
+        self._windows: dict[str, list[float]] = {}
         self._recent: list[float] = []
         self._rate_lock = asyncio.Lock()
+        self._clock: Callable[[], float] = time.monotonic
         # F092.2: strong refs to agent-action watcher tasks — asyncio holds
         # only weak refs to tasks (the context_logger.py:345 lesson), so
         # without this set a watcher can be garbage-collected mid-poll and
@@ -192,7 +202,9 @@ class ActionRouter:
 
     # ------------------------------------------------------------- functions
 
-    async def handle_call(self, body: dict, *, content_type: str, actor: str = "unattributed") -> tuple[int, dict]:
+    async def handle_call(
+        self, body: dict, *, content_type: str, actor: str = "unattributed", caller: str = "anonymous"
+    ) -> tuple[int, dict]:
         """POST /a2ui/call — renderer-initiated agent function (spec pattern 1).
 
         Returns (status, agentFunctionResponse envelope). Most functions
@@ -200,6 +212,8 @@ class ActionRouter:
         (app.refine / app.refresh) is registered ``mutating=True`` — those
         calls write an audit row, censor their new content before pushing
         it, and self-lock their surface writes.
+
+        ``caller`` is the window of the action limiter the call takes its one slot in.
         """
         if not json_media_type(content_type):
             return 415, _fn_err("", "INVALID_FUNCTION_CALL", "Content-Type must be application/json")
@@ -233,7 +247,7 @@ class ActionRouter:
         if nonce != surface.nonce:
             return 403, _fn_err(function_call_id, "INVALID_FUNCTION_CALL", "surface nonce missing or stale")
 
-        if not await self._rate_ok():
+        if not await self._rate_ok(caller):
             return 429, _fn_err(function_call_id, "RATE_LIMITED", "too many calls; slow down")
 
         meta = self._functions.get(name)
@@ -290,6 +304,8 @@ class ActionRouter:
         content_type: str,
         actor: str = "unattributed",
         owner_verified: bool = False,
+        caller: str = "anonymous",
+        proof_refusal: str | None = None,
     ) -> tuple[int, dict]:
         """Returns (http_status, response_body).
 
@@ -299,8 +315,13 @@ class ActionRouter:
         forged action would otherwise corrupt the evidence tier).
 
         ``owner_verified`` is the route's word that the request proved the
-        owner (``OwnerGuard.grants``); a verb registered with
-        ``owner_proof=True`` is refused without it.
+        owner or is a paired device (``OwnerGuard.resolve``); a verb
+        registered with ``owner_proof=True`` is refused without it, with
+        ``DEVICE_TOKEN_REJECTED`` when ``proof_refusal`` says the device token
+        it sent is held by no live device, else ``OWNER_PROOF_REQUIRED``.
+
+        ``caller`` is the window of the action limiter the action takes its
+        one slot in (the route takes none).
         """
         # Content-Type is the CSRF control here: no CORS middleware exists and
         # Request.json() never checks it, but a cross-origin simple request
@@ -327,7 +348,15 @@ class ActionRouter:
         # status re-read inside the lock turns the loser into a 404).
         async with self._service.surface_lock(surface_id):
             return await self._handle_locked(
-                surface_id, name, context, data_model, action, actor, owner_verified=owner_verified
+                surface_id,
+                name,
+                context,
+                data_model,
+                action,
+                actor,
+                owner_verified=owner_verified,
+                caller=caller,
+                proof_refusal=proof_refusal,
             )
 
     async def _handle_locked(
@@ -340,6 +369,8 @@ class ActionRouter:
         actor: str,
         *,
         owner_verified: bool = False,
+        caller: str = "anonymous",
+        proof_refusal: str | None = None,
     ) -> tuple[int, dict]:
         # Status is read INSIDE the surface lock — a terminal action that
         # just resolved this surface makes the second request 404 here.
@@ -362,7 +393,7 @@ class ActionRouter:
         # row, so a hostile client replaying bad names/nonces at a live
         # surface id could otherwise grow the audit table without bound —
         # the limiter must gate the audited paths, not just the handlers.
-        if not await self._rate_ok():
+        if not await self._rate_ok(caller):
             return 429, _err("RATE_LIMITED", surface_id, "too many actions; slow down")
 
         async def reject(status: int, code: str, message: str) -> tuple[int, dict]:
@@ -403,6 +434,8 @@ class ActionRouter:
 
         # After the allowlist and the nonce (a stale or foreign card is told what it always was), before the censor.
         if meta.owner_proof and not owner_verified:
+            if proof_refusal == DEVICE_TOKEN_REJECTED:
+                return await reject(403, DEVICE_TOKEN_REJECTED_CODE, DEVICE_TOKEN_TEXT)
             return await reject(403, "OWNER_PROOF_REQUIRED", OWNER_PROOF_TEXT)
 
         if meta.mutating and self._heart is not None:
@@ -489,14 +522,29 @@ class ActionRouter:
 
     # -------------------------------------------------------------- plumbing
 
-    async def _rate_ok(self) -> bool:
+    async def _rate_ok(self, caller: str = "anonymous") -> bool:
+        """Take one slot for ``caller``: allowed when its own window holds fewer than ``a2ui_action_rate_per_minute``
+        and the process's fewer than ``RATE_CEILING_FACTOR`` times that. A refusal takes no slot."""
         async with self._rate_lock:
-            now = time.monotonic()
-            self._recent = [t for t in self._recent if now - t < 60.0]
-            if len(self._recent) >= self._settings.a2ui_action_rate_per_minute:
+            now = self._clock()
+            for key in list(self._windows):
+                kept = [t for t in self._windows[key] if now - t < RATE_WINDOW_SECONDS]
+                if kept:
+                    self._windows[key] = kept
+                else:
+                    del self._windows[key]
+            self._recent = [t for t in self._recent if now - t < RATE_WINDOW_SECONDS]
+            limit = self._settings.a2ui_action_rate_per_minute
+            own = self._windows.get(caller, [])
+            if len(own) >= limit or len(self._recent) >= RATE_CEILING_FACTOR * limit:
                 return False
+            self._windows[caller] = [*own, now]
             self._recent.append(now)
             return True
+
+    def forget_caller(self, caller: str) -> None:
+        """Drop ``caller``'s window (a revoked device's)."""
+        self._windows.pop(caller, None)
 
     async def _audit(
         self,
