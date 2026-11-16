@@ -3,7 +3,7 @@
   import { Button } from '../../lib/ui/button';
   import { fmtUtc } from '../../lib/harness';
   import {
-    ACTION_TEXT, DRIVER_OFF_TEXT, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
+    ACTION_TEXT, DRIVER_OFF_TEXT, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
     deadlineProblem, typedNumber,
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
@@ -56,16 +56,13 @@
     });
   });
 
-  /** A change whose answer was lost, and the goal as it was before it: once a later read shows the goal's state or
-   * newest journal row changed, the change landed, and its usual result line replaces "No answer came back". */
-  type Lost = { action: Action; state: string; top: number; text?: string };
-  let lost = $state<Lost | null>(null);
-  const newestRow = () => goal.journal[0]?.seq ?? 0;
+  /** A change whose answer was lost: once a later read shows evidence of that very change (`changeLanded`), its usual
+   * result line replaces "No answer came back". Any other change of the goal leaves the sentence in place. */
+  let lost = $state<LostChange | null>(null);
   $effect(() => {
     const was = lost;
+    if (!was || !changeLanded(was, goal)) return;
     const state = goal.state;
-    const top = newestRow();
-    if (!was || (state === was.state && top === was.top)) return;
     untrack(() => {
       lost = null;
       if (was.action === 'note') {
@@ -123,7 +120,8 @@
     // The goal's ids are read now: after the awaits below, this pane may show another answer or none.
     const ref = goal.ref;
     const opener = `goal-a.${ref}.${action}`;
-    const before = { state: goal.state, top: newestRow() };
+    const before = beforeChange(goal);
+    const at = Date.now();
     busy = action;
     confirming = null;
     result = null;
@@ -140,7 +138,7 @@
     await onChanged();
     busy = null;
     result = outcome;
-    if (unanswered) lost = { action, ...before };
+    if (unanswered) lost = { action, at, before, ...(body as { total?: number; day?: number; days?: number } | undefined) };
     await tick();
     (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }
@@ -164,7 +162,8 @@
     lost = null;
     const ref = goal.ref;
     const sent = noteText;
-    const before = { state: goal.state, top: newestRow() };
+    const before = beforeChange(goal);
+    const at = Date.now();
     let outcome: Note;
     let unanswered = false;
     try {
@@ -178,7 +177,7 @@
     await onChanged();
     busy = null;
     noteResult = outcome;
-    if (unanswered) lost = { action: 'note', text: sent, ...before };
+    if (unanswered) lost = { action: 'note', at, before, text: sent };
   }
 
   const YES: Record<Action, string> = {

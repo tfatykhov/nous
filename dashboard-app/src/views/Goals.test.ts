@@ -798,6 +798,55 @@ describe('Goals: the follow-ups', () => {
 describe('Goals: a lost answer', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('of a note stays when only an unrelated row or another note appears, and the typed note stays', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['POST /goals/G-0001/note'] = () => {
+      // never reached the server: what appears instead is a session's report and an older note's twin
+      details['G-0001'] = { ...details['G-0001'], journal: [
+        { seq: 98, session_n: 2, kind: 'report', actor: 'chain', text: 'Landed after all', evidence: [], created_at: A.updated_at },
+        { seq: 97, session_n: null, kind: 'owner_note', actor: 'owner', text: 'Something else', evidence: [], created_at: A.updated_at },
+        ...A.journal,
+      ] };
+      return [HANG, null];
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const box = within(region).getByLabelText('A note for the next session') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Landed after all' } });
+    await fireEvent.click(within(region).getByRole('button', { name: 'Add note' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
+    expect(within(region).queryByText('Added. The next session reads it.')).toBeNull();
+    expect(box.value).toBe('Landed after all');
+  });
+
+  it('of a pause stays when the goal changes in another way, or is paused for another reason', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['POST /goals/G-0001/pause'] = () => {
+      // never reached the server: the goal spends and journals on its own
+      details['G-0001'] = { ...details['G-0001'], spent_today: 99_000, journal: [
+        { seq: 98, session_n: 2, kind: 'progress', actor: 'chain', text: 'Merged two notes.', evidence: [], created_at: A.updated_at },
+        ...A.journal,
+      ] };
+      return [HANG, null];
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Pause' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
+    expect(within(region).queryByText('Paused: no new session starts. A session already running finishes.')).toBeNull();
+    // the harness pauses it for an error: a paused goal, but not the owner's pause
+    details['G-0001'] = { ...details['G-0001'], state: 'paused', pause_reason: 'error', actions: ['resume', 'cancel'] };
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.waitFor(() => expect(within(region).getByText('Paused after an error')).toBeTruthy());
+    expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
+    expect(within(region).queryByText('Paused: no new session starts. A session already running finishes.')).toBeNull();
+  });
+
   it('is replaced by the usual result once a read shows the change landed', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     handlers['POST /goals/G-0001/pause'] = () => {
