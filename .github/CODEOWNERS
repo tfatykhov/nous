@@ -54,6 +54,9 @@
 # The owner's limits of background work and the tools background work may use (F115)
 /nous/autonomy/** @tfatykhov
 /nous/api/autonomy_routes.py @tfatykhov
+# The tools the owner allowed one goal to use without asking: which turns they reach, and the screen's words
+/nous/goals/grants.py @tfatykhov
+/tests/test_goal_tool_grants*.py @tfatykhov
 
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
