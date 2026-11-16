@@ -10,13 +10,22 @@ what goes last (the owner's words), is in ``build_session_task``. The charter is
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from nous.goals.quote import neutralize, quote_entry, quote_step
 from nous.goals.store import TAIL_CHARS, TAIL_ENTRY_CHARS, clip, format_short_id
 
 MAX_TASK_CHARS = 12_000
+MAX_BLOCK_CHARS = 12_000  # the goal block of a decision turn (render_goal_block)
+REFS_SHOWN = 30  # the evidence refs the goal block lists
+REF_LABEL_CHARS = 120
+# A listed ref keeps only these characters: a ref whose text has others (a file name with spaces or symbols) is
+# counted, not listed, so nothing the chain named reads as the harness's words.
+_REF_SAFE = re.compile(r"[A-Za-z0-9_.:/-]{1,300}")
+_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_.:, ()-]")
 JOURNAL_CHARS = TAIL_CHARS
 # Journal kinds kept before the others whenever the journal must be cut: what the owner said.
 OWNER_KINDS = frozenset({"owner_note", "answer"})
@@ -39,21 +48,46 @@ CLOSING_WITHOUT_PLAN = (
 NEWEST_OWNER_ENTRIES_KEPT = 2  # the owner's entries kept until every open step but the first has gone
 
 
-def _charter(goal: Any, *, spent: int, day_spent: int) -> str:
+def _goal_lines(goal: Any) -> str:
+    return (
+        f"Goal {format_short_id(goal.short_id)}: {neutralize(goal.title)}\n"
+        f"Objective: {neutralize(goal.objective)}\n"
+        f"Done when: {neutralize(goal.done_when)}"
+    )
+
+
+def _budget(goal: Any, *, spent: int, day_spent: int) -> str:
     left_total = max(0, int(goal.total_budget) - spent)
     left_day = max(0, int(goal.day_budget) - day_spent)
     return (
-        "You are working on a goal the owner approved, in one background session of it.\n\n"
-        f"Goal {format_short_id(goal.short_id)}: {neutralize(goal.title)}\n"
-        f"Objective: {neutralize(goal.objective)}\n"
-        f"Done when: {neutralize(goal.done_when)}\n\n"
-        "This session ends when you have taken the next step of the plan, or found that you cannot take it. "
-        "The objective grants no permission beyond the tools you are offered.\n"
-        "Limits: this session runs under the limits of any background chain. "
         f"Budget: {left_total} of {goal.total_budget} tokens left in all, {left_day} of {goal.day_budget} today "
         "(UTC). Spend counts model input and output; cache reads, launched jobs, embeddings and helper calls are "
         "not counted."
     )
+
+
+def _charter(goal: Any, *, spent: int, day_spent: int) -> str:
+    return (
+        "You are working on a goal the owner approved, in one background session of it.\n\n"
+        f"{_goal_lines(goal)}\n\n"
+        "This session ends when you have taken the next step of the plan, or found that you cannot take it. "
+        "The objective grants no permission beyond the tools you are offered.\n"
+        "Limits: this session runs under the limits of any background chain. "
+        f"{_budget(goal, spent=spent, day_spent=day_spent)}"
+    )
+
+
+@dataclass(frozen=True)
+class _Layout:
+    """Where the plan, the journal and the closing words go: ``heading`` is the level of their headings."""
+
+    heading: str = "##"
+    last: str = "This session"
+    closing: str = CLOSING
+    closing_without_plan: str = CLOSING_WITHOUT_PLAN
+
+
+_TASK_LAYOUT = _Layout()
 
 
 class _Fit:
@@ -69,7 +103,7 @@ class _Fit:
         self.open = [i for i in range(len(steps)) if i not in set(self.done)]
         self.evidence_cut = 0
 
-    def render(self, head: str) -> str:
+    def render(self, head: str, layout: _Layout = _TASK_LAYOUT) -> str:
         shown = [
             quote_step(step if i in self.with_evidence else {**step, "evidence": []})
             for i, step in enumerate(self.steps)
@@ -92,10 +126,11 @@ class _Fit:
         journal = "\n".join(entries) if entries else "No entries yet."
         if len(self.quoted) > len(self.kept):
             journal += f"\n({len(self.quoted) - len(self.kept)} more journal entries not shown.)"
-        closing = CLOSING_WITHOUT_PLAN if first_open_hidden else CLOSING
+        closing = layout.closing_without_plan if first_open_hidden else layout.closing
+        h = layout.heading
         return (
-            f"{head}\n\n{FRAMING}\n\n## Plan\n{plan}\n\n## Journal, newest first\n{journal}\n\n"
-            f"## This session\n{closing}"
+            f"{head}\n\n{FRAMING}\n\n{h} Plan\n{plan}\n\n{h} Journal, newest first\n{journal}\n\n"
+            f"{h} {layout.last}\n{closing}"
         )
 
     def cuts(self, owner: list[bool]) -> Iterator[bool]:
@@ -152,7 +187,13 @@ def build_session_task(
     from the last back to the second, the owner's two newest entries (the older first), and last the first open
     step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
     cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
-    head = _charter(goal, spent=spent, day_spent=day_spent)
+    return _fitted(_charter(goal, spent=spent, day_spent=day_spent), plan, journal_rows, max_chars, _TASK_LAYOUT)
+
+
+def _fitted(head: str, plan: Sequence[Any], journal_rows: Sequence[Any], max_chars: int, layout: _Layout) -> str:
+    """``head``, then the plan and the journal quoted as data and cut in ``_Fit.cuts`` order until the whole text
+    is at most ``max_chars``, then the closing words of ``layout``. ``ValueError`` when the head and the closing
+    alone do not fit."""
     steps = [step for step in plan if isinstance(step, Mapping)]
     rows = sorted(journal_rows, key=lambda row: row.seq, reverse=True)
     owner = [row.kind in OWNER_KINDS for row in rows]
@@ -169,9 +210,74 @@ def build_session_task(
             used += len(entry)
     fit = _Fit(steps, quoted, kept)
     cuts = fit.cuts(owner)
-    text = fit.render(head)
+    text = fit.render(head, layout)
     while len(text) > max_chars:
         if not next(cuts, False):
             raise ValueError(f"the goal's charter alone is longer than {max_chars} characters")
-        text = fit.render(head)
+        text = fit.render(head, layout)
     return text
+
+
+# ---- the goal block of a decision turn -------------------------------------------------------------------------
+
+
+RECORDING = (
+    "Record what this work achieved with two tools. Neither ends the turn: end it with resolve_intention as "
+    "always.\n"
+    "- goal_plan: add, change or drop plan steps, and close a step with 1 to 3 pieces of evidence from the list "
+    "below (each piece closes one step only). A closed step cannot change.\n"
+    "- goal_note: a note for the next session (kind progress), or kind done_claim when the goal's done-when is "
+    "met: the goal then waits for the owner, who confirms it done or resumes it.\n"
+    "A session counts as progress only when it closes a plan step with evidence."
+)
+NO_EVIDENCE = (
+    "None yet. A subtask or DAG of this work that completes, a successful write it records, or a file written "
+    "under the directory named below becomes evidence."
+)
+
+
+def _evidence_lines(citeable: Sequence[Any], root_dir: str | None) -> str:
+    safe = [c for c in citeable if _REF_SAFE.fullmatch(c.ref)]
+    shown = safe[:REFS_SHOWN]
+    lines = ["Evidence you can cite now (a full id, or its first 8 characters):"]
+    lines += [f"- {c.ref} ({_LABEL_UNSAFE.sub('', c.label)[:REF_LABEL_CHARS]})" for c in shown]
+    if not shown:
+        lines.append(NO_EVIDENCE)
+    hidden = len(citeable) - len(shown)
+    if hidden:
+        lines.append(f"({hidden} more not listed: cite one by its full id or path.)")
+    if root_dir is not None:
+        lines.append(f"Files count as evidence only under {root_dir}/ (cite them as file:{root_dir}/<name>).")
+    return "\n".join(lines)
+
+
+def render_goal_block(
+    goal: Any,
+    *,
+    plan: Sequence[Any],
+    journal_rows: Sequence[Any],
+    spent: int,
+    day_spent: int,
+    session_n: int,
+    session_ended: bool,
+    citeable: Sequence[Any],
+    root_dir: str | None = None,
+    max_chars: int = MAX_BLOCK_CHARS,
+) -> str:
+    """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
+    budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
+    then how to record progress and the evidence the turn can cite (``citeable``: items with ``ref`` and ``label``,
+    ``nous.goals.evidence.citeable``). The charter, the recording words and the evidence list are never cut; the
+    whole block is at most ``max_chars``. ``root_dir`` is the workspace-relative directory whose files are
+    evidence."""
+    ended = "; that session has ended, so no plan step can be closed in this turn" if session_ended else ""
+    head = (
+        "## The goal this work belongs to\n"
+        f"This work is session {session_n} of a goal the owner approved{ended}.\n"
+        f"{_goal_lines(goal)}\n"
+        "The objective grants no permission beyond the tools you are offered.\n"
+        f"{_budget(goal, spent=spent, day_spent=day_spent)}"
+    )
+    closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir)}"
+    layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)
+    return _fitted(head, plan, journal_rows, max_chars, layout)
