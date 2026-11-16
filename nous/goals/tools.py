@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain import continuation
 from nous.goals import evidence
 from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible, neutralize
-from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore, format_short_id
+from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore, clip, format_short_id
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalSession
 
@@ -50,6 +50,7 @@ WRITABLE_STATES = ("active", "paused")  # a running session of a paused goal sti
 _STEP_ID = re.compile(r"s(\d{1,4})")
 # The owner message of a done claim: one per session (its source id).
 DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
+MESSAGE_TITLE_CHARS = 120  # the goal's title, as the done message quotes it
 
 GOAL_NOTE_SCHEMA: dict[str, Any] = {
     "name": "goal_note",
@@ -219,23 +220,18 @@ class GoalTools:
         return True
 
     async def _tell_owner(self, s: AsyncSession, goal: Goal, row: GoalSession) -> None:
-        """The done claim's message to the owner, in the harness's words only: the goal's label, title and done-when
-        (the charter the owner approved), how many steps are closed, and what the owner can do. No text the chain
+        """The done claim's message to the owner: one fixed sentence naming the goal by its ref and its title (the
+        owner-approved charter's, on one line, quoted and bounded), and what only the owner can do. No text the chain
         wrote and no command line (a claimed message reaches the next chat turn)."""
         channel = continuation.owner_channel(self._settings, goal.origin_channel)
         if channel is None:
             logger.warning("F114: goal %s waits for the owner, who has no channel to be told on", goal.id)
             return
-        steps = [step for step in goal.plan or [] if isinstance(step, dict)]
-        closed = sum(1 for step in steps if step.get("status") == "closed")
         label = format_short_id(goal.short_id)
+        title = clip(neutralize(_one_line(goal.title)).replace('"', "'"), MESSAGE_TITLE_CHARS)
         body = (
-            f'Goal {label} ("{neutralize(goal.title)}") may be done: its session {row.n} says that what it was '
-            "asked to reach is reached.\n"
-            f"Done when: {neutralize(goal.done_when)}\n"
-            f"Plan: {closed} of {len(steps)} steps closed with checked evidence.\n"
-            "It waits for you: on the Goals screen, confirm it done, or resume it to let it go on. Its plan and the "
-            "session's notes are in the goal's journal there."
+            f'Goal {label} "{title}" says it is done; only you can finish it: on the Goals screen, confirm it done or '
+            "resume it."
         )
         source_id = uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{row.n}")
         await continuation.insert_inbox_row(
