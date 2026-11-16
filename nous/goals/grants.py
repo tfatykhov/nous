@@ -11,8 +11,10 @@ first failing step wins:
 2. the tool is one a goal may be given (``tool_policy.grant_refusal``);
 3. the view is fresh: fully read within ``max(3 * goals_tick_seconds, MIN_FRESH_SECONDS)`` seconds of the injected
    monotonic clock;
-4. the view holds a grant of the tool for the turn's root. It holds only the roots of OPEN sessions of ACTIVE goals,
-   so a paused, finished or ended one gets nothing;
+4. the view holds a grant of the tool for the turn's root. It holds only the roots of OPEN sessions of ACTIVE goals
+   as last read, so a goal paused or finished, or a session ended, gets nothing once the view has read it again: in
+   the app's process right after the change commits (``GoalToolGrants``' callers), from another process at the next
+   full read;
 5. for an MCP client tool, the tool registered now has the identity the grant was given with (server row, URL digest
    and remote tool name).
 
