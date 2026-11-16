@@ -4123,9 +4123,7 @@ def create_app(
     # their fixed "goals are off" answers.
     goal_store = GoalStore(database, settings.agent_id, settings) if settings.goals_enabled else None
     routes.extend(
-        build_goal_routes(
-            database=database, settings=settings, goals=goal_store, guard=owner_guard, driver=goal_driver
-        )
+        build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard, driver=goal_driver)
     )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
