@@ -32,7 +32,9 @@ function serverList(): DeviceList {
 
 const CODE = 'K7QM-2XRD';
 const NOW_ISO = () => new Date(Date.now()).toISOString();
-const PIXEL = () => deviceRow({ id: 'd-1', name: 'Pixel 7', created_at: '2026-11-12T09:00:00Z', last_seen_at: NOW_ISO() });
+/** This year: a day of another year is printed with its year, so the real-clock fixtures are dated this year. */
+const YEAR = new Date().getUTCFullYear();
+const PIXEL = () => deviceRow({ id: 'd-1', name: 'Pixel 7', created_at: `${YEAR}-11-12T09:00:00Z`, last_seen_at: NOW_ISO() });
 
 beforeEach(() => {
   calls = [];
@@ -102,8 +104,8 @@ describe('Devices: the states', () => {
   it('a live device: its name, when it was paired, when it was last seen, and Revoke; a revoked one below, in words, with no button', async () => {
     listed = deviceList({ devices: [
       PIXEL(),
-      deviceRow({ id: 'd-2', name: 'Old phone', created_at: '2026-10-01T09:00:00Z', last_seen_at: null }),
-      deviceRow({ id: 'd-3', name: 'Lost tablet', created_at: '2026-09-01T09:00:00Z', revoked_at: '2026-11-14T10:00:00Z' }),
+      deviceRow({ id: 'd-2', name: 'Old phone', created_at: `${YEAR}-10-01T09:00:00Z`, last_seen_at: null }),
+      deviceRow({ id: 'd-3', name: 'Lost tablet', created_at: `${YEAR}-09-01T09:00:00Z`, revoked_at: `${YEAR}-11-14T10:00:00Z` }),
     ] });
     const s = await shown();
     const pixel = (await s.findByText('Pixel 7')).closest('li') as HTMLElement;
@@ -132,7 +134,7 @@ describe('Devices: the states', () => {
   });
 
   it('only revoked devices: says none is paired, and lists the revoked ones', async () => {
-    listed = deviceList({ devices: [deviceRow({ name: 'Lost tablet', revoked_at: '2026-11-14T10:00:00Z' })] });
+    listed = deviceList({ devices: [deviceRow({ name: 'Lost tablet', revoked_at: `${YEAR}-11-14T10:00:00Z` })] });
     const s = await shown();
     expect(await s.findByText('No device is paired.')).toBeTruthy();
     expect(s.getByText('Revoked on Nov 14')).toBeTruthy();
@@ -603,7 +605,7 @@ describe('Devices: Revoke', () => {
 
   it('Yes sends a DELETE that says it is JSON, reads the list again, and the device moves to the revoked ones', async () => {
     handlers['DELETE /a2ui/devices/d-1'] = () => {
-      listed = deviceList({ devices: [{ ...PIXEL(), revoked_at: '2026-11-15T10:00:00Z' }] });
+      listed = deviceList({ devices: [{ ...PIXEL(), revoked_at: `${YEAR}-11-15T10:00:00Z` }] });
       return [200, { revoked: true }];
     };
     const s = await shown();
@@ -627,7 +629,7 @@ describe('Devices: Revoke', () => {
     const s = within(await screen.findByRole('region', { name: 'Devices' }));
     await fireEvent.click(await s.findByRole('button', { name: 'Revoke Pixel 7' }));
     s.getByRole('group', { name: 'Confirm revoking Pixel 7' });
-    listed = deviceList({ devices: [{ ...PIXEL(), revoked_at: '2026-11-15T10:00:00Z' }] });
+    listed = deviceList({ devices: [{ ...PIXEL(), revoked_at: `${YEAR}-11-15T10:00:00Z` }] });
     await component.refresh();
     await vi.waitFor(() => expect(s.queryByRole('group', { name: 'Confirm revoking Pixel 7' })).toBeNull());
     expect(changes()).toEqual([]);

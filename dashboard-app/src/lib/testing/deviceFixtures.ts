@@ -10,7 +10,7 @@ export function deviceRow(over: Partial<Device> = {}): Device {
   return {
     id: `00000000-0000-4000-8000-${String(next).padStart(12, '0')}`,
     name: 'Pixel 7',
-    created_at: '2026-11-12T09:00:00Z',
+    created_at: `${new Date().getUTCFullYear()}-11-12T09:00:00Z`, // this year: another year's day is printed with its year
     last_seen_at: null,
     revoked_at: null,
     ...over,

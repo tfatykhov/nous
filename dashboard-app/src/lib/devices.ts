@@ -145,13 +145,15 @@ const DAY_MS = 86_400_000;
 const local = (ms: number) => ms - new Date(ms).getTimezoneOffset() * 60_000;
 const localDay = (ms: number) => Math.floor(local(ms) / DAY_MS);
 
-/** A day in the browser's local time, in fmtDay's words: "Nov 12". */
-export function localDayText(iso: string | null): string {
+/** A day in the browser's local time, in fmtDay's words: "Nov 12", and "Nov 12, 2025" when it is not this year. */
+export function localDayText(iso: string | null, now: number = Date.now()): string {
   if (!iso) return '—';
   const at = new Date(iso).getTime();
   if (Number.isNaN(at)) return '—';
   const d = new Date(local(at));
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  const day = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  const year = d.getUTCFullYear();
+  return year === new Date(local(now)).getUTCFullYear() ? day : `${day}, ${year}`;
 }
 
 /** "today", "yesterday", "3 days ago", by the browser's local day; a time ahead of the clock is today. */
@@ -168,10 +170,10 @@ export function lastSeenWords(iso: string | null, now: number = Date.now()): str
 /** A device's line: "Paired on Nov 12. Last seen today." or "Paired on Nov 12. Not seen yet." */
 export function deviceLine(d: Device, now: number = Date.now()): string {
   const seen = lastSeenWords(d.last_seen_at, now);
-  return `Paired on ${localDayText(d.created_at)}. ${seen ? `Last seen ${seen}.` : 'Not seen yet.'}`;
+  return `Paired on ${localDayText(d.created_at, now)}. ${seen ? `Last seen ${seen}.` : 'Not seen yet.'}`;
 }
 
-export const revokedLine = (d: Device) => `Revoked on ${localDayText(d.revoked_at)}`;
+export const revokedLine = (d: Device, now: number = Date.now()) => `Revoked on ${localDayText(d.revoked_at, now)}`;
 
 /** Which request failed: the list, a new code, or a revoke. */
 export type Doing = 'see' | 'pair' | 'revoke';
