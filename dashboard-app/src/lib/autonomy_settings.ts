@@ -116,7 +116,7 @@ export function typedValue(text: string): number | string {
 
 export const TITLE = 'Limits and tools';
 export const PREFERENCES_TEXT =
-  "These are your preferences, kept with a record of each change. The server's own settings and your provider's spend limit are the limits that hold.";
+  "These are your preferences, kept with a record of each change. The server's own settings always win: they and your provider's spend limit are the limits that hold.";
 export const LIMITS_SUBTITLE = 'How long background work may run and how much a chain may do. A change applies without a restart.';
 export const TOOLS_SUBTITLE =
   'Which tools background work may use. Not allowed takes a tool away from background work: it is not offered there and a call to it is refused. Chat is not affected.';

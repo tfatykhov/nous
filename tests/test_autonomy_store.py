@@ -15,7 +15,15 @@ from sqlalchemy import delete, select, text
 from nous.autonomy import store as store_module
 from nous.autonomy import tool_guard
 from nous.autonomy.registry import LIMITS
-from nous.autonomy.store import AutonomyRefused, AutonomyStore, tool_key
+from nous.autonomy.store import (
+    ASK_NOT_AVAILABLE,
+    GUARD_NOT_AVAILABLE,
+    SCOPE_NOT_AVAILABLE,
+    SETTING_NOT_AVAILABLE,
+    AutonomyRefused,
+    AutonomyStore,
+    tool_key,
+)
 from nous.config import Settings
 from nous.storage.models import AutonomySetting, AutonomySettingLog, ToolGuardRow
 
@@ -351,6 +359,33 @@ async def test_a_tool_switched_off_is_held_at_once_and_back_on_cleared(db, agent
 
 
 @pytest.mark.parametrize(
+    ("kwargs", "sentence"),
+    [
+        ({"setting": "ask"}, ASK_NOT_AVAILABLE),
+        ({"setting": "maybe"}, SETTING_NOT_AVAILABLE),
+        ({"setting": "denied", "scope": "goal_session"}, SCOPE_NOT_AVAILABLE),
+        ({"setting": "allowed", "scope": "goal_session"}, SCOPE_NOT_AVAILABLE),
+        ({"setting": "denied", "destructive_guard": "off"}, GUARD_NOT_AVAILABLE),
+        ({"setting": "denied", "destructive_guard": "common"}, GUARD_NOT_AVAILABLE),
+    ],
+)
+async def test_what_is_not_available_yet_is_refused_with_its_fixed_sentence(db, agent_id, cleanup, kwargs, sentence):
+    settings = _settings(agent_id)
+    store = AutonomyStore(db, settings)
+    await store.load()
+    setting = kwargs.pop("setting")
+    with pytest.raises(AutonomyRefused) as refused:
+        await store.set_tool("web_search", setting, "owner", **kwargs)
+    assert (refused.value.status, str(refused.value)) == (400, sentence)
+    with pytest.raises(AutonomyRefused) as refused:
+        await store.clear_tool("web_search", "owner", scope="goal_session")
+    assert (refused.value.status, str(refused.value)) == (400, SCOPE_NOT_AVAILABLE)
+    assert await _log(db, agent_id) == []
+    async with db.session() as session:
+        assert (await session.execute(select(ToolGuardRow).where(ToolGuardRow.agent_id == agent_id))).first() is None
+
+
+@pytest.mark.parametrize(
     ("tool", "setting", "status", "words"),
     [
         ("web_search", "ask", 400, "not available yet"),
@@ -374,7 +409,8 @@ async def test_a_refused_tool_setting_writes_nothing(db, agent_id, cleanup, tool
             await store.clear_tool(tool, "owner")
 
 
-async def test_load_reads_the_background_settings_and_the_host_locks(db, agent_id, cleanup):
+async def test_load_reads_the_background_settings_and_the_host_locks(db, agent_id, cleanup, caplog):
+    caplog.set_level(logging.WARNING)
     async with db.session() as session:
         for scope, tool, setting in [
             ("background", "web_search", "denied"),
@@ -390,7 +426,11 @@ async def test_load_reads_the_background_settings_and_the_host_locks(db, agent_i
     await store.load()
     guard = tool_guard.current()
     assert guard.denied == frozenset({"web_search"}) and guard.locked == frozenset({"bash"})
-    assert store.tools == {"web_search": "denied", "web_fetch": "allowed", "resolve_intention": "denied"}
+    assert store.tools == {"web_search": "denied", "web_fetch": "allowed"}
+    skipped = [r.getMessage() for r in caplog.records if r.name == store_module.__name__]
+    assert len(skipped) == 2  # each skipped row is named by its tool, never its value
+    assert any("send_email" in m for m in skipped) and any("resolve_intention" in m for m in skipped)
+    assert all(" ask" not in m and "denied" not in m for m in skipped)
 
 
 async def test_with_the_tool_guard_off_no_guard_is_installed(db, agent_id, cleanup):

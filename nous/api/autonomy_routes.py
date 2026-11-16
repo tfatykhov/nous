@@ -62,10 +62,26 @@ class LimitChange(_Body):
     value: Any
 
 
-class ToolChange(_Body):
-    """``PUT /autonomy/tools/{tool}``: ``allowed`` or ``denied``."""
+class ToolScope(_Body):
+    """``DELETE /autonomy/tools/{tool}``: optionally the scope, which must be ``background`` (goal sessions are not
+    available yet: the store answers so)."""
+
+    scope: Any = None
+
+
+class ToolChange(ToolScope):
+    """``PUT /autonomy/tools/{tool}``: ``allowed`` or ``denied``. A destructive guard is not available yet (the store
+    answers so)."""
 
     setting: Any
+    destructive_guard: Any = None
+
+
+def _scope(body: ToolScope) -> str:
+    """The scope a body names: ``background`` when it names none, ``""`` for a value that is not text."""
+    if body.scope is None:
+        return BACKGROUND
+    return body.scope if isinstance(body.scope, str) else ""
 
 
 class NoBody(_Body):
@@ -361,7 +377,9 @@ def build_autonomy_routes(
             return _error(400, f"There is no tool named {name[:ECHO_CHARS]!r}.")
         setting = body.setting if isinstance(body.setting, str) else ""
         try:
-            await current.set_tool(name, setting, actor(request))
+            await current.set_tool(
+                name, setting, actor(request), scope=_scope(body), destructive_guard=body.destructive_guard
+            )
         except AutonomyRefused as exc:
             return _error(exc.status, str(exc))
         except Exception as exc:
@@ -374,12 +392,12 @@ def build_autonomy_routes(
         if current is None or not tools_on():
             return JSONResponse(GUARD_OFF if current is not None else OFF, status_code=503)
         try:
-            await _parse(request, NoBody)
+            body: ToolScope = await _parse(request, ToolScope)
         except _BadRequest as exc:
             return _error(400, str(exc))
         name = request.path_params["tool"]
         try:
-            changed = await current.clear_tool(name, actor(request))
+            changed = await current.clear_tool(name, actor(request), scope=_scope(body))
         except AutonomyRefused as exc:
             return _error(exc.status, str(exc))
         except Exception as exc:

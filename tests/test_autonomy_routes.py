@@ -22,7 +22,12 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.owner_guard import OwnerGuard
 from nous.api.tools import ToolDispatcher
 from nous.autonomy import tool_guard
-from nous.autonomy.store import AutonomyStore
+from nous.autonomy.store import (
+    ASK_NOT_AVAILABLE,
+    GUARD_NOT_AVAILABLE,
+    SCOPE_NOT_AVAILABLE,
+    AutonomyStore,
+)
 from nous.config import Settings
 from nous.storage.models import AutonomySetting, AutonomySettingLog, ToolCallLog, ToolGuardRow
 
@@ -246,7 +251,10 @@ async def test_a_change_names_the_proof_as_its_actor(rig, db, agent_id, headers,
         ("/autonomy/limits/goals_queue_headroom", {"value": 1}, 404, "no limit"),
         ("/autonomy/limits/subtask_tool_call_limit", {"value": 41}, 409, "at most 40"),
         ("/autonomy/limits/subtask_default_timeout", {"value": 4000}, 409, "cannot be above"),
-        ("/autonomy/tools/web_search", {"setting": "ask"}, 400, "not available yet"),
+        ("/autonomy/tools/web_search", {"setting": "ask"}, 400, ASK_NOT_AVAILABLE),
+        ("/autonomy/tools/web_search", {"setting": "denied", "scope": "goal_session"}, 400, SCOPE_NOT_AVAILABLE),
+        ("/autonomy/tools/web_search", {"setting": "denied", "scope": 7}, 400, SCOPE_NOT_AVAILABLE),
+        ("/autonomy/tools/web_search", {"setting": "denied", "destructive_guard": "off"}, 400, GUARD_NOT_AVAILABLE),
         ("/autonomy/tools/web_search", {"setting": "denied", "actor": "agent"}, 400, "actor"),
         ("/autonomy/tools/nope", {"setting": "denied"}, 400, "no tool named"),
         ("/autonomy/tools/resolve_intention", {"setting": "denied"}, 400, "no tool named"),
@@ -261,6 +269,18 @@ async def test_a_refused_change_says_why_and_changes_nothing(rig, db, agent_id, 
     assert words in response.json()["error"]
     assert r.settings.model_dump() == before and await _log(db, agent_id) == []
     assert tool_guard.current().denied == frozenset()
+
+
+@pytest.mark.postgres_only
+async def test_returning_a_tool_in_another_scope_is_not_available_yet(rig, db, agent_id):
+    r = await rig()
+    for body in ({"scope": "goal_session"}, {"scope": None}):
+        response = await _send(r.app, "DELETE", "/autonomy/tools/web_search", headers=OWNER, json=body)
+        if body["scope"] is None:
+            assert (response.status_code, response.json()["changed"]) == (200, False)
+        else:
+            assert (response.status_code, response.json()) == (400, {"error": SCOPE_NOT_AVAILABLE})
+    assert await _log(db, agent_id) == []
 
 
 @pytest.mark.postgres_only

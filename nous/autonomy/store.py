@@ -34,7 +34,11 @@ from nous.storage.models import AutonomySetting, AutonomySettingLog, ToolGuardRo
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ASK_NOT_AVAILABLE",
     "BACKGROUND",
+    "GUARD_NOT_AVAILABLE",
+    "SCOPE_NOT_AVAILABLE",
+    "SETTING_NOT_AVAILABLE",
     "TOOL_SETTINGS",
     "AutonomyRefused",
     "AutonomyStore",
@@ -47,6 +51,11 @@ BACKGROUND = "background"
 TOOL_SETTINGS: tuple[str, ...] = ("allowed", "denied")
 LOG_SHOWN = 20
 NOT_AVAILABLE = "not available yet"
+# The fixed answers to what the table can hold and this version does not offer yet.
+ASK_NOT_AVAILABLE = f"Ask each time is {NOT_AVAILABLE}. A tool is Allowed or Not allowed."
+SETTING_NOT_AVAILABLE = f"That setting is {NOT_AVAILABLE}. A tool is Allowed or Not allowed."
+SCOPE_NOT_AVAILABLE = f"Settings for goal sessions are {NOT_AVAILABLE}. A tool's setting applies to background work."
+GUARD_NOT_AVAILABLE = f"The destructive-command guard is {NOT_AVAILABLE}."
 
 
 class AutonomyRefused(Exception):
@@ -178,13 +187,22 @@ class AutonomyStore:
             owner[key] = value
         problem = cross_problem({**self.baseline, **owner}, changed=owner)
         if problem is not None:
-            logger.warning("F115: the stored subtask time limits break the cross rule; both skipped")
+            logger.warning(
+                "F115: the stored subtask_default_timeout and subtask_max_timeout break the cross rule; both skipped"
+            )
             owner.pop("subtask_default_timeout", None)
             owner.pop("subtask_max_timeout", None)
         for key, value in {**{key: self.baseline[key] for key in self.clamped}, **owner}.items():
             self._set(key, value)
         self.owner = owner
-        self.tools = {tool: setting for tool, setting in tool_rows if setting in TOOL_SETTINGS}
+        self.tools = {}
+        for tool, setting in tool_rows:
+            if setting not in TOOL_SETTINGS or tool in HARNESS_TOOLS:
+                logger.warning(
+                    "F115: the stored setting of the tool %.200s is not one this version reads; skipped", tool
+                )
+                continue
+            self.tools[tool] = setting
         self._install_guard()
 
     # ---- limits ------------------------------------------------------------------------------------------------
@@ -271,13 +289,22 @@ class AutonomyStore:
         if tool in self.locked:
             raise AutonomyRefused(409, f"{tool} is locked by the server and cannot be changed here.")
 
-    async def set_tool(self, tool: str, setting: str, actor: str) -> None:
-        """The owner's setting of ``tool`` for background work: ``allowed`` or ``denied`` (400 for another word, 409
-        for a tool the host locked), written with its record in one transaction, then the guard's snapshot
-        replaced."""
+    @staticmethod
+    def _scope_refusal(scope: str) -> None:
+        if scope != BACKGROUND:
+            raise AutonomyRefused(400, SCOPE_NOT_AVAILABLE)
+
+    async def set_tool(
+        self, tool: str, setting: str, actor: str, *, scope: str = BACKGROUND, destructive_guard: Any = None
+    ) -> None:
+        """The owner's setting of ``tool`` for background work: ``allowed`` or ``denied``, written with its record in
+        one transaction, then the guard's snapshot replaced. 400 with a fixed sentence for another scope, a destructive
+        guard, ``ask`` or another word (not available yet); 409 for a tool the host locked."""
+        self._scope_refusal(scope)
+        if destructive_guard is not None:
+            raise AutonomyRefused(400, GUARD_NOT_AVAILABLE)
         if setting not in TOOL_SETTINGS:
-            word = "Ask each time" if setting == "ask" else "That setting"
-            raise AutonomyRefused(400, f"{word} is {NOT_AVAILABLE}. A tool is Allowed or Not allowed.")
+            raise AutonomyRefused(400, ASK_NOT_AVAILABLE if setting == "ask" else SETTING_NOT_AVAILABLE)
         self._tool_refusal(tool)
         async with self._lock:
             async with self._db.session() as session:
@@ -295,9 +322,10 @@ class AutonomyStore:
             self.tools[tool] = setting
             self._install_guard()
 
-    async def clear_tool(self, tool: str, actor: str) -> bool:
+    async def clear_tool(self, tool: str, actor: str, *, scope: str = BACKGROUND) -> bool:
         """Back to the default (allowed): the row deleted with its record, then the snapshot replaced. False (and no
-        record) when the owner had set nothing."""
+        record) when the owner had set nothing. 400 for another scope (not available yet)."""
+        self._scope_refusal(scope)
         self._tool_refusal(tool)
         async with self._lock:
             async with self._db.session() as session:

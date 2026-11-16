@@ -12,7 +12,7 @@ const refused = (status: number | undefined, body?: unknown) => Object.assign(ne
 describe('autonomy settings: the words', () => {
   it('pins the sentences the owner reads', () => {
     expect(PREFERENCES_TEXT).toBe(
-      "These are your preferences, kept with a record of each change. The server's own settings and your provider's spend limit are the limits that hold.",
+      "These are your preferences, kept with a record of each change. The server's own settings always win: they and your provider's spend limit are the limits that hold.",
     );
     expect(SOURCE_WORDS).toEqual({ owner: 'Your value', host: 'Host value', clamped: 'Lowered by the server' });
     expect(SETTING_WORDS).toEqual({ allowed: 'Allowed', denied: 'Not allowed' });
