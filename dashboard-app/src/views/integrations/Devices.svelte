@@ -239,14 +239,14 @@
       <ul class="devices">
         {#each live as d (d.id)}
           <li class="device">
-            <div class="device-head">
+            <div class="device-text">
               <span class="device-name">{d.name}</span>
-              <Button id="dev-r.{d.id}" variant="outline" size="sm"
-                class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
-                disabled={busy !== null} aria-label="Revoke {d.name}" aria-expanded={confirming === d.id}
-                onclick={() => void askRevoke(d.id)}>{busy === d.id ? 'Revoking…' : 'Revoke'}</Button>
+              <p class="device-line">{deviceLine(d)}</p>
             </div>
-            <p class="device-line">{deviceLine(d)}</p>
+            <Button id="dev-r.{d.id}" variant="outline" size="sm"
+              class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+              disabled={busy !== null} aria-label="Revoke {d.name}" aria-expanded={confirming === d.id}
+              onclick={() => void askRevoke(d.id)}>{busy === d.id ? 'Revoking…' : 'Revoke'}</Button>
             {#if confirming === d.id}
               <div class="confirm" id="dev-c.{d.id}" role="group" aria-label="Confirm revoking {d.name}" aria-describedby="dev-s.{d.id}">
                 <p id="dev-s.{d.id}" tabindex="-1">{REVOKE_TEXT}</p>
@@ -265,8 +265,10 @@
       <ul class="devices revoked" aria-label="Revoked devices">
         {#each revoked as d (d.id)}
           <li class="device">
-            <span class="device-name">{d.name}</span>
-            <p class="device-line">{revokedLine(d)}</p>
+            <div class="device-text">
+              <span class="device-name">{d.name}</span>
+              <p class="device-line">{revokedLine(d)}</p>
+            </div>
           </li>
         {/each}
       </ul>
@@ -313,10 +315,13 @@
   .valid { font-size: 0.875rem; font-weight: 500; margin: 0.25rem 0 0; }
   .code-box .actions { margin-top: 0.625rem; }
   .devices { list-style: none; margin: 0; padding: 0; }
-  .device { padding: 0.5rem 0; border-top: 1px solid var(--border); min-width: 0; }
+  /* A device: its name and line on the left, Revoke at the right whatever the name's length; the question below. */
+  .device { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 0.75rem;
+    padding: 0.5rem 0; border-top: 1px solid var(--border); min-width: 0; }
   .device:first-child { border-top: 0; }
-  .device-head { display: flex; align-items: center; justify-content: space-between; gap: 0.25rem 0.75rem; flex-wrap: wrap; }
-  .device-name { font-size: 0.875rem; font-weight: 500; overflow-wrap: anywhere; min-width: 0; }
+  .device .confirm { grid-column: 1 / -1; }
+  .device-text { min-width: 0; }
+  .device-name { font-size: 0.875rem; font-weight: 500; overflow-wrap: anywhere; }
   .device-line { font-size: 0.75rem; color: var(--muted); margin: 0.125rem 0 0; }
   .revoked { margin-top: 0.5rem; }
   .revoked .device-name { color: var(--muted); font-weight: 400; }
