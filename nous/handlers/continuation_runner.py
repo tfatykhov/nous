@@ -770,15 +770,20 @@ class ContinuationRunner:
         return await self._cancel_dags(strays, swept)
 
     async def _cancel_dags(self, dag_ids: Sequence[UUID], cancelled_by: dict) -> int:
-        """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record); one
-        that raises is logged and left for the sweep."""
+        """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record) and a
+        reason from it: "cancelled by the owner" for the owner's, else the record's fixed sentence; one that raises is
+        logged and left for the sweep."""
+        if cancelled_by.get("by") == "owner":
+            reason = "cancelled by the owner"
+        else:
+            reason = cancel_provenance.describe(cancelled_by) or "cancelled"
         done = 0
         for dag_id in dag_ids:
             if self._cancel_dag is None:
                 logger.warning("F099: DAG %s is running under a cancelled root and no orchestrator is bound", dag_id)
                 continue
             try:
-                await self._cancel_dag(dag_id, "cancelled by the owner", cancelled_by)
+                await self._cancel_dag(dag_id, reason, cancelled_by)
                 done += 1
             except asyncio.CancelledError:
                 raise
@@ -2022,8 +2027,13 @@ class ContinuationRunner:
     # the A2UI card call this one function. Not a tool: no model can cancel (it can only stop its own children).
     # ------------------------------------------------------------------
 
-    async def cancel_root(self, root_id: UUID, *, reason: str, actor: str) -> continuation.CancelOutcome:
-        """Cancel a root and everything under it (T13). In this order:
+    async def cancel_root(
+        self, root_id: UUID, *, reason: str, actor: str, cancelled_by: dict[str, str] | None = None
+    ) -> continuation.CancelOutcome:
+        """Cancel a root and everything under it (T13). ``cancelled_by`` is the ``cancel_provenance`` record the
+        lineage's DAGs keep: by default the owner's, through the surface ``actor`` names (the routes, the bot, the
+        companion); the goal driver gives the harness's for a chain it ends itself. Checked before anything is
+        written (ValueError). In this order:
 
         1. The store's one transaction (``continuation.cancel_root``): the marker, the lineage, its subtasks, its
            proposals, its containers and their fires. It commits.
@@ -2037,12 +2047,15 @@ class ContinuationRunner:
         5. The bus.
 
         Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written)."""
+        if cancelled_by is None:
+            cancelled_by = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
+        elif cancel_provenance.describe(cancelled_by) is None:
+            raise ValueError("cancelled_by is not a cancel_provenance record")
         async with self._db.session() as session:
             outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
             await session.commit()
         self._cancelled.update(outcome.root_ids)
-        by_owner = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
-        cancelled_dags = await self._cancel_dags(outcome.dag_ids, by_owner)
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids, cancelled_by)
         stopped = await self._stop_turns(outcome.root_ids)
         for cancelled in outcome.root_ids:
             await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})

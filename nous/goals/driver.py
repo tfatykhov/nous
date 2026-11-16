@@ -35,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
@@ -107,6 +108,15 @@ _ENDINGS = {
     "cancel": ("goal cancelled by the owner", "goal:owner"),
     "stuck": ("goal session stuck", "goal:harness"),
 }
+# Who the lineage's DAGs record as having cancelled them when the driver ends a stuck chain (``cancel_provenance``).
+STUCK_CANCEL_VIA = "goal driver: a task ran past its time limit"
+
+
+def _cancelled_by(why: str) -> dict[str, str] | None:
+    """The ``cancel_provenance`` record of a chain's end, for the DAGs its cancel stops: the harness's for a stuck
+    task; None for the owner's stop or cancel (the continuation runner records the owner, through ``actor``)."""
+    return cancel_provenance.record("harness", STUCK_CANCEL_VIA) if why == "stuck" else None
+
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
 # it belongs to: the session whose root is the row's intention's root, else the one whose first subtask is that
@@ -978,7 +988,7 @@ class GoalDriver:
             return True
         reason, actor = _ENDINGS[why]
         try:
-            await self._runner.cancel_root(root_id, reason=reason, actor=actor)
+            await self._runner.cancel_root(root_id, reason=reason, actor=actor, cancelled_by=_cancelled_by(why))
         except (continuation.CancelRefused, continuation.RootNotFound) as exc:
             logger.info("Goal session %s: the root's cancel did nothing (%s)", session.id, type(exc).__name__)
         await self._close(session.id)
@@ -1153,7 +1163,7 @@ class GoalDriver:
         await self._journal_ending(row.id, _ending_text("stuck", row.n, resumed=True))
         reason, actor = _ENDINGS["stuck"]
         try:
-            await self._runner.cancel_root(row.root_id, reason=reason, actor=actor)
+            await self._runner.cancel_root(row.root_id, reason=reason, actor=actor, cancelled_by=_cancelled_by("stuck"))
         except (continuation.CancelRefused, continuation.RootNotFound) as exc:
             logger.info("Goal session %s: the root's cancel did nothing (%s)", row.id, type(exc).__name__)
             return False

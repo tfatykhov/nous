@@ -43,8 +43,10 @@ from test_goals_driver import (
     _world,
 )
 
+from nous import cancel_provenance
 from nous.brain import continuation
 from nous.cognitive.ledger_store import detail_text
+from nous.dag.orchestrator import DAGOrchestrator
 from nous.goals import driver as driver_module
 from nous.goals import roots, spend
 from nous.goals.driver import GoalDriver
@@ -606,6 +608,85 @@ async def test_a_running_subtask_past_its_timeout_and_grace_cancels_the_root_and
     assert (after.state, after.pause_reason) == ("active", None)  # the harness's cancel is not the owner's
     texts = [r.text for r in await _harness(w, goal)]
     assert "Session 1 is being stopped: a task of its chain ran past its time limit." in texts
+
+
+STUCK_DAG_LINE = "cancelled by the harness (goal driver: a task ran past its time limit)"
+
+
+async def _running_lineage_dag(w: SimpleNamespace, root: Intention) -> tuple[uuid.UUID, object]:
+    """A running DAG of ``root``'s lineage, and the real orchestrator's cancel bound to the continuation runner."""
+    dag, store = await make_dag(w.env, status="running", parent=root)
+    w.runner.set_cancel_dag(DAGOrchestrator(store, settings=w.env.settings).cancel_dag)
+    return dag.id, store
+
+
+async def _cancelled_by(store, dag_id) -> tuple[str, str | None, dict | None]:
+    dag = await store.get_dag(dag_id)
+    return dag.status, dag.result_summary, (dag.postmortem or {}).get("cancellation")
+
+
+async def test_a_stuck_chains_lineage_dag_records_the_harness_as_its_canceller(env_factory):  # noqa: F811
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    dag_id, store = await _running_lineage_dag(w, root)
+    await _held_root(w, session.first_subtask_id, past=5)
+    assert (await w.driver.tick()).stopped == 1
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary) == ("cancelled", STUCK_DAG_LINE)
+    assert (record["by"], record["via"]) == ("harness", "goal driver: a task ran past its time limit")
+    assert cancel_provenance.dag_description(await store.get_dag(dag_id)) == STUCK_DAG_LINE
+
+
+async def test_a_stuck_chain_ended_after_a_failed_cancel_records_the_harness(env_factory, monkeypatch):  # noqa: F811
+    """The cancel fails once (the process stops after the ending row): the next tick ends the chain with the same
+    record."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    dag_id, store = await _running_lineage_dag(w, root)
+    await _held_root(w, session.first_subtask_id, past=5)
+    real_cancel = w.runner.cancel_root
+
+    async def crash(*args, **kwargs):
+        raise RuntimeError("the process stopped")
+
+    monkeypatch.setattr(w.runner, "cancel_root", crash)
+    assert (await w.driver.tick()).stopped == 0
+    monkeypatch.setattr(w.runner, "cancel_root", real_cancel)
+    assert (await w.driver.tick()).stopped == 1
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary, record["by"]) == ("cancelled", STUCK_DAG_LINE, "harness")
+
+
+async def test_a_resumed_stuck_chains_lineage_dag_records_the_harness(env_factory):  # noqa: F811
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    child = await _resumed_child(w, root)
+    dag_id, store = await _running_lineage_dag(w, root)
+    await _held_root(w, uuid.UUID(child.source_id), past=5)
+    assert (await w.driver.tick()).stopped == 1
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary, record["by"]) == ("cancelled", STUCK_DAG_LINE, "harness")
+
+
+@pytest.mark.parametrize("how", ["route", "stop"])
+async def test_the_owners_cancel_records_the_owner_on_the_lineage_dag(env_factory, how):  # noqa: F811
+    """The owner's cancel of the root through the routes, and the owner's stop of the goal, record the owner."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    dag_id, store = await _running_lineage_dag(w, root)
+    if how == "route":
+        await w.runner.cancel_root(root.id, reason="not now", actor="rest")  # what the owner's route calls
+    else:
+        await w.store.stop(goal.id, actor="host")
+        assert (await w.driver.tick()).stopped == 1
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary, record["by"]) == ("cancelled", "cancelled by the owner", "owner")
 
 
 async def test_a_running_subtask_inside_its_timeout_is_left_alone(env_factory):  # noqa: F811
