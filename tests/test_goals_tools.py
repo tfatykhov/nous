@@ -21,6 +21,7 @@ from goals_support import (
     goal_tools,
     journal,
     session_row,
+    set_goal,
     started,
     world,
 )
@@ -61,7 +62,7 @@ async def _plan(w: SimpleNamespace) -> list[dict]:
     return list((await goal_row(w, w.goal)).plan)
 
 
-async def _until_waiting(w: SimpleNamespace, table: str) -> None:
+async def _until_waiting(w: SimpleNamespace, table: str, at_least: int = 1) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 10
     query = text(
@@ -70,9 +71,9 @@ async def _until_waiting(w: SimpleNamespace, table: str) -> None:
     )
     while True:
         async with w.db.session() as s:
-            if (await s.execute(query, {"pattern": f"%{table}%"})).scalar_one() >= 1:
+            if (await s.execute(query, {"pattern": f"%{table}%"})).scalar_one() >= at_least:
                 return
-        assert loop.time() < deadline, f"no statement waited on {table}"
+        assert loop.time() < deadline, f"fewer than {at_least} statements waited on {table}"
         await asyncio.sleep(0.02)
 
 
@@ -519,3 +520,31 @@ async def test_a_session_changes_the_plan_at_most_thirty_times(runner_env):  # n
     said, err = await w.plan(steps=[{"text": "one more"}])
     assert err and "this session has changed the plan 30 times, the most one session may" in said
     assert [step["text"] for step in await _plan(w)] == ["the thirtieth change"]
+
+
+async def test_two_sessions_of_one_goal_writing_the_plan_at_once_lose_neither_write(runner_env):  # noqa: F811
+    """An ended session's reopened chain and the open session each call goal_plan. Their session rows differ, so the
+    goal row's lock is what orders them: both wait on it (seen in pg_stat_activity), and both steps are kept."""
+    w = await _turn(runner_env)
+    async with w.db.session() as s:  # session 1's chain ends; the driver closes it and starts session 2
+        await s.execute(
+            update(Intention).where(Intention.root_id == w.root.id).values(state="closed", close_reason="resolved")
+        )
+        await s.commit()
+    assert (await w.driver.tick()).closed == 1
+    await set_goal(w, w.goal, next_wake_at=w.row.started_at)
+    (root_2,) = (await w.driver.tick()).started
+    async with w.db.session() as s:
+        row_2 = (await s.execute(select(GoalSession).where(GoalSession.root_id == root_2))).scalar_one()
+    _note_2, plan_2 = goal_tools(w, w.goal, row_2)
+    async with w.db.session() as holding:
+        await holding.execute(select(Goal).where(Goal.id == w.goal.id).with_for_update())
+        first = asyncio.create_task(w.plan(steps=[{"text": "from the reopened chain of session 1"}]))
+        second = asyncio.create_task(plan_2(steps=[{"text": "from the open session 2"}]))
+        await _until_waiting(w, "brain.goals", at_least=2)
+        await holding.commit()
+    for said, err in await asyncio.gather(first, second):
+        assert not err, said
+    texts = sorted(step["text"] for step in await _plan(w))
+    assert texts == ["from the open session 2", "from the reopened chain of session 1"]
+    assert sorted(row.session_n for row in await journal(w, w.goal, "plan")) == [1, 2]
