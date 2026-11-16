@@ -648,11 +648,11 @@ async def test_the_goal_block_and_the_next_first_task_count_the_moved_steps(runn
 
 
 async def test_a_moved_steps_id_is_never_given_again(runner_env):  # noqa: F811
+    """A step an earlier call moved out holds the highest id the goal has used: a new step gets the next one."""
     w = await _turn(runner_env)
-    plan = [{"id": f"s{n}", "text": f"step {n}", "status": "open", "evidence": []} for n in range(1, 20)]
-    await set_goal(w, w.goal, plan=[*plan, _closed(30, session=99)])
+    await set_goal(w, w.goal, plan=[{"id": "s1", "text": "step 1", "status": "open", "evidence": []}])
+    text = f'{store.MOVED_TEXT} to make room, kept here: s50 (dropped): "step 50"'
+    await w.store.append_journal(w.goal.id, "plan", text, actor="chain", session_n=w.row.n, evidence=["moved:s50"])
     said, err = await w.plan(steps=[{"text": "a new step"}])
-    assert not err and "Moved to the journal to make room: s30." in said
-    said, err = await w.plan(steps=[{"id": "s1", "status": "dropped"}, {"text": "another"}])
     assert not err, said
-    assert [step["id"] for step in await _plan(w)][-2:] == ["s31", "s32"]
+    assert [step["id"] for step in await _plan(w)] == ["s1", "s51"]
