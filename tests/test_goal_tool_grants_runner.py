@@ -547,3 +547,33 @@ async def test_shutdown_unbinds_the_hook():
     runner = _Runner()
     await main.shutdown_components({"goal_tool_grants": object(), "runner": runner})
     assert runner.bound == [(None, None)]
+
+
+async def test_action_gate_still_blocks_a_granted_call_in_a_real_turn(runner_env):  # noqa: F811
+    from nous.cognitive.action_gate import GateResult
+
+    env = await runner_env([use("send_email", **SEND_EMAIL_ARGS)], [say("I stop.")], telegram_chat_id="")
+    calls = register_send_email(env)
+    store = GoalStore(env.db, env.agent, env.settings)
+    goal = await _goal(store)
+    root = await _session(env.db, store, goal)
+    await store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(env.db, env.settings)
+    await view.refresh()
+    env.runner.set_goal_lift(view.lifts, view.note_used)
+    checked: list[str] = []
+
+    class Blocking:
+        async def check(self, tool_name, tool_input, ledger, user_message=""):
+            checked.append(tool_name)
+            return GateResult(approved=False, reason="not now")
+
+    env.runner._action_gate = Blocking()
+    object.__setattr__(env.settings, "action_gating_mode", "enforce")
+    ctx = ExecutionContext(
+        kind="subtask", authority="internal_only", session_id="subtask-79", intention_id=root, root_intention_id=root
+    )
+    await env.runner.run_turn("subtask-79", "send the note", is_background=True, is_subtask=True, context=ctx)
+    assert checked == ["send_email"] and calls == []
+    assert "BLOCKED by ActionGate" in str(env.model.calls[-1]["messages"])
