@@ -72,6 +72,14 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _NEVER_REFUSED = frozenset({"approved_action"})
 
 
+def _refusable(kind: str, session_id: str | None) -> bool:
+    """Whether the halt applies to a turn of ``kind`` in ``session_id`` at all: never to an owner-approved call, and
+    to ``interactive`` and ``mcp`` only in a background session."""
+    if kind in _NEVER_REFUSED:
+        return False
+    return not (kind in FOREGROUND_KINDS and not is_background_session(session_id))
+
+
 def clean(value: object, limit: int) -> str | None:
     """A short caller text as it is stored and shown: control characters become spaces, runs of spaces one space,
     cut to ``limit``. None for anything that is not a non-blank string."""
@@ -203,9 +211,7 @@ class BackgroundHalt:
         """Whether a turn of ``kind`` in ``session_id`` that captured ``epoch`` at its start may not act: it is
         background work, and the halt is on or the turn started before the current epoch. ``approved_action`` is
         never refused; ``interactive`` and ``mcp`` only in a background session (a job reporting over chat)."""
-        if kind in _NEVER_REFUSED:
-            return False
-        if kind in FOREGROUND_KINDS and not is_background_session(session_id):
+        if not _refusable(kind, session_id):
             return False
         if self._host_hold or self._stored:
             return True
@@ -454,11 +460,13 @@ def call_refused() -> bool:
 def turn_epoch() -> int:
     """The epoch a turn starting now captures: the one already in ``TURN_EPOCH`` (set by the work that claimed this
     turn, so the earliest start wins), else the one of the tool call running now (``CALL_SCOPE``: the dispatcher is
-    handed it explicitly, which the streaming loop needs), else the current one."""
+    handed it explicitly, which the streaming loop needs) when the halt applies to that call, else the current one.
+    A chat call, like a chat turn, hands no epoch on (nor does an owner-approved call)."""
     outer = TURN_EPOCH.get()
     if outer is None:
         scope = CALL_SCOPE.get()
-        outer = scope[2] if scope is not None else None
+        if scope is not None and _refusable(scope[0], scope[1]):
+            outer = scope[2]
     return outer if outer is not None else current().epoch
 
 
