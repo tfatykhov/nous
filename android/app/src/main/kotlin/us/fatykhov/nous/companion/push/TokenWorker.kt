@@ -14,7 +14,8 @@ import us.fatykhov.nous.companion.core.Refusal
 class TokenWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val graph = (applicationContext as NousApp).graph
-        if (graph.settings.firebaseOptions == null) return Result.success()
+        // Disconnected since it was enqueued: there is no address to register with.
+        if (graph.settings.firebaseOptions == null || !graph.settings.configured) return Result.success()
         val token = try { FirebaseMessaging.getInstance().token.await() } catch (e: Exception) {
             TokenState.lastError = "token: ${e.message}"; return Result.retry()
         }
