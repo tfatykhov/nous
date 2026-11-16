@@ -137,6 +137,17 @@ _CLAIM_SQL = text(
 ONE_OPEN_SESSION_INDEX = "uq_goal_sessions_one_open"  # migration 113: at most one open session per goal
 
 
+def _deadline_passed(goal: Goal, now: datetime) -> bool:
+    """Whether the goal's deadline has passed at ``now``: a deadline at ``now`` has (the store's rule for
+    ``resume``). One comparison for the start's hold and the stop condition, so the two cannot disagree."""
+    return goal.deadline_at is not None and goal.deadline_at <= now
+
+
+def _budget_spent(spent: int, budget: int) -> bool:
+    """Whether ``spent`` tokens use up ``budget``: spent to the token is spent (the store's rule for ``resume``)."""
+    return spent >= budget
+
+
 def _not_started(held: str) -> str:
     """The harness's row for a run-now request that a hold kept from starting."""
     return f"Run now was not started: {HELD_WORDS[held]}."
@@ -540,12 +551,12 @@ class GoalDriver:
         held), and the sessions open across all goals. The comparisons are the store's: a deadline at ``now``
         has passed, a budget spent to the token is spent. Spend can rise after this read (a refresh writes it): a
         chain can overshoot its goal by at most its own token limit."""
-        if goal.deadline_at is not None and goal.deadline_at <= now:
+        if _deadline_passed(goal, now):
             return "deadline"
         total, today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
-        if total >= goal.total_budget:
+        if _budget_spent(total, goal.total_budget):
             return "budget"
-        if today >= goal.day_budget:
+        if _budget_spent(today, goal.day_budget):
             return "day_budget"
         if trigger != "run_now":
             started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now)
@@ -1878,10 +1889,10 @@ class GoalDriver:
         condition again as guards on the goal row)``, else None. The guards make the pause a no-op when the owner
         changed the goal between this read and the pause (extended the deadline, raised the budget). Spend only
         grows, so a budget read as spent stays spent; the runs are read from closing outcomes only."""
-        if goal.deadline_at is not None and goal.deadline_at <= now:
+        if _deadline_passed(goal, now):
             return "deadline", "Paused: the deadline has passed.", [Goal.deadline_at <= now]
         total, _today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
-        if total >= goal.total_budget:
+        if _budget_spent(total, goal.total_budget):
             note = f"Paused: the total budget is spent ({total} of {goal.total_budget} tokens)."
             return "budget", note, [Goal.total_budget <= total]
         stall = await self._run_length(s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled")
