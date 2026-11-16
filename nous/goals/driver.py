@@ -375,14 +375,17 @@ class GoalDriver:
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
 
-    async def _read_grants(self, root_id: UUID | None = None) -> None:
-        """F115: read the goals' tool grants into the runner's view again (all of them, or one session's root), when
-        a view is set. Called after the driver's own transactions have committed, so it holds no row lock of theirs.
-        A read that fails (the view is then empty) never fails the tick, the start or the close: logged by its class."""
+    async def _read_grants(self, root_id: UUID | None = None, *, goal_id: UUID | None = None) -> None:
+        """F115: read the goals' tool grants into the runner's view again (all of them, one session's root, or one
+        goal's), when a view is set. Called after the driver's own transactions have committed, so it holds no row
+        lock of theirs. A read that fails (the view is then empty) never fails the tick, the start, the close or the
+        pause: logged by its class."""
         if self.tool_grants is None:
             return
         try:
-            if root_id is None:
+            if goal_id is not None:
+                await self.tool_grants.refresh_goal(goal_id)
+            elif root_id is None:
                 await self.tool_grants.refresh()
             else:
                 await self.tool_grants.refresh_root(root_id)
@@ -902,7 +905,8 @@ class GoalDriver:
                 return False
             await self._paused(s, goal_id, "error", note, evidence=[f"{STOP_REF}error"])
             await s.commit()
-            return True
+        await self._read_grants(goal_id=goal_id)  # F115: a paused goal's tools stop now, not at the tick's end
+        return True
 
     async def _newest_pause_seq(self, s: AsyncSession, goal_id: UUID, reason: str) -> int:
         """The journal seq of the goal's newest harness pause row for ``reason`` (``stop:<reason>``), else 0."""
@@ -2083,7 +2087,8 @@ class GoalDriver:
             if not await self._paused(s, goal_id, reason, note, evidence=[f"{STOP_REF}{reason}"], newest_session=True):
                 return False
             await s.commit()
-            return True
+        await self._read_grants(goal_id=goal_id)  # F115: a paused goal's tools stop now, not at the tick's end
+        return True
 
     async def _run_length(
         self,

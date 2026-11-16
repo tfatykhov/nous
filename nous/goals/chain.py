@@ -125,7 +125,8 @@ class GoalChain:
             moved=moved,
             tools=tools,
         )
-        return GoalTurn(block=block, tools=make_goal_tools(self._db, self._settings, self._store, ref))
+        tools_of_turn = make_goal_tools(self._db, self._settings, self._store, ref, tool_grants=self._tool_grants)
+        return GoalTurn(block=block, tools=tools_of_turn)
 
     async def _tool_lines(self, goal_id: UUID, root_id: UUID) -> list[Any]:
         """F115 per-goal tools: what the turn is told of the goal's grants, each available when the runner would
