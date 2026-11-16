@@ -23,10 +23,11 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.api.tool_classes import McpIdentity
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, validate
 from nous.storage.database import Database
-from nous.storage.models import Goal, GoalJournal, GoalSession
+from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
 JOURNAL_MAX_CHARS = 4000
 EVIDENCE_MAX_REFS = 10
@@ -59,6 +60,8 @@ _TAIL_OTHERS_SCANNED = 100
 _NO_REQUEST = {"pending_request": None, "pending_request_at": None}
 # Who may approve, resume, confirm, or change a goal's budget or deadline: the owner, or the owner's host command.
 OWNER_ACTORS: frozenset[str] = frozenset({"owner", "host"})
+# The most tools one goal may be allowed to use without asking at once (brain.goal_tool_grants, migration 117).
+GRANTS_MAX = 20
 _SHORT_ID_RE = re.compile(r"^(?:g-?)?0*(\d{1,12})$", re.IGNORECASE)
 # The channel kinds an owner-facing row is delivered on: nous.handlers.continuation_publisher pushes rows whose
 # channel is LIKE 'telegram:%', to the chat id after the colon. A goal's questions and reports go to its channel.
@@ -132,6 +135,25 @@ def _owner_only(actor: str, what: str) -> None:
         raise GoalRefused(f"only the owner can {what}")
 
 
+def grant_identity(grant: GoalToolGrant) -> McpIdentity | None:
+    """The MCP identity a grant was given with (its server's row id, URL digest and remote tool), or None for a
+    grant of any other tool."""
+    if grant.server_id is None or grant.url_sha256 is None or grant.remote_tool is None:
+        return None
+    return McpIdentity(
+        grant.server_id,
+        grant.url_sha256,
+        grant.remote_tool,
+        server_name=grant.server_name or "",
+        server_host=grant.server_host or "",
+    )
+
+
+def _tools_changeable(goal: Goal) -> None:
+    if goal.state not in LIVE_STATES:
+        raise GoalRefused(f"{format_short_id(goal.short_id)} is finished; its tools can no longer be changed.")
+
+
 class GoalStore:
     """Goals of one agent. ``settings`` is read for the owner's default channel (``approve``)."""
 
@@ -169,6 +191,20 @@ class GoalStore:
         """Tokens the goal's sessions have spent, in all."""
         async with self._db.session() as s:
             return await self._spent(s, goal_id)
+
+    async def tool_grants(self, goal_id: UUID) -> list[GoalToolGrant]:
+        """The goal's active tool grants (not revoked), oldest first."""
+        query = (
+            select(GoalToolGrant)
+            .where(
+                GoalToolGrant.agent_id == self.agent_id,
+                GoalToolGrant.goal_id == goal_id,
+                GoalToolGrant.revoked_at.is_(None),
+            )
+            .order_by(GoalToolGrant.granted_at, GoalToolGrant.tool)
+        )
+        async with self._db.session() as s:
+            return list((await s.execute(query)).scalars())
 
     async def journal(self, goal_id: UUID, *, limit: int = 10) -> list[GoalJournal]:
         """The goal's newest ``limit`` journal rows, newest first."""
@@ -441,6 +477,86 @@ class GoalStore:
             if goal.state == "active" and await self._open_session(s, goal.id) is None:
                 await self._wake(s, goal.id, now)
             return await self._commit_read(s, goal)
+
+    # ---- the tools a goal may use without asking -----------------------------------------------------------
+
+    async def grant_tool(
+        self, ref: GoalRef, tool: str, identity: McpIdentity | None, *, actor: str, proof: str
+    ) -> bool:
+        """Allow a draft, active or paused goal to use ``tool`` without asking: a ``brain.goal_tool_grants`` row
+        (``granted_by`` is ``proof``, the proof the owner's route accepted) and an owner ``state`` journal row, in one
+        transaction under the goal row's lock. ``identity`` is an MCP tool's identity as the owner saw it (None for any
+        other tool). False, and nothing written, when the tool is granted already with the same identity; an MCP tool
+        granted with another identity has that grant revoked and a new one written. Refused past ``GRANTS_MAX``
+        grants. The goal's wake and request are not touched."""
+        _owner_only(actor, "change the tools a goal may use")
+        async with self._locked(ref) as (s, goal, now):
+            _tools_changeable(goal)
+            current = await self._active_grant(s, goal.id, tool)
+            if current is not None and grant_identity(current) == identity:
+                return False
+            if current is None:
+                count = await s.scalar(
+                    select(func.count())
+                    .select_from(GoalToolGrant)
+                    .where(GoalToolGrant.goal_id == goal.id, GoalToolGrant.revoked_at.is_(None))
+                )
+                if int(count or 0) >= GRANTS_MAX:
+                    raise GoalRefused(f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
+            else:
+                await self._revoke_grant(s, current.id, proof, now)
+            s.add(
+                GoalToolGrant(
+                    agent_id=self.agent_id,
+                    goal_id=goal.id,
+                    tool=tool,
+                    server_name=identity.server_name if identity else None,
+                    server_host=identity.server_host if identity else None,
+                    server_id=identity.server_id if identity else None,
+                    url_sha256=identity.url_sha256 if identity else None,
+                    remote_tool=identity.remote_tool if identity else None,
+                    granted_by=proof,
+                    granted_at=now,
+                )
+            )
+            named = f"{tool} (server {identity.server_name})" if identity else tool
+            self.add_journal_row(
+                s, goal.id, "state", f"Allowed to use {named} without asking, from now on.", actor=actor
+            )
+            await s.commit()
+            return True
+
+    async def revoke_tool(self, ref: GoalRef, tool: str, *, actor: str, proof: str) -> bool:
+        """No longer allow a draft, active or paused goal to use ``tool`` without asking: its active grant gets
+        ``revoked_by`` (``proof``) and ``revoked_at``, with an owner ``state`` journal row, in one transaction under
+        the goal row's lock. False, and nothing written, when the tool has no active grant."""
+        _owner_only(actor, "change the tools a goal may use")
+        async with self._locked(ref) as (s, goal, now):
+            _tools_changeable(goal)
+            current = await self._active_grant(s, goal.id, tool)
+            if current is None:
+                return False
+            await self._revoke_grant(s, current.id, proof, now)
+            self.add_journal_row(s, goal.id, "state", f"No longer allowed to use {tool} without asking.", actor=actor)
+            await s.commit()
+            return True
+
+    async def _active_grant(self, s: AsyncSession, goal_id: UUID, tool: str) -> GoalToolGrant | None:
+        query = select(GoalToolGrant).where(
+            GoalToolGrant.agent_id == self.agent_id,
+            GoalToolGrant.goal_id == goal_id,
+            GoalToolGrant.tool == tool,
+            GoalToolGrant.revoked_at.is_(None),
+        )
+        return (await s.execute(query)).scalar_one_or_none()
+
+    async def _revoke_grant(self, s: AsyncSession, grant_id: UUID, proof: str, now: datetime) -> None:
+        await s.execute(
+            update(GoalToolGrant)
+            .where(GoalToolGrant.id == grant_id, GoalToolGrant.revoked_at.is_(None))
+            .values(revoked_by=proof, revoked_at=now)
+            .execution_options(synchronize_session=False)
+        )
 
     async def delay_wake(self, goal_id: UUID, *, seconds: int, seen: datetime | None) -> bool:
         """Move an active goal's next wake to ``seconds`` from now, never earlier than it is, only if it is still
