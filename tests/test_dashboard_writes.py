@@ -45,6 +45,8 @@ KNOWN_WRITES = {
     ("POST", "/integrations/mcp/servers/{}/sign-out"),
     ("POST", "/goals"),
     ("POST", "/goals/{}/{}"),
+    ("POST", "/a2ui/devices/pairings"),
+    ("DELETE", "/a2ui/devices/{}"),
 }
 KNOWN_COMPANION_WRITES = {("POST", "/a2ui/action"), ("POST", "/a2ui/call")}
 
