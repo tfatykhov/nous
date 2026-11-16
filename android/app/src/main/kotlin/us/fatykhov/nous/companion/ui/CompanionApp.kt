@@ -52,7 +52,6 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import us.fatykhov.nous.companion.core.Connection
 import us.fatykhov.nous.companion.core.Net
-import us.fatykhov.nous.companion.core.Pairing
 import us.fatykhov.nous.companion.core.PairingWords
 import us.fatykhov.nous.companion.core.Refusal
 import us.fatykhov.nous.companion.core.Shell
@@ -85,6 +84,10 @@ fun CompanionApp(graph: AppGraph, route: Route, navigate: (Route) -> Unit) {
     // successful Connect the base URL was saved but nothing recomposed, so the Connect screen
     // stayed (on-device report). This state is what flips the shell.
     var configured by remember { mutableStateOf(graph.settings.configured) }
+    // A Disconnect finishes on the app's scope, possibly after this screen was rebuilt
+    // (a rotation): read the settings again whenever that work changes state.
+    val pairingWork = graph.pairing.state
+    LaunchedEffect(pairingWork) { if (configured && !graph.settings.configured) { configured = false; navigate(Route.Inbox) } }
     NousThemed(t) {
         CompositionLocalProvider(LocalOpenSettings provides { navigate(Route.Settings) }) {
             Box(Modifier.fillMaxSize().background(t.bg).safeDrawingPadding()) {
@@ -390,18 +393,12 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
         val credVersion by rememberCredentialVersion(graph.credential)
         val web = remember(credVersion) { graph.webBaseUrl() }
         TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, "$web/companion") }) { Text("Open web companion", color = t.accent) }
-        // On the app's scope, like pairing: leaving the screen must not stop it halfway.
-        TextButton(onClick = { graph.mainScope.launch {
-            graph.engine.stop()
-            // Deregister FIRST, while the installation id still exists and the device
-            // token still works: after clear() nothing could name the orphaned row, and
-            // the server would keep pushing to a phone that shows the setup screen
-            // (codex P1). Then the device revokes itself, then everything local goes.
-            // Each step bounded and best-effort: a dead server must not trap the user.
-            Pairing.unpair(graph.http, graph.settings.installationId, paired = graph.credential.pairedFor(graph.settings.baseUrl) != null, forget = { graph.credential.clear() })
-            Notifications.cancelAll(graph.appContext)
-            graph.credential.clear(); graph.settings.clear(); onDisconnect()
-        } }) { Text("Disconnect this phone", color = t.crit) }
+        // On the app's scope and after any pairing still running (PairingActions). The push
+        // row goes FIRST, while the installation id exists and the token still works: after
+        // clear() nothing could name the orphaned row, and the server would keep pushing to
+        // a phone that shows the setup screen (codex P1).
+        val busy = graph.pairing.state.busy
+        TextButton(onClick = { graph.pairing.disconnect(onDisconnect) }, enabled = !busy) { Text("Disconnect this phone", color = if (busy) t.muted else t.crit) }
         Text("Nous Companion " + runCatching { graph.appContext.packageManager.getPackageInfo(graph.appContext.packageName, 0).versionName }.getOrNull(), color = t.muted, fontSize = 12.sp)
     }
 }
@@ -423,7 +420,7 @@ private fun PairingSection(graph: AppGraph) {
     Section("Pairing") {
         if (paired != null) {
             KV("Status", "Paired"); KV("Paired as", paired.name)
-            NousButton(onClick = { graph.pairing.unpair() }, enabled = !busy, busy = busy, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Unpairing…" else "Unpair", color = t.crit) }
+            NousButton(onClick = { graph.pairing.unpair() }, enabled = !busy, busy = busy, modifier = Modifier.fillMaxWidth()) { Text(if (work.running == us.fatykhov.nous.companion.data.PairingActions.Op.UNPAIR) "Unpairing…" else "Unpair", color = t.crit) }
         } else {
             KV("Status", "Not paired")
             Text(PairingWords.NOT_PAIRED_HINT, color = t.muted, fontSize = 13.sp)
@@ -433,7 +430,7 @@ private fun PairingSection(graph: AppGraph) {
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
             )
             NousButton(onClick = { graph.pairing.pair(code) }, enabled = !busy && code.isNotBlank(), busy = busy, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth()) {
-                Text(if (busy) "Pairing…" else "Pair this device", color = t.onAccent, fontWeight = FontWeight.SemiBold)
+                Text(if (work.running == us.fatykhov.nous.companion.data.PairingActions.Op.PAIR) "Pairing…" else "Pair this device", color = t.onAccent, fontWeight = FontWeight.SemiBold)
             }
         }
         if (work.note.isNotEmpty()) Text(work.note, color = if (work.isError) t.crit else t.muted, fontSize = 13.sp)

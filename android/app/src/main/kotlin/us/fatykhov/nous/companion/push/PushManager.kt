@@ -69,6 +69,12 @@ class PushManager(private val context: Context, private val settings: Settings, 
         )
     }
 
+    /** Drop a registration that has not run yet (Disconnect). The same condition as [registerIfPossible] enqueued it under. */
+    fun cancelRegistration() {
+        if (settings.firebaseOptions == null) return
+        WorkManager.getInstance(context).cancelUniqueWork("push-token")
+    }
+
     fun notificationsEnabled(): Boolean {
         val nm = NotificationManagerCompat.from(context)
         if (!nm.areNotificationsEnabled()) return false
