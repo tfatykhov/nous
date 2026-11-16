@@ -95,7 +95,7 @@ async def test_a_goal_chains_question_and_proposal_still_reach_the_owner(runner_
 
 async def test_an_ordinary_roots_report_is_unchanged(runner_env):  # noqa: F811
     w = await _world(runner_env)
-    await active(w)
+    await started(w, await active(w))  # a goal with a running session, and this root is not its
     root = await make_root(w.env)
     when = datetime.now(UTC)
     await _insert(w, continuation.MSG_REPORT, root.id, push_after=when)
@@ -115,6 +115,9 @@ async def test_the_lookup_finds_a_goal_root_before_its_root_id_is_written(runner
         assert await report_channel(s, w.agent, root.id) == f"goal:{goal.id}"
         assert await report_channel(s, "another-agent", root.id) is None
         assert await report_channel(s, w.agent, uuid.uuid4()) is None
+    ordinary = await make_root(w.env)  # a root of the same agent that no goal session started
+    async with w.db.session() as s:
+        assert await report_channel(s, w.agent, ordinary.id) is None
 
 
 async def test_with_the_hook_unbound_no_goal_query_runs(runner_env):  # noqa: F811

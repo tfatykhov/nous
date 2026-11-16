@@ -266,7 +266,7 @@ async def test_a_decision_turn_of_an_ordinary_root_gets_neither(runner_env):  # 
     from f099_support import make_subtask, record
 
     w = await world(runner_env, [REPORT])
-    await active(w)  # a goal exists, but this root is not one of its sessions
+    await started(w, await active(w))  # a goal with a running session, and this root is not its
     subtask = await make_subtask(w.env)
     root = await w.env.heart.intentions.get_for_source("subtask", subtask.id)
     await w.env.heart.subtasks.complete(subtask.id, "done", final_outcome="completed")
