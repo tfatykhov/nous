@@ -588,6 +588,14 @@ describe('Devices: Revoke', () => {
     expect(changes()).toEqual([]);
   });
 
+  it('a device that was already revoked (from elsewhere) is said to be, not said revoked now', async () => {
+    handlers['DELETE /a2ui/devices/d-1'] = () => [200, { revoked: false }];
+    const s = await shown();
+    await fireEvent.click(await s.findByRole('button', { name: 'Revoke Pixel 7' }));
+    await fireEvent.click(s.getByRole('button', { name: 'Yes, revoke' }));
+    expect((await s.findByRole('status')).textContent).toBe('Pixel 7 was already revoked.');
+  });
+
   it('a revoke with no answer is given up after 15 s and says to check the list', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     handlers['DELETE /a2ui/devices/d-1'] = () => [HANG, null];
