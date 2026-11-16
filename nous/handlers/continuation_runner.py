@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select
 
 from nous import background_halt, cancel_provenance
 from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
@@ -1802,23 +1802,11 @@ class ContinuationRunner:
         self.wake()
 
     async def _release(self, claim: continuation.Claim, *, tokens: tuple[int, int] = (0, 0)) -> None:
-        """Free the claim with no attempt charged. ``tokens``: what the claim's turn spent, booked as a failed
-        attempt's are (``failed_tokens`` of the claim's deepest intention, under the claim's fence) in the same
-        transaction."""
-        spent = int(tokens[0]) + int(tokens[1])
+        """Free the claim with no attempt charged. ``tokens``: what the claim's turn spent, booked by
+        ``release_claim`` on the claim's deepest intention in the same transaction (on a cancelled root too)."""
         try:
             async with self._db.session() as session:
-                if spent > 0:
-                    await session.execute(
-                        update(Intention)
-                        .where(
-                            Intention.agent_id == self._agent_id,
-                            Intention.id == claim.deepest.id,
-                            Intention.claim_token == claim.claim_token,
-                        )
-                        .values(failed_tokens=Intention.failed_tokens + spent, updated_at=datetime.now(UTC))
-                    )
-                await continuation.release_claim(session, self._agent_id, claim)
+                await continuation.release_claim(session, self._agent_id, claim, tokens=tokens)
                 await session.commit()
         except Exception:
             logger.warning("F099: could not release the claim of root %s; the lease will", claim.root_id, exc_info=True)

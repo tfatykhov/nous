@@ -476,6 +476,33 @@ async def test_a_continuation_turn_the_halt_ended_commits_no_report_and_charges_
     assert row.failed_tokens == 110  # what the turn spent still counts against its root
 
 
+@pytest.mark.postgres_only
+async def test_a_continuation_turn_whose_root_the_sweep_cancelled_first_still_books_its_spend(runner_env):  # noqa: F811
+    """The halt's sweep cancels the root (and clears the live claim) before the turn's model call returns: the
+    spend is booked on the cancelled row, and no attempt is counted."""
+    from test_f099_phase2c_arrival import _cont, _owner_rows, _ready_root
+
+    from nous.handlers.halt_sweep import HALT_REASON_TEXT
+
+    halt = _install()
+    cont: list[ContinuationRunner] = []
+
+    async def the_sweep_cancels_the_root_during_the_model_call(kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        await cont[0].cancel_root(root.id, reason=HALT_REASON_TEXT, actor="halt")
+        return [say("I was going to report this.")]
+
+    env = await runner_env(the_sweep_cancels_the_root_during_the_model_call)
+    root = await _ready_root(env)
+    cont.append(_cont(env))
+    assert await cont[0].run_arrival(root.id) is None
+    assert await _owner_rows(env) == []
+    async with env.db.session() as s:
+        row = (await s.execute(select(Intention).where(Intention.id == root.id))).scalar_one()
+    assert row.state == "cancelled" and row.claim_token is None and row.attempts == 0
+    assert row.failed_tokens == 110  # booked on the cancelled row, with no fence left to pass
+
+
 async def test_a_dag_summary_the_halt_cut_short_is_not_used():
     from nous.dag.delivery import DAGResultDelivery
 
