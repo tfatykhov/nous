@@ -39,8 +39,8 @@ TURNS = [
     ("heartbeat_triage", "owner", True, "heartbeat-1"),
     ("heartbeat_callback", "owner", True, "dynamic-callback-1"),
     ("continuation", "internal_only", False, "intent-1"),
-    ("agent_action", "owner", True, "subtask-4"),
     ("background", "owner", False, "subtask-5"),
+    ("dag_summary", "owner", False, "dag-summary-1"),
 ]
 
 
@@ -136,16 +136,39 @@ async def test_a_host_locked_tool_is_refused_with_no_owner_setting(env_factory):
     assert refusal is not None and refusal.code == "tool_guard"
 
 
-async def test_chat_mcp_and_an_approved_action_are_not_refused(env_factory):  # noqa: F811
+async def test_chat_mcp_an_approved_action_and_a_companion_tap_are_not_refused(env_factory):  # noqa: F811
     _env, runner = await _runner(env_factory, **WARN)
-    tool_guard.install(ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"web_search"})))
-    for ctx in (
-        _ctx("interactive", session_id="telegram-1"),
-        _ctx("mcp", session_id=None),
-        _ctx("approved_action", session_id="proposal-1"),  # a background session prefix: the kind decides
+    for guard in (
+        ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"web_search"})),
+        ToolGuard(hold_all=True),
     ):
-        refusal = runner._authorize_tool_call(ctx, "web_search", frozenset({"web_search"}), ctx.session_id, {})
-        assert refusal is None or refusal.code != "tool_guard", ctx.kind
+        tool_guard.install(guard)
+        for ctx in (
+            _ctx("interactive", session_id="telegram-1"),
+            _ctx("mcp", session_id=None),
+            _ctx("approved_action", session_id="proposal-1"),  # a background session prefix: the kind decides
+            _ctx("agent_action", session_id="subtask-4"),  # the owner tapped a companion card
+        ):
+            refusal = runner._authorize_tool_call(ctx, "web_search", frozenset({"web_search"}), ctx.session_id, {})
+            assert refusal is None or refusal.code != "tool_guard", ctx.kind
+        assert "web_search" in _names(runner, _ctx("agent_action", session_id="subtask-4"), True)
+
+
+async def test_a_refusal_writes_its_own_event_not_a_context_policy_violation(env_factory):  # noqa: F811
+    _env, runner = await _runner(env_factory, **WARN)
+    events = []
+    runner._log_f026_decision = lambda event, data, session_id: events.append((event, data))
+    tool_guard.install(ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"bash"})))
+    for tool in ("web_search", "bash"):
+        runner._authorize_tool_call(_ctx("scheduled", session_id="schedule-1"), tool, frozenset({tool}), "s", {})
+    tool_guard.install(ToolGuard(hold_all=True))
+    refusal = runner._authorize_tool_call(_ctx("scheduled"), "read_file", frozenset({"read_file"}), "s", {})
+    assert refusal.code == "tool_guard" and "could not be read" in refusal.text
+    assert events == [
+        ("harness_tool_guard_refusal", {"tool_name": "web_search", "context_kind": "scheduled", "held_by": "owner"}),
+        ("harness_tool_guard_refusal", {"tool_name": "bash", "context_kind": "scheduled", "held_by": "server"}),
+        ("harness_tool_guard_refusal", {"tool_name": "read_file", "context_kind": "scheduled", "held_by": "not_read"}),
+    ]
 
 
 async def test_the_guard_comes_after_the_cancelled_root_and_before_the_lineage_floor(env_factory):  # noqa: F811

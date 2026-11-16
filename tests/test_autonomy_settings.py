@@ -106,3 +106,38 @@ def test_codeowners_lists_the_package_and_the_routes():
     owners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8").splitlines()
     assert "/nous/autonomy/** @tfatykhov" in owners
     assert "/nous/api/autonomy_routes.py @tfatykhov" in owners
+
+
+async def test_host_ceilings_or_locks_without_the_setting_they_need_say_so_once(caplog):
+    caplog.set_level(logging.WARNING)
+    off = Settings(_env_file=None, autonomy_ceilings="max_turns=50", autonomy_locked_tools="bash")
+    assert await main._load_autonomy(off, _NoDatabase()) is None
+    said = [r.getMessage() for r in caplog.records if r.name == main.__name__]
+    assert said == [
+        "NOUS_AUTONOMY_CEILINGS and NOUS_AUTONOMY_LOCKED_TOOLS do nothing while NOUS_AUTONOMY_SETTINGS_ENABLED is off"
+    ]
+    caplog.clear()
+    assert await main._load_autonomy(Settings(_env_file=None), _NoDatabase()) is None
+    assert not [r for r in caplog.records if r.name == main.__name__]
+
+
+async def test_locked_tools_without_the_tool_guard_say_so(caplog, monkeypatch):
+    caplog.set_level(logging.WARNING)
+    on = Settings(_env_file=None, autonomy_settings_enabled=True, autonomy_locked_tools="bash")
+
+    class _Store:
+        def __init__(self, database, settings):
+            pass
+
+        async def load(self):
+            return None
+
+    monkeypatch.setattr("nous.autonomy.store.AutonomyStore", _Store)
+    assert isinstance(await main._load_autonomy(on, _NoDatabase()), _Store)
+    said = [r.getMessage() for r in caplog.records if r.name == main.__name__]
+    assert said == ["NOUS_AUTONOMY_LOCKED_TOOLS does nothing while NOUS_TOOL_GUARD_ENABLED is off"]
+
+
+def test_shutdown_stops_the_store_reading_again():
+    source = inspect.getsource(main.shutdown_components)
+    assert 'components.get("autonomy")' in source and "await autonomy.close()" in source

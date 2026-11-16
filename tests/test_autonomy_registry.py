@@ -67,9 +67,12 @@ def test_each_key_is_a_settings_field_whose_own_rule_holds_the_whole_range(limit
 
 @pytest.mark.parametrize("limit", LIMITS, ids=lambda limit: limit.key)
 def test_each_limit_says_what_it_is_and_when_it_applies(limit):
-    assert limit.label and limit.unit and limit.applies
+    assert limit.label and limit.unit and limit.applies and limit.description
     assert limit.label[0].isupper() and not limit.label.endswith(".")
-    assert limit.applies.endswith(".")
+    assert limit.applies.endswith(".") and limit.description.endswith(".")
+    # Plain words: the screen explains what a chain is where it names one, and no label names an inner word.
+    for word in ("stall", "depth", "subtask", "iteration", "root", "continuation"):
+        assert word not in limit.label.lower(), (limit.key, word)
 
 
 def test_no_new_setting_name_contains_proposal_or_owner_action():
@@ -124,7 +127,11 @@ def test_parse_ceilings_keeps_valid_entries_and_drops_the_rest_with_one_warning(
     assert parsed == {"subtask_tool_call_limit": 60, "max_turns": 800}
     warnings = [r for r in caplog.records if r.name == registry.__name__ and r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "NOUS_AUTONOMY_CEILINGS" in warnings[0].getMessage()
+    message = warnings[0].getMessage()
+    assert "NOUS_AUTONOMY_CEILINGS" in message
+    for key in ("bogus", "max_turns", "depth", "subtask_max_timeout"):
+        assert key in message, key
+    assert all(value not in message for value in ("=3", "=x", "=0"))  # never the numbers
 
 
 def test_parse_ceilings_of_nothing_is_no_ceiling(caplog):
@@ -159,3 +166,15 @@ def test_the_cross_rule_judges_only_a_pair_that_holds_a_changed_key():
 def test_by_key_of_an_unknown_key_is_none():
     assert by_key("nope") is None
     assert by_key("goals_queue_headroom") is None
+
+
+def test_the_words_of_the_three_limits_the_screen_must_get_right():
+    assert "chat" in by_key("max_turns").description
+    calls = by_key("subtask_tool_call_limit").description
+    for place in ("spawned task", "workflow step", "scheduled task", "decision in a chain", "Heartbeat triage"):
+        assert place in calls, place
+    for key in ("subtask_default_timeout", "subtask_max_timeout"):
+        assert "goal session" in by_key(key).description, key
+    assert "plus 10 minutes" in by_key("subtask_max_timeout").description
+    ttl = by_key("intention_proposal_ttl_hours").applies
+    assert "proposal already waiting keeps its deadline" in ttl and "question already waiting" in ttl

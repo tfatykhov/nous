@@ -30,73 +30,130 @@ __all__ = [
 
 @dataclass(frozen=True)
 class Limit:
-    """One limit: the ``Settings`` field it sets (``key``), its words on the screen, its hard range and when a change
-    takes effect (``applies``, one sentence)."""
+    """One limit: the ``Settings`` field it sets (``key``), its words on the screen (``label``, ``unit``, and
+    ``description``, one plain sentence of what it limits), its hard range and when a change takes effect
+    (``applies``)."""
 
     key: str
     label: str
     unit: str
     low: int
     high: int
+    description: str
     applies: str
 
 
+# A chain: a background task, what Nous decides when it finishes, and the follow-up tasks that decision starts.
+_CHAIN = "A chain is a background task, what Nous decides when it finishes, and the follow-up tasks it starts."
 _CHAIN_NOW = "At once. A chain that is already running and is above the new value stops at its next step."
+_STOPS = "Nous then stops the chain and reports to you."
 
 LIMITS: tuple[Limit, ...] = (
     Limit(
         "max_turns",
-        "Tool-loop iterations per turn",
-        "iterations",
+        "Rounds of tool use per turn",
+        "rounds",
         5,
         1000,
-        "From the next turn. This applies to every turn, chat included.",
+        "How many rounds of tool calls one turn may take before Nous must answer, in chat and in background work "
+        "alike.",
+        "From the next turn.",
     ),
     Limit(
         "subtask_tool_call_limit",
-        "Tool calls per background turn",
+        "Tool calls per background task",
         "tool calls",
         1,
         200,
-        "From the next background turn.",
+        "How many tool calls one run of a background task may make: a spawned task, a workflow step, a scheduled "
+        "task, a companion action, or one decision in a chain. Heartbeat triage, heartbeat checks and their callbacks "
+        "and workflow summaries are not limited by it.",
+        "From the next task that starts.",
     ),
-    Limit("continuation_max_turns_per_root", "Decisions per chain", "decisions", 1, 20, _CHAIN_NOW),
-    Limit("continuation_max_spawns_per_root", "Work items one chain may start", "work items", 1, 30, _CHAIN_NOW),
-    Limit("continuation_max_depth", "Depth of a chain", "levels", 1, 6, _CHAIN_NOW),
-    Limit("continuation_max_tokens_per_root", "Tokens per chain", "tokens", 10_000, 1_000_000, _CHAIN_NOW),
-    Limit("continuation_stall_limit", "Chain stall limit", "steps without progress", 1, 5, _CHAIN_NOW),
+    Limit(
+        "continuation_max_turns_per_root",
+        "Decisions per chain",
+        "decisions",
+        1,
+        20,
+        f"{_CHAIN} This is how many times Nous may decide what to do next in one chain. {_STOPS}",
+        _CHAIN_NOW,
+    ),
+    Limit(
+        "continuation_max_spawns_per_root",
+        "Follow-up tasks per chain",
+        "tasks",
+        1,
+        30,
+        f"How many follow-up tasks one chain may start in all. {_STOPS}",
+        _CHAIN_NOW,
+    ),
+    Limit(
+        "continuation_max_depth",
+        "Levels of follow-up per chain",
+        "levels",
+        1,
+        6,
+        f"How deep a chain may go: a task that starts a task that starts a task is three levels. {_STOPS}",
+        _CHAIN_NOW,
+    ),
+    Limit(
+        "continuation_max_tokens_per_root",
+        "Tokens per chain",
+        "tokens",
+        10_000,
+        1_000_000,
+        f"How many model tokens one chain may spend in all, its tasks and its decisions together. {_STOPS}",
+        _CHAIN_NOW,
+    ),
+    Limit(
+        "continuation_stall_limit",
+        "Decisions in a row without progress",
+        "decisions",
+        1,
+        5,
+        f"How many decisions in a row of one chain may report no progress. {_STOPS}",
+        _CHAIN_NOW,
+    ),
     Limit(
         "intention_root_ttl_hours",
         "Lifetime of a chain",
         "hours",
         1,
         168,
+        "How long a chain may run, counted from its first task, before it ends.",
         "For chains that start after the change. A running chain keeps the end it was given.",
     ),
     Limit(
         "intention_proposal_ttl_hours",
-        "How long a question or proposal waits",
+        "Time to answer a question or proposal",
         "hours",
         1,
         72,
-        "For questions and proposals made after the change. Some checks of the ones already waiting use the new value.",
+        "How long a question Nous asks you, or an action it proposes, waits for your answer before it lapses.",
+        "For proposals made after the change: a proposal already waiting keeps its deadline. A question already "
+        "waiting is judged by the new value at once: lowering it can close the question, and raising it can reopen "
+        "one that had lapsed.",
     ),
     Limit(
         "subtask_default_timeout",
-        "Subtask time limit, default",
+        "Time limit of a task that names none",
         "seconds",
         60,
         6000,
-        "For subtasks that start after the change.",
+        "How long a spawned task, a scheduled task or the first task of a goal session may run when it gives no time "
+        "limit of its own.",
+        "For tasks and schedules created after the change.",
     ),
     Limit(
         "subtask_max_timeout",
-        "Subtask time limit, largest",
+        "Longest time limit of a task",
         "seconds",
         60,
         10_000,
-        "For subtasks that start after the change. It also sets how long the server waits before it marks an "
-        "unfinished tool call as unknown.",
+        "The longest a spawned task or the first task of a goal session may run, whatever time limit it asks for. A "
+        "tool call left unfinished is not marked unknown before this limit plus 10 minutes have passed.",
+        "For tasks that start after the change.",
     ),
 )
 
@@ -151,10 +208,10 @@ def cross_problem(values: Mapping[str, float], changed: Iterable[str] | None = N
 
 def parse_ceilings(raw: str) -> dict[str, int]:
     """``NOUS_AUTONOMY_CEILINGS`` as ``{key: ceiling}``. An entry that is not ``key=whole number`` for a registry key
-    with the number inside the key's range is dropped, and one warning counts the dropped entries. A later entry for
-    the same key replaces an earlier one. Empty: no ceiling."""
+    with the number inside the key's range is dropped, and one warning names the key of each dropped entry (never its
+    number). A later entry for the same key replaces an earlier one. Empty: no ceiling."""
     ceilings: dict[str, int] = {}
-    dropped = 0
+    dropped: list[str] = []
     for entry in (raw or "").split(","):
         entry = entry.strip()
         if not entry:
@@ -162,18 +219,17 @@ def parse_ceilings(raw: str) -> dict[str, int]:
         key, sep, number = (part.strip() for part in entry.partition("="))
         limit = _BY_KEY.get(key)
         if not sep or limit is None or not number.isascii() or not number.isdigit():
-            dropped += 1
+            dropped.append(key[:40])
             continue
         value = int(number)
         if range_problem(limit, value) is not None:
-            dropped += 1
+            dropped.append(key)
             continue
         ceilings[key] = value
     if dropped:
         logger.warning(
-            "NOUS_AUTONOMY_CEILINGS: %d entr%s dropped (each must be key=whole number for a limit the owner may "
-            "change, inside that limit's range)",
-            dropped,
-            "y" if dropped == 1 else "ies",
+            "NOUS_AUTONOMY_CEILINGS: the entries for %s were dropped (each must be key=whole number for a limit the "
+            "owner may change, inside that limit's range)",
+            ", ".join(dropped),
         )
     return ceilings

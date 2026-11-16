@@ -635,9 +635,17 @@ def _build_goals(
 async def _load_autonomy(settings: Settings, database: Any) -> Any | None:
     """F115: with ``NOUS_AUTONOMY_SETTINGS_ENABLED`` on, the one autonomy store: built from ``settings`` (it keeps
     the host's values) and loaded (the owner's stored limits applied in place, the tool guard installed with
-    ``NOUS_TOOL_GUARD_ENABLED``). Called before any component reads a limit. Off: None, and nothing is read."""
+    ``NOUS_TOOL_GUARD_ENABLED``). Called before any component reads a limit. Off: None, and nothing is read; a host
+    ceiling or locked tool set without the setting it needs does nothing, and one warning says so."""
     if not settings.autonomy_settings_enabled:
+        if settings.autonomy_ceilings.strip() or settings.autonomy_locked_tools.strip():
+            logger.warning(
+                "NOUS_AUTONOMY_CEILINGS and NOUS_AUTONOMY_LOCKED_TOOLS do nothing while NOUS_AUTONOMY_SETTINGS_ENABLED "
+                "is off"
+            )
         return None
+    if settings.autonomy_locked_tools.strip() and not settings.tool_guard_enabled:
+        logger.warning("NOUS_AUTONOMY_LOCKED_TOOLS does nothing while NOUS_TOOL_GUARD_ENABLED is off")
     from nous.autonomy.store import AutonomyStore
 
     store = AutonomyStore(database, settings)
@@ -2171,6 +2179,11 @@ async def shutdown_components(components: dict) -> None:
     goal_driver = components.get("goal_driver")
     if goal_driver is not None:
         await goal_driver.stop()
+
+    # F115: the autonomy store stops reading its saved settings again, if it still was.
+    autonomy = components.get("autonomy")
+    if autonomy is not None:
+        await autonomy.close()
 
     # F099: stop the continuation runner first: its turns spawn work and write rows. Each running arrival
     # releases its claim without an attempt.

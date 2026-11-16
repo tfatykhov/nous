@@ -12,14 +12,15 @@ from nous.api.runner import TERMINAL_EXTRA_TOOLS
 from nous.autonomy import tool_guard
 from nous.autonomy.tool_guard import HARNESS_TOOLS, ToolGuard, guarded_turn, parse_locked_tools
 
-BACKGROUND_KINDS = [kind for kind in CONTEXT_KINDS if kind not in FOREGROUND_KINDS and kind != "approved_action"]
+OWNER_ACTS = ("approved_action", "agent_action")
+BACKGROUND_KINDS = [kind for kind in CONTEXT_KINDS if kind not in FOREGROUND_KINDS and kind not in OWNER_ACTS]
 SESSIONS = [None, "", "telegram-42", "abc", *(prefix + "x" for prefix in BACKGROUND_SESSION_PREFIXES)]
 
 
 def _expected(kind: str, session_id: str | None) -> bool:
-    """The rule, written out: an approved action never; a background kind always; a foreground kind (chat, an
-    inbound MCP call) only in a session a background path made."""
-    if kind == "approved_action":
+    """The rule, written out: the owner's own acts (an approved action, a companion tap) never; a background kind
+    always; a foreground kind (chat, an inbound MCP call) only in a session a background path made."""
+    if kind in OWNER_ACTS:
         return False
     if kind not in ("interactive", "mcp"):
         return True
@@ -37,7 +38,6 @@ def test_every_background_kind_is_guarded_and_chat_is_not():
         "subtask",
         "dag_node",
         "scheduled",
-        "agent_action",
         "heartbeat_triage",
         "heartbeat_check",
         "heartbeat_callback",
@@ -51,6 +51,7 @@ def test_every_background_kind_is_guarded_and_chat_is_not():
     assert not guarded_turn("mcp", None)
     assert guarded_turn("interactive", "subtask-1")
     assert not guarded_turn("approved_action", "proposal-1")  # the owner approved that one call
+    assert not guarded_turn("agent_action", "subtask-1")  # the owner tapped a companion card
 
 
 def test_denies_only_a_switched_off_tool_in_a_guarded_turn():
@@ -92,5 +93,38 @@ def test_parse_locked_tools(caplog):
     assert len(warnings) == 1 and "NOUS_AUTONOMY_LOCKED_TOOLS" in warnings[0].getMessage()
 
 
-def test_the_refusal_names_the_tool():
-    assert tool_guard.refusal_text("web_search") == "Tool error: 'web_search' is switched off for background work."
+def test_the_refusal_names_the_tool_and_why():
+    assert ToolGuard(denied=frozenset({"web_search"})).refusal("web_search") == (
+        "Tool error: 'web_search' is switched off for background work."
+    )
+    assert ToolGuard(hold_all=True).refusal("web_search") == (
+        "Tool error: the saved tool settings could not be read, so 'web_search' is held from background work until "
+        "they can."
+    )
+    guard = ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"bash"}))
+    assert (guard.held_by("web_search"), guard.held_by("bash")) == ("owner", "server")
+    assert ToolGuard(hold_all=True).held_by("web_search") == "not_read"
+    assert tool_guard.REFUSAL_EVENT == "harness_tool_guard_refusal"
+
+
+def test_holding_every_tool_holds_all_but_the_harness_own_and_only_in_background_work():
+    guard = ToolGuard(hold_all=True)
+    for tool in ("web_search", "bash", "read_file", "mcp__notes__search", "a_tool_added_later"):
+        assert guard.denies("subtask", "subtask-1", tool)
+        assert guard.denies("interactive", "claude-job-1", tool)
+        assert not guard.denies("interactive", "telegram-1", tool)
+        assert not guard.denies("approved_action", "proposal-1", tool)
+        assert not guard.denies("agent_action", "subtask-1", tool)
+    for tool in HARNESS_TOOLS:
+        assert not guard.denies("continuation", "intent-1", tool)
+
+
+def test_the_places_the_screen_names_are_exactly_the_kinds_the_guard_holds():
+    held = {kind for kind in CONTEXT_KINDS if guarded_turn(kind, None)}
+    assert set(tool_guard.HELD_KINDS) == held
+    assert tool_guard.held_places() == [
+        *tool_guard.HELD_KINDS.values(),
+        "a chat or MCP turn in a session background work started",
+    ]
+    # A conversation kind is held only in a background session, which the last place names.
+    assert not held & FOREGROUND_KINDS and all(guarded_turn(kind, "subtask-1") for kind in FOREGROUND_KINDS)

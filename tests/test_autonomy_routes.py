@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -21,7 +22,9 @@ from nous.api.autonomy_routes import build_autonomy_routes, summary, tool_group
 from nous.api.execution_context import ExecutionContext
 from nous.api.owner_guard import OwnerGuard
 from nous.api.tools import ToolDispatcher
+from nous.autonomy import store as store_module
 from nous.autonomy import tool_guard
+from nous.autonomy.registry import by_key
 from nous.autonomy.store import (
     ASK_NOT_AVAILABLE,
     GUARD_NOT_AVAILABLE,
@@ -108,7 +111,7 @@ async def test_with_the_settings_off_the_reads_say_so_and_the_changes_are_503():
     for method, path, body in WRITES:
         response = await _send(app, method, path, headers=OWNER, json=body)
         assert response.status_code == 503, path
-        assert response.json() == {"error": "autonomy settings are off", "enabled": False}
+        assert response.json() == {"error": "Autonomy settings are off on this server.", "enabled": False}
 
 
 async def test_a_store_with_the_flag_off_is_not_used():
@@ -126,7 +129,10 @@ async def test_with_the_tool_guard_off_the_tool_routes_say_so():
     assert response.json() == {"enabled": False}
     for method, path, body in WRITES[2:]:
         response = await _send(app, method, path, headers=OWNER, json=body)
-        assert (response.status_code, response.json()) == (503, {"error": "the tool guard is off", "enabled": False})
+        assert (response.status_code, response.json()) == (
+            503,
+            {"error": "The tool guard is off on this server.", "enabled": False},
+        )
 
 
 @pytest.mark.parametrize(("method", "path", "body"), [("GET", path, None) for path in READS] + WRITES)
@@ -199,12 +205,13 @@ async def _log(db, agent_id) -> list[tuple]:
 async def test_the_limits_list_each_limit_with_its_host_value_and_source(rig):
     r = await rig(subtask_tool_call_limit=50, autonomy_ceilings="subtask_tool_call_limit=40")
     body = (await _send(r.app, "GET", "/autonomy/limits", headers=OWNER)).json()
-    assert body["enabled"] is True and body["tool_guard"] is True and body["ceilings_set"] is True
+    assert body["enabled"] is True and body["loaded"] is True
+    assert body["tool_guard"] is True and body["ceilings_set"] is True
     assert len(body["limits"]) == 11
     row = next(row for row in body["limits"] if row["key"] == "subtask_tool_call_limit")
     assert row == {
         "key": "subtask_tool_call_limit",
-        "label": "Tool calls per background turn",
+        "label": "Tool calls per background task",
         "unit": "tool calls",
         "low": 1,
         "high": 200,
@@ -213,7 +220,8 @@ async def test_the_limits_list_each_limit_with_its_host_value_and_source(rig):
         "baseline": 40,
         "source": "clamped",
         "ceiling": 40,
-        "applies": "From the next background turn.",
+        "description": by_key("subtask_tool_call_limit").description,
+        "applies": "From the next task that starts.",
         "last_change": None,
     }
 
@@ -233,8 +241,8 @@ async def test_a_change_names_the_proof_as_its_actor(rig, db, agent_id, headers,
     assert await _log(db, agent_id) == [("max_turns", None, 40, actor), ("max_turns", 40, None, actor)]
     changes = (await _send(r.app, "GET", "/autonomy/log", headers=headers)).json()["changes"]
     assert [(c["key"], c["new"], c["actor"], c["label"]) for c in changes] == [
-        ("max_turns", None, actor, "Tool-loop iterations per turn"),
-        ("max_turns", 40, actor, "Tool-loop iterations per turn"),
+        ("max_turns", None, actor, "Rounds of tool use per turn"),
+        ("max_turns", 40, actor, "Rounds of tool use per turn"),
     ]
 
 
@@ -389,3 +397,86 @@ async def test_the_tools_list_counts_background_calls_when_the_log_is_on(rig, db
     assert rows["web_search"]["calls_30d"] == 2
     assert rows["web_search"]["last_call"].startswith((now - timedelta(hours=1)).isoformat()[:13])
     assert (rows["read_file"]["calls_30d"], rows["bash"]["calls_30d"], rows["bash"]["last_call"]) == (1, 0, None)
+
+
+class _BrokenDatabase:
+    @asynccontextmanager
+    async def session(self):
+        raise ConnectionError("the database is down")
+        yield
+
+
+@pytest.mark.postgres_only
+async def test_while_the_saved_settings_cannot_be_read_the_reads_say_so_and_the_changes_are_503(agent_id, monkeypatch):
+    monkeypatch.setattr(store_module, "RETRY_FIRST_SECONDS", 3600.0)
+    settings = _settings(agent_id)
+    store = AutonomyStore(_BrokenDatabase(), settings)
+    await store.load()
+    app = _app(_BrokenDatabase(), settings, store)
+    try:
+        message = (
+            "The saved settings could not be read; background work is held from tools until they can. Every limit is "
+            "the server's own value until then."
+        )
+        for path in ("/autonomy/limits", "/autonomy/tools"):
+            response = await _send(app, "GET", path, headers=OWNER)
+            assert (response.status_code, response.json()) == (
+                200,
+                {"enabled": True, "loaded": False, "message": message},
+            ), path
+        for method, path, body in WRITES:
+            response = await _send(app, method, path, headers=OWNER, json=body)
+            assert (response.status_code, response.json()) == (503, {"error": store_module.NOT_LOADED_WRITE}), path
+    finally:
+        await store.close()
+
+
+@pytest.mark.postgres_only
+async def test_the_record_can_be_read_by_kind_and_length(rig):
+    r = await rig()
+    for n in range(3):
+        await r.store.set_limit("max_turns", 20 + n, "owner")
+    await r.store.set_tool("web_search", "denied", "proxy")
+    read = lambda query: _send(r.app, "GET", f"/autonomy/log{query}", headers=OWNER)  # noqa: E731
+    assert [c["new"] for c in (await read("")).json()["changes"]] == ["denied", 22, 21, 20]
+    assert [c["new"] for c in (await read("?kind=limits&limit=2")).json()["changes"]] == [22, 21]
+    assert [c["tool"] for c in (await read("?kind=tools")).json()["changes"]] == ["web_search"]
+    for query, words in [
+        ("?kind=other", "The kind must be all, limits or tools."),
+        ("?limit=0", "The limit must be a whole number from 1 to 100."),
+        ("?limit=101", "The limit must be a whole number from 1 to 100."),
+        ("?limit=x", "The limit must be a whole number from 1 to 100."),
+    ]:
+        response = await read(query)
+        assert (response.status_code, response.json()) == (400, {"error": words}), query
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("body", [{"actor": "agent"}, {"value": 5}, [1]], ids=["actor", "unknown", "not-an-object"])
+async def test_returning_a_limit_takes_no_field(rig, db, agent_id, body):
+    r = await rig()
+    await r.store.set_limit("max_turns", 40, "owner")
+    response = await _send(r.app, "DELETE", "/autonomy/limits/max_turns", headers=OWNER, json=body)
+    assert response.status_code == 400
+    assert r.settings.max_turns == 40 and len(await _log(db, agent_id)) == 1
+
+
+@pytest.mark.postgres_only
+async def test_saving_what_is_already_saved_answers_unchanged_and_records_nothing(rig, db, agent_id):
+    r = await rig()
+    first = await _send(r.app, "PUT", "/autonomy/limits/max_turns", headers=OWNER, json={"value": 40})
+    again = await _send(r.app, "PUT", "/autonomy/limits/max_turns", headers=PROXY, json={"value": 40})
+    assert (first.json()["changed"], again.json()["changed"]) == (True, False)
+    assert again.json()["limit"]["last_change"]["actor"] == "owner"
+    tool = await _send(r.app, "PUT", "/autonomy/tools/web_search", headers=OWNER, json={"setting": "denied"})
+    tool_again = await _send(r.app, "PUT", "/autonomy/tools/web_search", headers=OWNER, json={"setting": "denied"})
+    assert (tool.json()["changed"], tool_again.json()["changed"]) == (True, False)
+    assert len(await _log(db, agent_id)) == 2
+
+
+@pytest.mark.postgres_only
+async def test_the_tools_list_names_where_not_allowed_applies(rig):
+    r = await rig()
+    body = (await _send(r.app, "GET", "/autonomy/tools", headers=OWNER)).json()
+    assert body["loaded"] is True and body["held_in"] == tool_guard.held_places()
+    assert "chain decisions" in body["held_in"] and not any("companion" in place for place in body["held_in"])

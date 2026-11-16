@@ -35,14 +35,25 @@ from nous.api.owner_guard import OwnerGuard
 from nous.api.tool_classes import MCP_TOOL_PREFIX, tool_class
 from nous.autonomy.offered import PLACES, why_not_offered
 from nous.autonomy.registry import LIMITS, by_key
-from nous.autonomy.store import BACKGROUND, AutonomyRefused, AutonomyStore, Change, tool_key
+from nous.autonomy.store import (
+    BACKGROUND,
+    LOG_KINDS,
+    LOG_MAX,
+    LOG_SHOWN,
+    AutonomyRefused,
+    AutonomyStore,
+    Change,
+    tool_key,
+)
+from nous.autonomy.tool_guard import held_places
 from nous.storage.models import ToolCallLog
 
 logger = logging.getLogger(__name__)
 
-OFF = {"error": "autonomy settings are off", "enabled": False}
-GUARD_OFF = {"error": "the tool guard is off", "enabled": False}
-FAILED = "the request could not be processed"
+OFF = {"error": "Autonomy settings are off on this server.", "enabled": False}
+GUARD_OFF = {"error": "The tool guard is off on this server.", "enabled": False}
+FAILED = "The request could not be processed."
+QUERY_NUMBER_DIGITS = 4
 ECHO_CHARS = 40
 SUMMARY_CHARS = 160
 CALL_DAYS = 30
@@ -145,6 +156,7 @@ def limit_row(store: AutonomyStore, key: str, last: Change | None) -> dict[str, 
         "baseline": store.baseline[key],
         "source": store.source(key),
         "ceiling": store.ceilings.get(key),
+        "description": limit.description,
         "applies": limit.applies,
         "last_change": change_row(last) if last is not None else None,
     }
@@ -211,6 +223,10 @@ def build_autonomy_routes(
         assert proof is not None  # the guard let the call in on one
         return proof
 
+    def not_loaded(current: AutonomyStore) -> dict[str, Any]:
+        """What a read answers while the saved settings could not be read: the sentence, and no row."""
+        return {"enabled": True, "loaded": False, "message": current.not_loaded_message()}
+
     def failed(what: str, exc: Exception) -> JSONResponse:
         # The class only: an error's text can repeat what it was given.
         logger.warning("F115: %s failed (%s)", what, type(exc).__name__)
@@ -221,6 +237,8 @@ def build_autonomy_routes(
         current = store_now()
         if current is None:
             return JSONResponse({"enabled": False})
+        if not current.loaded:
+            return JSONResponse(not_loaded(current))
         try:
             last = await current.last_changes(limit.key for limit in LIMITS)
         except Exception as exc:
@@ -228,6 +246,7 @@ def build_autonomy_routes(
         return JSONResponse(
             {
                 "enabled": True,
+                "loaded": True,
                 "tool_guard": tools_on(),
                 "ceilings_set": bool(current.ceilings),
                 "limits": [limit_row(current, limit.key, last.get(limit.key)) for limit in LIMITS],
@@ -253,12 +272,12 @@ def build_autonomy_routes(
             return _error(400, str(exc))
         key = request.path_params["key"]
         try:
-            await current.set_limit(key, body.value, actor(request))
+            changed = await current.set_limit(key, body.value, actor(request))
         except AutonomyRefused as exc:
             return _error(exc.status, str(exc))
         except Exception as exc:
             return failed("changing a limit", exc)
-        return await changed_limit(current, key, {"changed": True})
+        return await changed_limit(current, key, {"changed": changed})
 
     async def delete_limit(request: Request) -> Response:
         """DELETE /autonomy/limits/{key}"""
@@ -279,12 +298,19 @@ def build_autonomy_routes(
         return await changed_limit(current, key, {"changed": changed})
 
     async def log(request: Request) -> Response:
-        """GET /autonomy/log"""
+        """GET /autonomy/log?kind=all&limit=20"""
         current = store_now()
         if current is None:
             return JSONResponse({"enabled": False})
+        kind = request.query_params.get("kind", "all")
+        if kind not in LOG_KINDS:
+            return _error(400, "The kind must be all, limits or tools.")
+        raw = request.query_params.get("limit", str(LOG_SHOWN))
+        limit = int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= QUERY_NUMBER_DIGITS else 0
+        if not 1 <= limit <= LOG_MAX:
+            return _error(400, f"The limit must be a whole number from 1 to {LOG_MAX}.")
         try:
-            changes = await current.changes()
+            changes = await current.changes(limit, kind)
         except Exception as exc:
             return failed("reading the changes", exc)
         return JSONResponse({"enabled": True, "changes": [change_row(change) for change in changes]})
@@ -341,6 +367,8 @@ def build_autonomy_routes(
         current = store_now()
         if current is None or not tools_on():
             return JSONResponse({"enabled": False})
+        if not current.loaded:
+            return JSONResponse(not_loaded(current))
         try:
             calls = await background_calls()
         except Exception as exc:
@@ -350,7 +378,9 @@ def build_autonomy_routes(
         return JSONResponse(
             {
                 "enabled": True,
+                "loaded": True,
                 "recorded": calls is not None,
+                "held_in": held_places(),
                 "locks_set": bool(current.locked),
                 "places": [{"key": place.key, "words": place.words} for place in PLACES],
                 "tools": [tool_row(current, name, listed.get(name), calls) for name in names],
@@ -377,14 +407,14 @@ def build_autonomy_routes(
             return _error(400, f"There is no tool named {name[:ECHO_CHARS]!r}.")
         setting = body.setting if isinstance(body.setting, str) else ""
         try:
-            await current.set_tool(
+            changed = await current.set_tool(
                 name, setting, actor(request), scope=_scope(body), destructive_guard=body.destructive_guard
             )
         except AutonomyRefused as exc:
             return _error(exc.status, str(exc))
         except Exception as exc:
             return failed("changing a tool's setting", exc)
-        return await changed_tool(current, name, True)
+        return await changed_tool(current, name, changed)
 
     async def delete_tool(request: Request) -> Response:
         """DELETE /autonomy/tools/{tool}"""

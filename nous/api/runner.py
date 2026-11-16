@@ -927,18 +927,20 @@ class AgentRunner:
             return Refusal("Tool error: this work was cancelled by the owner; stop.", "root_cancelled")
         guard = tool_guard.current()
         if guard is not None and guard.denies(ctx.kind, ctx.session_id, tool_name):
+            held_by = guard.held_by(tool_name)
             logger.warning(
-                "F115: refused %r in a %s turn (switched off for background work, session=%s)",
+                "F115: refused %r in a %s turn (held for background work: %s, session=%s)",
                 tool_name,
                 ctx.kind,
+                held_by,
                 session_id,
             )
             self._log_f026_decision(
-                "harness_context_policy_violation",
-                {"tool_name": tool_name, "context_kind": ctx.kind, "violation": "tool_guard", "mode": "enforce"},
+                tool_guard.REFUSAL_EVENT,
+                {"tool_name": tool_name, "context_kind": ctx.kind, "held_by": held_by},
                 session_id=session_id,
             )
-            return Refusal(tool_guard.refusal_text(tool_name), "tool_guard")
+            return Refusal(guard.refusal(tool_name), "tool_guard")
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
         # tuning the ordinary rules; this is a security floor. For both, a call to a

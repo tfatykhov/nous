@@ -177,7 +177,7 @@ OWNER_ROUTES = {
     },
     # F115: the autonomy changes, with the autonomy settings off (the default)
     **{
-        (method, path): (b"{}", 503, {"error": "autonomy settings are off", "enabled": False})
+        (method, path): (b"{}", 503, {"error": "Autonomy settings are off on this server.", "enabled": False})
         for method in ("PUT", "DELETE")
         for path in ("/autonomy/limits/max_turns", "/autonomy/tools/web_search")
     },

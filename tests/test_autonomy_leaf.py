@@ -43,9 +43,12 @@ ROOT = Path(__file__).resolve().parents[1]
 async def store_for(db):
     agents: list[str] = []
 
-    def build(env) -> AutonomyStore:
+    async def build(env) -> AutonomyStore:
         agents.append(env.agent)
-        return AutonomyStore(env.db, env.settings)
+        object.__setattr__(env.settings, "autonomy_settings_enabled", True)
+        store = AutonomyStore(env.db, env.settings)
+        await store.load()
+        return store
 
     yield build
     async with db.session() as session:
@@ -57,7 +60,7 @@ async def store_for(db):
 async def test_the_tool_loop_stops_at_the_new_number_of_iterations(runner_env, store_for):  # noqa: F811
     # Five tool calls and the closing call: a loop still at the host's 10 would call the model again (an overrun).
     env = await runner_env(*[[use("read_file", path="notes.txt")] for _ in range(5)], [say("Done.")])
-    await store_for(env).set_limit("max_turns", 5, "owner")
+    await (await store_for(env)).set_limit("max_turns", 5, "owner")
     await env.runner.run_turn("subtask-loop", "read", is_background=True, is_subtask=True)
     assert len(env.model.calls) == 6
     assert env.model.calls[-1]["tools"] is None  # the closing call after the last iteration
@@ -74,7 +77,7 @@ async def test_a_background_turn_is_given_the_new_tool_call_limit(env_factory, s
     heart.subtasks.fail = AsyncMock()
     heart.check_censors = AsyncMock(return_value=[])
     pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=env.settings)
-    await store_for(env).set_limit("subtask_tool_call_limit", 7, "owner")
+    await (await store_for(env)).set_limit("subtask_tool_call_limit", 7, "owner")
     subtask = SimpleNamespace(
         id=uuid.uuid4(),
         task="look",
@@ -92,7 +95,7 @@ async def test_a_running_chain_meets_the_new_depth_and_spawn_limits(env_factory,
     env = await env_factory(**CONT)
     root = await make_root(env)
     await make_child(env, root)  # depth 1, one spawn
-    store = store_for(env)
+    store = await store_for(env)
 
     async def limits():
         async with env.db.session() as s:
@@ -114,7 +117,7 @@ async def test_a_running_chain_meets_the_new_decision_token_and_stall_limits(env
     env = await env_factory(**CONT)
     root = await make_root(env)
     await add_arrival(env, root.id, 1, progress=True, tokens=(15_000, 5_000))  # one decision, 20,000 tokens
-    store = store_for(env)
+    store = await store_for(env)
 
     async def escalate():
         async with env.db.session() as s:
@@ -140,7 +143,7 @@ async def test_a_running_chain_meets_the_new_decision_token_and_stall_limits(env
 
 async def test_a_chain_started_after_the_change_gets_the_new_lifetime(env_factory, store_for):  # noqa: F811
     env = await env_factory(**CONT)
-    await store_for(env).set_limit("intention_root_ttl_hours", 5, "owner")
+    await (await store_for(env)).set_limit("intention_root_ttl_hours", 5, "owner")
     # As spawn_task stamps a new root: its bounds from the settings at that moment.
     spec = intentions.with_bounds(IntentionSpec(intent="look", origin_kind="interactive"), env.settings)
     subtask = await env.heart.subtasks.create(task="look", intention=spec)
@@ -178,7 +181,7 @@ async def test_a_question_is_judged_by_the_new_window(env_factory, store_for):  
 
     with pytest.raises(continuation.AnswerRefused):  # 25 hours old, the host's window is 24
         await answer()
-    await store_for(env).set_limit("intention_proposal_ttl_hours", 48, "owner")
+    await (await store_for(env)).set_limit("intention_proposal_ttl_hours", 48, "owner")
     assert (await answer()).question_id == question_id
 
 
@@ -195,13 +198,18 @@ async def test_a_new_subtask_gets_the_new_time_limits(env_factory, store_for):  
 
     heart.subtasks.create = AsyncMock(side_effect=create)
     tools = create_subtask_tools(heart, env.settings)
-    store = store_for(env)
+    store = await store_for(env)
     await store.set_limit("subtask_max_timeout", 5000, "owner")
     await store.set_limit("subtask_default_timeout", 4000, "owner")
     await tools["spawn_task"](task="look")
     await tools["spawn_task"](task="look", timeout=9000)
     assert [call["timeout"] for call in created] == [4000, 5000]
-    assert effective_orphan_threshold(env.settings) >= 5000 + 600
+    # A tool call left unfinished is marked unknown after the longest of the server's time limits plus 10 minutes,
+    # and never before NOUS_EXECUTION_LEDGER_PENDING_UNKNOWN_AFTER_SECONDS (7,800 s by default): with the workflow
+    # step limit at its default of 7,200 s, the largest subtask limit moves it only above 7,200 s.
+    assert effective_orphan_threshold(env.settings) == 7800
+    await store.set_limit("subtask_max_timeout", 9000, "owner")
+    assert effective_orphan_threshold(env.settings) == 9600
 
 
 def test_every_reader_of_a_limit_reads_it_from_settings_when_it_uses_it():
