@@ -40,7 +40,7 @@ from typing import Annotated, Any
 
 import httpx
 from pydantic import BaseModel, ConfigDict, StrictStr, StringConstraints, ValidationError, field_validator
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -70,10 +70,12 @@ __all__ = [
     "NOT_VALID",
     "REDEEM_PER_MINUTE",
     "Device",
+    "DeviceLimitReached",
     "DeviceStore",
     "PairingDesk",
     "build_device_routes",
     "clean_name",
+    "limit_lock_key",
     "token_digest",
 ]
 
@@ -105,6 +107,7 @@ DEVICE_EVENT = "companion_device_changed"
 NOT_VALID = {"error": "that code is not valid"}
 UNPROCESSABLE = {"error": "the request could not be processed"}
 FORBIDDEN = {"error": "forbidden"}
+TOO_MANY_DEVICES = {"error": "revoke a device first"}
 NO_STORE = {"Cache-Control": "no-store"}
 
 RevokeHook = Callable[["Device"], Awaitable[None]]
@@ -145,6 +148,15 @@ def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def limit_lock_key(agent_id: str) -> str:
+    """The advisory-lock key under which ``DeviceStore.create`` counts an agent's live devices and inserts one."""
+    return f"nous_companion_devices:{agent_id}"
+
+
+class DeviceLimitReached(Exception):
+    """``MAX_LIVE_DEVICES`` other devices are live: a device is revoked before another is paired."""
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -160,10 +172,30 @@ class DeviceStore:
 
     async def create(self, name: str, installation_id: str) -> tuple[Device, str]:
         """A new device and its token, which is returned here and kept nowhere. In the same transaction a live device
-        bound to the same installation is revoked (superseded); the revoke hooks then run for it."""
+        bound to the same installation is revoked (superseded); the revoke hooks then run for it.
+
+        Raises ``DeviceLimitReached`` when ``MAX_LIVE_DEVICES`` other devices are live (the one superseded does not
+        count). The count and the insert run under a transaction-level advisory lock keyed by the agent, so two
+        creates at once cannot both pass it."""
         token = DEVICE_TOKEN_PREFIX + secrets.token_urlsafe(32)
         device = Device(id=uuid.uuid4(), name=name, installation_id=installation_id)
         async with self._db.session() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": limit_lock_key(self._agent_id)}
+            )
+            others = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(A2uiDevice)
+                    .where(
+                        A2uiDevice.agent_id == self._agent_id,
+                        A2uiDevice.revoked_at.is_(None),
+                        A2uiDevice.installation_id != installation_id,
+                    )
+                )
+            ).scalar_one()
+            if others >= MAX_LIVE_DEVICES:
+                raise DeviceLimitReached  # the session ends with a rollback, which releases the lock
             superseded = (
                 await session.execute(
                     update(A2uiDevice)
@@ -533,7 +565,7 @@ def build_device_routes(
             if name is None:
                 return _json({"error": "the name has no letter or digit that can be shown"}, 400)
         if await store.live_count() >= MAX_LIVE_DEVICES:
-            return _json({"error": "revoke a device first"}, 409)
+            return _json(TOO_MANY_DEVICES, 409)
         return _json({"code": desk.open(name), "expires_in": CODE_TTL_SECONDS})
 
     async def list_devices(request: Request) -> Response:
@@ -549,7 +581,11 @@ def build_device_routes(
         return _json({"revoked": revoked})
 
     async def redeem(request: Request) -> Response:
-        """POST /a2ui/devices/redeem (no secret: the code is the proof). Every refused code answers ``NOT_VALID``."""
+        """POST /a2ui/devices/redeem (no secret: the code is the proof). Every refused code answers ``NOT_VALID``.
+
+        The live-device limit is checked when a pairing is opened, and again with the insert: a device that would be
+        the eleventh live one (another pairing was redeemed meanwhile) is refused with 409 "revoke a device first",
+        and its code, already taken, is used up."""
         if not json_media_type(request.headers.get("content-type")):
             return _json({"error": "Content-Type must be application/json"}, 415)
         try:
@@ -564,7 +600,10 @@ def build_device_routes(
         if not matched:
             return _json(NOT_VALID, 404)
         name = owner_name or clean_name(body.name) or DEFAULT_NAME
-        device, token = await store.create(name, body.installation_id)
+        try:
+            device, token = await store.create(name, body.installation_id)
+        except DeviceLimitReached:
+            return _json(TOO_MANY_DEVICES, 409)
         public = getattr(settings, "a2ui_public_base_url", "")
         payload = {
             "device_id": str(device.id),

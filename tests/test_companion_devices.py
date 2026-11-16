@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from starlette.applications import Starlette
 
 from nous.api import companion_devices
@@ -28,10 +28,12 @@ from nous.api.companion_devices import (
     MAX_LIVE_DEVICES,
     NOT_VALID,
     Device,
+    DeviceLimitReached,
     DeviceStore,
     PairingDesk,
     build_device_routes,
     clean_name,
+    limit_lock_key,
 )
 from nous.api.owner_guard import OwnerGuard
 from nous.storage.models import A2uiDevice
@@ -915,3 +917,91 @@ async def test_a_store_failure_after_the_code_is_taken_burns_the_code(make_rig, 
         assert record.exc_info is None
     assert (await _redeem(rig, code)).status_code == 404
     assert rig.telegram.requests == []
+
+
+# ---- the live-device limit, held with the insert -----------------------------------------------------------------
+
+
+async def _fill(store: DeviceStore, count: int) -> list[tuple[Device, str]]:
+    return [await store.create(f"Phone {n}", f"inst-full-{n}") for n in range(count)]
+
+
+@pg
+async def test_create_refuses_an_eleventh_live_device(store: DeviceStore) -> None:
+    await _fill(store, MAX_LIVE_DEVICES)
+    with pytest.raises(DeviceLimitReached):
+        await store.create("One too many", "inst-new")
+    assert await store.live_count() == MAX_LIVE_DEVICES
+    assert await store.installation_bound("inst-new") is False
+
+
+@pg
+async def test_re_pairing_an_installation_at_the_limit_supersedes(store: DeviceStore) -> None:
+    devices = await _fill(store, MAX_LIVE_DEVICES)
+    (old, old_token) = devices[3]
+    new, new_token = await store.create("Phone 3 again", old.installation_id)
+    assert await store.live_count() == MAX_LIVE_DEVICES
+    assert await store.verify(old_token) is None
+    assert await store.verify(new_token) == new
+
+
+@pg
+async def test_two_creates_at_once_never_pass_the_limit(store: DeviceStore) -> None:
+    await _fill(store, MAX_LIVE_DEVICES - 1)
+    results = await asyncio.gather(
+        store.create("Tenth", "inst-a"), store.create("Eleventh", "inst-b"), return_exceptions=True
+    )
+    assert sorted(type(result).__name__ for result in results) == ["DeviceLimitReached", "tuple"]
+    assert await store.live_count() == MAX_LIVE_DEVICES
+
+
+async def _lock_waiters(db) -> int:
+    async with db.engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND wait_event = 'advisory' "
+                    "AND query LIKE '%pg_advisory_xact_lock%'"
+                )
+            )
+        ).scalar_one()
+
+
+async def _until_waiters(db, expected: int) -> None:
+    for _ in range(200):
+        if await _lock_waiters(db) >= expected:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"fewer than {expected} redemptions are waiting in create")
+
+
+@pg
+async def test_two_redemptions_at_once_at_nine_live_devices_leave_ten(make_rig, db) -> None:
+    """Nine live devices. The first redemption takes its code and waits in ``create`` for the agent's lock (held here
+    on another connection); the owner then opens a second pairing (nine are still committed, so it opens) and a second
+    device redeems it and waits too. Released, exactly one of them is stored: ten live devices, and the other is a 409
+    whose code is used up."""
+    rig = make_rig()
+    await _fill(rig.store, MAX_LIVE_DEVICES - 1)
+    key = {"key": limit_lock_key(rig.agent_id)}
+    tasks: list[asyncio.Task] = []
+    async with db.engine.connect() as holder:
+        await holder.execute(text("SELECT pg_advisory_lock(hashtextextended(:key, 0))"), key)
+        try:
+            first_code = await _open(rig)
+            tasks.append(asyncio.create_task(_redeem(rig, first_code, installation_id="inst-a")))
+            await _until_waiters(db, 1)
+            second_code = await _open(rig)
+            tasks.append(asyncio.create_task(_redeem(rig, second_code, installation_id="inst-b")))
+            await _until_waiters(db, 2)
+        finally:
+            await holder.execute(text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"), key)
+    first, second = await asyncio.gather(*tasks)
+    assert sorted([first.status_code, second.status_code]) == [200, 409]
+    refused = first if first.status_code == 409 else second
+    assert refused.json() == {"error": "revoke a device first"}
+    assert "token" not in refused.json()
+    assert await rig.store.live_count() == MAX_LIVE_DEVICES
+    assert (await _redeem(rig, second_code, installation_id="inst-c")).status_code == 404  # used up
+    assert rig.desk.status() == {"state": "used"}
