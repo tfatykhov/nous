@@ -114,6 +114,7 @@ def create_app(
     dag_orchestrator: Any | None = None,
     continuation_runner: Any | None = None,
     goal_driver: Any | None = None,
+    goal_tool_grants: Any | None = None,
     tool_call_recorder: Any | None = None,
     model_call_recorder: Any | None = None,
     model_call_text_store: Any | None = None,
@@ -4137,7 +4138,15 @@ def create_app(
     # their fixed "goals are off" answers.
     goal_store = GoalStore(database, settings.agent_id, settings) if settings.goals_enabled else None
     routes.extend(
-        build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard, driver=goal_driver)
+        build_goal_routes(
+            database=database,
+            settings=settings,
+            goals=goal_store,
+            guard=owner_guard,
+            driver=goal_driver,
+            dispatcher=dispatcher,
+            grants=goal_tool_grants,
+        )
     )
     # F115: the owner's limits of background work and the tool guard. Always mounted: with
     # NOUS_AUTONOMY_SETTINGS_ENABLED off there is no store, and the routes give their fixed "off" answers.

@@ -178,6 +178,11 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
             ),
         )
     },
+    # F115 per-goal tools: a goal's tool changes, with goals off (the default)
+    **{
+        (method, "/goals/G-0001/tools/send_email"): (b"{}", 503, {"error": "goals are off", "goals_enabled": False})
+        for method in ("PUT", "DELETE")
+    },
     # F115: the autonomy changes, with the autonomy settings off (the default)
     **{
         (method, path): (b"{}", 503, {"error": "Autonomy settings are off on this server.", "enabled": False})
@@ -227,6 +232,7 @@ GOAL_READS = {
     "/goals": {"enabled": False, "goals": []},
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
+    "/goals/G-0001/tools": {"enabled": False},
 }
 # F115: the autonomy reads require a secret too.
 AUTONOMY_READS = {
@@ -247,7 +253,15 @@ GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("GET", "/goals/options"),
     ("GET", "/goals/{ref}"),
-    *{(method, path.replace("G-0001", "{ref}")) for method, path in OWNER_ROUTES if path.startswith("/goals")},
+    ("GET", "/goals/{ref}/tools"),
+    # The {tool} of a goal's tool route is not made by the G-0001 replacement below.
+    ("PUT", "/goals/{ref}/tools/{tool}"),
+    ("DELETE", "/goals/{ref}/tools/{tool}"),
+    *{
+        (method, path.replace("G-0001", "{ref}"))
+        for method, path in OWNER_ROUTES
+        if path.startswith("/goals") and "/tools/" not in path
+    },
 }
 INTENTION_ROUTE_SET = {
     ("POST", "/intentions/proposals/{id}/decide"),
@@ -475,7 +489,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         for method in route.methods - {"HEAD"}
     }
     assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
-    assert len(GOAL_ROUTE_SET) == 14
+    assert len(GOAL_ROUTE_SET) == 17
     assert len(AUTONOMY_ROUTE_SET) == 7
 
 

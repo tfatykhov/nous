@@ -2488,6 +2488,7 @@ def build_app(settings: Settings) -> Starlette:
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
         continuation_runner=_lazy_component(components, "continuation_runner"),
         goal_driver=_lazy_component(components, "goal_driver"),
+        goal_tool_grants=_lazy_component(components, "goal_tool_grants"),
         tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
         model_call_recorder=_lazy_component(components, "model_call_recorder"),
         model_call_text_store=_lazy_component(components, "model_call_text_store"),

@@ -18,6 +18,15 @@ the changes answer 503 ``GOALS_OFF``. Neither reads a table.
 ``actions`` in a goal's detail lists exactly the changes the store accepts for the goal as it is now (the store's own
 rules, read in one place here; ``tests/test_goal_routes_actions.py`` drives the real store to hold the two equal), and
 ``resume_blocked`` says why a paused goal cannot be resumed yet.
+
+F115 per-goal tools: ``GET /goals/{ref}/tools`` (the tools the goal may use without asking, each with what it does and
+whether it can be used now and why not, and the tools it could be allowed, each with why not when it cannot be now),
+``PUT /goals/{ref}/tools/{tool}`` (body ``{"confirm": true}``, and for an MCP client tool ``"server_id"``, the id of the
+server the screen showed) and ``DELETE /goals/{ref}/tools/{tool}``. The proof the guard accepted (``owner`` or
+``proxy``) is stored with the grant; the journal's actor is the owner. With ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` off the
+read answers ``grants_enabled: false`` and the changes 503 ``GRANTS_OFF``. After a change, and after every action
+that can change whether a goal is active, the runner's view of the goal's grants is read again; when that read fails
+the answer carries ``reload: true`` and no tool of any goal is used without asking until a later read.
 """
 
 from __future__ import annotations
@@ -36,15 +45,21 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from nous.api import tool_policy
+from nous.api.autonomy_routes import registered_tools, tool_classes_words, tool_group
 from nous.api.owner_guard import OwnerGuard
+from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_background, mcp_tool_identity
+from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import _RANGES, PRESETS
+from nous.goals.grants import NEVER_SENTENCE, lead_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import (
     DELIVERED_CHANNEL_KINDS,
     EVIDENCE_MAX_REFS,
     EVIDENCE_REF_MAX_CHARS,
+    GRANTS_MAX,
     JOURNAL_MAX_CHARS,
     LIVE_STATES,
     MAX_DEADLINE_DAYS,
@@ -53,12 +68,14 @@ from nous.goals.store import (
     GoalStore,
     clip,
     format_short_id,
+    grant_identity,
 )
-from nous.storage.models import Goal, GoalJournal, GoalSession
+from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
 logger = logging.getLogger(__name__)
 
 GOALS_OFF = {"error": "goals are off", "goals_enabled": False}
+GRANTS_OFF = {"error": "Tool grants are off on this server."}
 STATES: tuple[str, ...] = ("draft", "active", "paused", "done", "failed", "cancelled")
 FINISHED_STATES: tuple[str, ...] = ("done", "failed", "cancelled")
 # The list's filters: a state, or one of these names (``open`` by default, so a poll never re-reads finished goals).
@@ -88,6 +105,8 @@ ACTIONS: tuple[str, ...] = (
     "cancel",
 )
 ACTOR = "owner"
+# The actions that can change whether a goal is active: after each, its tool grants are read again (F115).
+STATE_ACTIONS: frozenset[str] = frozenset({"approve", "pause", "resume", "stop", "cancel", "confirm-done"})
 JOURNAL_DEFAULT = 50
 JOURNAL_MAX = 200
 QUERY_NUMBER_DIGITS = 9  # a longer number in a query is refused, never converted
@@ -168,6 +187,14 @@ class NoteBody(_Body):
     """``POST /goals/{ref}/note``: a note the next session reads."""
 
     text: Text = Field(max_length=NOTE_MAX_CHARS)
+
+
+class GrantBody(_Body):
+    """``PUT /goals/{ref}/tools/{tool}``: the owner's confirmation, and for an MCP client tool the id of the server the
+    screen showed."""
+
+    confirm: StrictBool | None = None
+    server_id: Text | None = Field(default=None, max_length=36)
 
 
 class _BadRequest(Exception):
@@ -432,16 +459,138 @@ def _no_goal(ref: str) -> JSONResponse:
     return _error(404, f"no goal {clip(ref, REF_ECHO_CHARS)}")
 
 
+# ---- the tools a goal may use without asking (F115) ------------------------------------------------------------
+
+TOOL_ECHO_CHARS = 64
+NOT_READ_SENTENCE = "The saved tool settings could not be read, so nothing can be changed until they can."
+SERVER_CHANGED_SENTENCE = "That server changed since you looked. Look again."
+CONFIRM_SENTENCE = "Allowing a tool needs your confirmation."
+
+
+@dataclass(frozen=True)
+class GrantRefusal:
+    """Why the owner cannot allow a goal a tool now: the answer's status, a code for the screen and the sentence."""
+
+    status: int
+    code: str
+    sentence: str
+
+
+def grant_refusal_for(tool: str, *, registered: bool, settings: Any) -> GrantRefusal | None:
+    """Why the owner cannot allow a goal to use ``tool`` now, or None: from ``tool_policy.grant_refusal``, whether
+    Nous has the tool now, the tool guard (a host lock, the owner's setting, settings not read or no guard), an MCP
+    client tool's server switch, and the setting the tool needs first (``grants.not_ready``)."""
+    name = clip(tool, TOOL_ECHO_CHARS)
+    code = tool_policy.grant_refusal(tool)
+    if code in ("never", "harness"):
+        return GrantRefusal(400, "never", f"{name} can never be given to a goal.")
+    if code == "spawns":
+        return GrantRefusal(400, "spawns", f"{name} starts other work and can never be given to a goal.")
+    if code == "not_outward":
+        return GrantRefusal(400, "not_outward", f"{name} needs no permission: a goal can use it already, or never can.")
+    mcp = tool.startswith(MCP_TOOL_PREFIX)
+    identity = mcp_tool_identity(tool) if mcp else None
+    if code is not None or not registered or (mcp and (mcp_tool_background(tool) is None or identity is None)):
+        return GrantRefusal(400, "not_registered", f"{name} is not a tool Nous has now.")
+    guard = tool_guard.current()
+    held = guard.reason("continuation", None, tool) if guard is not None else tool_guard.NOT_READ
+    if held == tool_guard.NOT_READ:
+        return GrantRefusal(503, "not_read", NOT_READ_SENTENCE)
+    if held == tool_guard.LOCK:
+        return GrantRefusal(409, "locked", f"{name} is locked by the server and cannot be given to a goal.")
+    if held == tool_guard.OWNER:
+        return GrantRefusal(
+            409,
+            "switched_off",
+            f"{name} is switched off for background work. Set it to Allowed under Limits and tools first.",
+        )
+    if mcp and identity is not None and not mcp_tool_background(tool):
+        return GrantRefusal(
+            409,
+            "server_off",
+            f"{identity.server_name} is not available to background work. Turn that on for the server on the "
+            "Integrations screen first.",
+        )
+    ready = not_ready(tool, settings)
+    if ready is not None:
+        return GrantRefusal(409, "not_ready", ready)
+    return None
+
+
+def grant_not_usable(tool: str, identity: McpIdentity | None, *, registered: bool, settings: Any) -> str | None:
+    """Why a goal's grant of ``tool`` is not used now, in words, from the checks the runner makes; None when it is
+    (while the goal is active and a session is open)."""
+    guard = tool_guard.current()
+    if guard is None:
+        return "The tool settings are not loaded on this server, so no goal's tools are used without asking."
+    held = guard.reason("continuation", None, tool)
+    if held == tool_guard.LOCK:
+        return "Locked by the server."
+    if held == tool_guard.NOT_READ:
+        return "Held until the saved tool settings can be read."
+    if held == tool_guard.OWNER:
+        return "Switched off for background work under Limits and tools."
+    if tool.startswith(MCP_TOOL_PREFIX):
+        background = mcp_tool_background(tool)
+        if background is None:
+            return "Its server is not connected now."
+        if mcp_tool_identity(tool) != identity:
+            return "Its server changed since you allowed it. Remove it, look at the server, and allow it again."
+        if not background:
+            return "Its server is not available to background work."
+    elif not registered:
+        return "Nous does not have this tool now."
+    return not_ready(tool, settings)
+
+
+def tool_words(tool: str, identity: McpIdentity | None, ref: str) -> dict[str, Any]:
+    """What a tool does when a goal may use it, as the screen shows it: ``does`` and ``note`` (``grants.words_for``),
+    ``says`` (both as sentences) and ``confirm`` (the question asked before allowing it)."""
+    does, note = words_for(tool, identity)
+    tail = f" {note}" if note else ""
+    return {
+        "label": identity.remote_tool if identity is not None else tool,
+        "group": tool_group(tool),
+        "classes": tool_classes_words(tool),
+        "does": does,
+        "note": note,
+        "says": f"{does[:1].upper()}{does[1:]}.{tail}",
+        "confirm": f"Allow {ref} to {does} without asking you each time?{tail}",
+        "server_name": identity.server_name if identity is not None else None,
+        "server_host": identity.server_host if identity is not None else None,
+        "server_id": str(identity.server_id) if identity is not None else None,
+    }
+
+
 # ---- the routes --------------------------------------------------------------------------------------------------
 
 
 def build_goal_routes(
-    *, database: Any, settings: Any, goals: GoalStore | None, guard: OwnerGuard, driver: Any = None
+    *,
+    database: Any,
+    settings: Any,
+    goals: GoalStore | None,
+    guard: OwnerGuard,
+    driver: Any = None,
+    dispatcher: Any = None,
+    grants: Any = None,
 ) -> list[Route]:
     """The goal routes, every one behind ``guard``. ``goals`` is None with the flag off. ``driver`` is the app's
-    goal driver component (main.py passes its lazy proxy, falsy until the lifespan built one), read at each request.
-    Literal paths come before ``/goals/{ref}``."""
+    goal driver component (main.py passes its lazy proxy, falsy until the lifespan built one), read at each request;
+    so are ``dispatcher`` (the tool dispatcher) and ``grants`` (the view of the goals' tool grants, F115 per-goal
+    tools; falsy with that flag off). Literal paths come before ``/goals/{ref}``."""
     agent_id = settings.agent_id
+
+    async def refresh_grants(goal_id: UUID) -> bool:
+        """Read the goal's tool grants into the runner's view again; False when that failed (the view is then empty
+        until a later read). Nothing to read with the flag off."""
+        if not grants:
+            return True
+        try:
+            return bool(await grants.refresh_goal(goal_id))
+        except Exception as exc:
+            logger.warning("F115: the goal's tool grants were not read again (%s)", type(exc).__name__)
+            return False
 
     async def tallies(goal_ids: list[UUID]) -> tuple[datetime, dict[UUID, Tally]]:
         """The database's clock, and each goal's ``Tally``: its spend from ``goal_spent`` (one query a goal) and its
@@ -629,6 +778,8 @@ def build_goal_routes(
                 return _error(409, str(exc))
             except Exception as exc:
                 return failed(name, exc)
+            if name in STATE_ACTIONS:  # a pause reaches the goal's open session now, not at the next tick
+                await refresh_grants(changed.id)
             return await changed_answer(changed, name)
 
         run.__name__ = f"goal_{name.replace('-', '_')}"
@@ -638,11 +789,164 @@ def build_goal_routes(
     def budget(store: GoalStore, goal_id: UUID, body: BudgetChange) -> Awaitable[Goal]:
         return store.raise_budget(goal_id, total=body.total, day=body.day, actor=ACTOR)
 
+    # ---- the tools a goal may use without asking (F115) ----------------------------------------------------------
+
+    def grants_on() -> bool:
+        return bool(settings.goal_tool_grants_enabled and grants)
+
+    def listed() -> dict[str, str]:
+        return registered_tools(dispatcher) if dispatcher else {}
+
+    def grant_row(goal: Goal, row: GoalToolGrant, tools: dict[str, str]) -> dict[str, Any]:
+        identity = grant_identity(row)
+        why = grant_not_usable(row.tool, identity, registered=row.tool in tools, settings=settings)
+        return {
+            "tool": row.tool,
+            **tool_words(row.tool, identity, format_short_id(goal.short_id)),
+            "granted_at": _iso(row.granted_at),
+            "usable": why is None,
+            "not_usable_why": why,
+        }
+
+    def available_row(goal: Goal, tool: str, *, full: bool) -> dict[str, Any]:
+        identity = mcp_tool_identity(tool) if tool.startswith(MCP_TOOL_PREFIX) else None
+        refusal = grant_refusal_for(tool, registered=True, settings=settings)
+        if refusal is None and full:
+            refusal = GrantRefusal(409, "cap", f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
+        return {
+            "tool": tool,
+            **tool_words(tool, identity, format_short_id(goal.short_id)),
+            "blocked": None if refusal is None else {"code": refusal.code, "sentence": refusal.sentence},
+        }
+
+    async def tools_payload(goal: Goal) -> dict[str, Any]:
+        rows = await goals.tool_grants(goal.id) if goals else []
+        tools = listed()
+        granted = {row.tool for row in rows}
+        grantable = sorted(name for name in tools if tool_policy.grant_refusal(name) is None and name not in granted)
+        full = len(rows) >= GRANTS_MAX
+        return {
+            "enabled": True,
+            "grants_enabled": True,
+            "can_edit": goal.state in LIVE_STATES,
+            "limit": GRANTS_MAX,
+            "applies_in": lead_sentence(),
+            "never": NEVER_SENTENCE,
+            "grants": [grant_row(goal, row, tools) for row in rows],
+            "available": [available_row(goal, name, full=full) for name in grantable],
+        }
+
+    async def tools_answer(goal: Goal, changed: bool) -> JSONResponse:
+        """The answer of a grant or a revoke the store made (or found made): the runner's view read again, then the
+        goal's tools. ``reload: true`` when either read failed."""
+        read = await refresh_grants(goal.id)
+        try:
+            payload = await tools_payload(goal)
+        except Exception as exc:
+            logger.warning("F115: a goal's tools were changed, and reading them back failed (%s)", type(exc).__name__)
+            payload = {"enabled": True, "grants_enabled": True, "reload": True}
+        if not read:
+            payload["reload"] = True
+        return JSONResponse({**payload, "changed": changed})
+
+    async def parse_grant(request: Request, model: type[_Body]) -> Any:
+        """The body as ``model``; a 400 names the fields only: ``Not accepted: <fields>.``"""
+        raw = await request.body()
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except (ValueError, RecursionError):
+            raise _BadRequest("Not accepted: body.") from None
+        if not isinstance(data, dict):
+            raise _BadRequest("Not accepted: body.")
+        try:
+            return model.model_validate(data)
+        except ValidationError as exc:
+            fields = sorted({clip(str(error["loc"][0]), ECHO_CHARS) for error in exc.errors() if error["loc"]})
+            raise _BadRequest(f"Not accepted: {', '.join(fields) or 'body'}.") from None
+
+    async def tools_of(request: Request) -> Response:
+        """GET /goals/{ref}/tools"""
+        if not goals:
+            return JSONResponse({"enabled": False})
+        if not grants_on():
+            return JSONResponse({"enabled": True, "grants_enabled": False})
+        ref = request.path_params["ref"]
+        try:
+            goal = await goals.get(ref)
+            if goal is None:
+                return _no_goal(ref)
+            return JSONResponse(await tools_payload(goal))
+        except Exception as exc:
+            return failed("reading a goal's tools", exc)
+
+    async def allow_tool(request: Request) -> Response:
+        """PUT /goals/{ref}/tools/{tool}"""
+        if not goals:
+            return JSONResponse(GOALS_OFF, status_code=503)
+        if not grants_on():
+            return JSONResponse(GRANTS_OFF, status_code=503)
+        try:
+            body: GrantBody = await parse_grant(request, GrantBody)
+        except _BadRequest as exc:
+            return _error(400, str(exc))
+        if body.confirm is not True:
+            return _error(400, CONFIRM_SENTENCE)
+        ref, tool = request.path_params["ref"], request.path_params["tool"]
+        try:
+            goal = await goals.get(ref)
+            if goal is None:
+                return _no_goal(ref)
+            if goal.state not in LIVE_STATES:
+                return _error(409, f"{format_short_id(goal.short_id)} is finished; its tools can no longer be changed.")
+            refusal = grant_refusal_for(tool, registered=tool in listed(), settings=settings)
+            if refusal is not None:
+                return _error(refusal.status, refusal.sentence)
+            identity = mcp_tool_identity(tool) if tool.startswith(MCP_TOOL_PREFIX) else None
+            if (identity is None) != (body.server_id is None):
+                return _error(400, "Not accepted: server_id.")
+            if identity is not None and body.server_id != str(identity.server_id):
+                return _error(409, SERVER_CHANGED_SENTENCE)
+            proof = guard.proof(request)
+            assert proof is not None  # the guard let the call in on one
+            changed = await goals.grant_tool(goal.id, tool, identity, actor=ACTOR, proof=proof)
+        except GoalRefused as exc:
+            return _error(409, str(exc))
+        except Exception as exc:
+            return failed("allowing a goal a tool", exc)
+        return await tools_answer(goal, changed)
+
+    async def remove_tool(request: Request) -> Response:
+        """DELETE /goals/{ref}/tools/{tool}"""
+        if not goals:
+            return JSONResponse(GOALS_OFF, status_code=503)
+        if not grants_on():
+            return JSONResponse(GRANTS_OFF, status_code=503)
+        try:
+            await parse_grant(request, NoBody)
+        except _BadRequest as exc:
+            return _error(400, str(exc))
+        ref, tool = request.path_params["ref"], request.path_params["tool"]
+        try:
+            goal = await goals.get(ref)
+            if goal is None:
+                return _no_goal(ref)
+            proof = guard.proof(request)
+            assert proof is not None  # the guard let the call in on one
+            changed = await goals.revoke_tool(goal.id, tool, actor=ACTOR, proof=proof)
+        except GoalRefused as exc:
+            return _error(409, str(exc))
+        except Exception as exc:
+            return failed("removing a goal's tool", exc)
+        return await tools_answer(goal, changed)
+
     return [
         guard.route("/goals", list_goals, methods=["GET"]),
         guard.route("/goals", create, methods=["POST"]),
         guard.route("/goals/options", options, methods=["GET"]),
         guard.route("/goals/{ref}", get_goal, methods=["GET"]),
+        guard.route("/goals/{ref}/tools", tools_of, methods=["GET"]),
+        guard.route("/goals/{ref}/tools/{tool}", allow_tool, methods=["PUT"]),
+        guard.route("/goals/{ref}/tools/{tool}", remove_tool, methods=["DELETE"]),
         action("approve", NoBody, lambda store, gid, _b: store.approve(gid, actor=ACTOR)),
         action("pause", NoBody, lambda store, gid, _b: store.pause(gid, actor=ACTOR)),
         action("resume", NoBody, lambda store, gid, _b: store.resume(gid, actor=ACTOR)),

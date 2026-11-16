@@ -203,6 +203,16 @@ def summary(description: str) -> str:
     return line if len(line) <= SUMMARY_CHARS else line[: SUMMARY_CHARS - 1].rstrip() + "…"
 
 
+def registered_tools(dispatcher: Any) -> dict[str, str]:
+    """The tools a background turn can be offered (every registered tool but the initiation ones and the harness's own
+    per-turn tools, which no setting holds), by name, with each one's description."""
+    return {
+        tool["name"]: tool.get("description", "")
+        for tool in dispatcher.available_tools("task")
+        if tool["name"] not in HARNESS_TOOLS
+    }
+
+
 def build_autonomy_routes(
     *, database: Any, settings: Any, store: Any, dispatcher: Any, guard: OwnerGuard
 ) -> list[Route]:
@@ -336,10 +346,11 @@ def build_autonomy_routes(
         locked = name in current.locked
         setting = current.tools.get(name)
         lineage_shell = bool(settings.f099_lineage_shell)
+        goal_grants = bool(settings.goal_tool_grants_enabled)
         not_offered = [
             {"place": place.key, "why": why}
             for place in PLACES
-            if (why := why_not_offered(place, name, lineage_shell=lineage_shell)) is not None
+            if (why := why_not_offered(place, name, lineage_shell=lineage_shell, goal_grants=goal_grants)) is not None
         ]
         counted = calls.get(name) if calls is not None else None
         return {
@@ -357,13 +368,7 @@ def build_autonomy_routes(
         }
 
     def listed_tools() -> dict[str, str]:
-        """The tools a background turn can be offered (every registered tool but the initiation ones and the
-        harness's own per-turn tools, which no setting holds), by name, with each one's description."""
-        return {
-            tool["name"]: tool.get("description", "")
-            for tool in dispatcher.available_tools("task")
-            if tool["name"] not in HARNESS_TOOLS
-        }
+        return registered_tools(dispatcher)
 
     async def tools(request: Request) -> Response:
         """GET /autonomy/tools"""
