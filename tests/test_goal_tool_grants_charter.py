@@ -32,11 +32,12 @@ from nous.goals.charter import (
     render_goal_block,
     tools_section,
 )
-from nous.goals.grants import GoalToolGrants
+from nous.goals.grants import GRANT_FACTS, GoalToolGrants
 from nous.storage.models import Subtask
 
 NOTES = McpIdentity(uuid.uuid4(), "a1" * 32, "search", server_name="notes", server_host="notes.example.com")
 ON = "mcp__notes__search"
+EMAIL_WORDS = GRANT_FACTS["send_email"].does
 
 
 def _block(**over):
@@ -67,14 +68,14 @@ def test_no_grant_says_none_beyond_the_standard_set():
 
 def test_two_grants_are_listed_with_what_they_do_and_the_rule():
     lines = [
-        ToolLine("send_email", "send email to the addresses on your email allowlist"),
+        ToolLine("send_email", EMAIL_WORDS),
         ToolLine(ON, "a tool of the MCP server notes"),
     ]
     assert tools_section(lines) == "\n".join(
         [
             "Tools this goal may use without asking:",
             f"- {ON}: a tool of the MCP server notes.",
-            "- send_email: send email to the addresses on your email allowlist.",
+            f"- send_email: {EMAIL_WORDS}.",
             TOOLS_RULE,
         ]
     )
@@ -163,7 +164,7 @@ async def test_a_session_with_two_grants_is_told_both_in_its_first_task_and_its_
     for text in (subtask.task, (await chain.turn_context(root.id)).block):
         assert "Tools this goal may use without asking:\n" in text
         assert f"- {ON}: a tool of the MCP server notes." in text
-        assert "- send_email: send email to the addresses on your email allowlist." in text
+        assert f"- send_email: {EMAIL_WORDS}." in text
         assert TOOLS_RULE in text
         assert "notes.example.com" not in text and "search_" not in text  # no server text, only names
 
@@ -174,7 +175,7 @@ async def test_a_paused_goal_or_an_ended_session_is_told_none_is_available(env_f
     await w.store.pause(goal.id, actor="owner")
     await view.refresh_goal(goal.id)
     block = (await chain.turn_context(root.id)).block
-    assert "- send_email: not available now." in block and "send email to the addresses" not in block
+    assert "- send_email: not available now." in block and EMAIL_WORDS not in block
     await w.store.resume(goal.id, actor="owner")
     await view.refresh()
     assert "- send_email: send email" in (await chain.turn_context(root.id)).block

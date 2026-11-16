@@ -12,6 +12,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from f099_support import (
     SEND_EMAIL_ARGS,
@@ -28,6 +29,7 @@ from nous import main
 from nous.api import tool_classes, tool_policy
 from nous.api.execution_context import CONTEXT_KINDS, ExecutionContext
 from nous.api.runner import AgentRunner
+from nous.api.telegram_tools import _SEND_FILE_SCHEMA, create_send_file_tool
 from nous.api.tool_classes import McpIdentity
 from nous.api.tools import ToolDispatcher
 from nous.autonomy import tool_guard
@@ -448,6 +450,116 @@ async def test_a_real_turn_after_the_grant_is_removed_does_not_call_it(runner_en
     await env.runner.run_turn("subtask-78", "send the note", is_background=True, is_subtask=True, context=ctx)
     assert calls == []
     assert "send_email" not in [tool["name"] for tool in env.model.calls[0]["tools"]]
+
+
+# ---- a granted send_file in a real turn --------------------------------------------------------------------------
+
+
+class _Telegram:
+    """A stand-in for the Telegram API behind the real send_file tool: it keeps each upload and answers ok."""
+
+    def __init__(self) -> None:
+        self.uploads: list[bytes] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.uploads.append(request.read())
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 7}})
+
+
+def _tool_result_text(call: dict) -> str:
+    """The text of the last tool result in one model call's messages."""
+    for message in reversed(call["messages"]):
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    inner = block.get("content")
+                    if isinstance(inner, list):
+                        return " ".join(part.get("text", "") for part in inner if isinstance(part, dict))
+                    return str(inner)
+    raise AssertionError("no tool result in the call")
+
+
+async def _file_turn(make_env, tmp_path, file_path_of, *, cleanup=None):
+    """One real subtask turn of a goal with send_file granted, whose model calls send_file once with the path
+    ``file_path_of(root_dir)``. Returns ``(telegram, the tool result's text, the root's directory)``."""
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    holder: dict = {}
+
+    async def call_send_file(_kwargs):
+        args = {"file_path": file_path_of(holder["root_dir"])}
+        if cleanup is not None:
+            args["cleanup"] = cleanup
+        return [use("send_file", **args)]
+
+    env = await make_env(
+        call_send_file,
+        [say("Done.")],
+        workspace_dir=str(workspace_dir),
+        telegram_bot_token="test-bot",
+        telegram_chat_id="4242",
+    )
+    telegram = _Telegram()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(telegram))
+    env.dispatcher.register("send_file", create_send_file_tool(env.settings, client), _SEND_FILE_SCHEMA)
+    store = GoalStore(env.db, env.agent, env.settings)
+    goal = await _goal(store)
+    root = await _session(env.db, store, goal)
+    root_dir = workspace_dir.resolve() / "intentions" / str(root)
+    root_dir.mkdir(parents=True)
+    (root_dir / "report.txt").write_bytes(b"the weekly report")
+    (tmp_path / "secret.txt").write_bytes(b"not for sending")
+    holder["root_dir"] = root_dir
+    await store.grant_tool(goal.id, "send_file", None, actor="owner", proof="owner")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(env.db, env.settings)
+    await view.refresh()
+    env.runner.set_goal_lift(view.lifts, view.note_used)
+    ctx = ExecutionContext(
+        kind="subtask", authority="internal_only", session_id="subtask-81", intention_id=root, root_intention_id=root
+    )
+    try:
+        await env.runner.run_turn("subtask-81", "send the report", is_background=True, is_subtask=True, context=ctx)
+    finally:
+        await client.aclose()
+        await asyncio.gather(*view._tasks)
+    assert "send_file" in [tool["name"] for tool in env.model.calls[0]["tools"]]
+    return telegram, _tool_result_text(env.model.calls[1]), root_dir
+
+
+async def test_a_granted_send_file_sends_a_file_under_the_roots_directory(runner_env, tmp_path):  # noqa: F811
+    telegram, result, root_dir = await _file_turn(runner_env, tmp_path, lambda root_dir: str(root_dir / "report.txt"))
+    assert len(telegram.uploads) == 1 and b"the weekly report" in telegram.uploads[0]
+    assert "File sent successfully: report.txt" in result
+    assert (root_dir / "report.txt").exists()
+
+
+@pytest.mark.parametrize("where", ["outside", "dotdot", "relative"])
+async def test_a_granted_send_file_of_another_path_is_refused(runner_env, tmp_path, where):  # noqa: F811
+    paths = {
+        "outside": lambda root_dir: str(tmp_path / "secret.txt"),
+        "dotdot": lambda root_dir: str(root_dir) + "/../../../secret.txt",
+        "relative": lambda root_dir: f"intentions/{root_dir.name}/report.txt",
+    }
+    telegram, result, root_dir = await _file_turn(runner_env, tmp_path, paths[where])
+    assert telegram.uploads == []
+    assert result == (
+        "Tool error: 'send_file' is not allowed in this turn (grant_file). With this goal's grant, send_file sends "
+        f"only a regular file under {root_dir}/, named by its full path, with no symbolic link and no '..' in it."
+    )
+
+
+async def test_a_granted_send_file_that_would_delete_the_file_is_refused(runner_env, tmp_path):  # noqa: F811
+    telegram, result, root_dir = await _file_turn(
+        runner_env, tmp_path, lambda root_dir: str(root_dir / "report.txt"), cleanup=True
+    )
+    assert telegram.uploads == []
+    assert result == (
+        "Tool error: 'send_file' is not allowed in this turn (grant_cleanup). With this goal's grant, send_file may "
+        "not delete the file it sends: leave cleanup out."
+    )
+    assert (root_dir / "report.txt").read_bytes() == b"the weekly report"
 
 
 # ---- byte-for-byte with no grants -------------------------------------------------------------------------------

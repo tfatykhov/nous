@@ -403,7 +403,10 @@ async def test_the_read_lists_the_grants_and_the_tools_that_could_be_allowed(env
     grants = {row["tool"]: row for row in body["grants"]}
     assert set(grants) == {"send_email", ON}
     email = grants["send_email"]
-    assert email["says"] == "Send email to the addresses on your email allowlist. A sent email cannot be taken back."
+    assert email["says"] == (
+        "Send email, with files this goal's work wrote, to the addresses on your email allowlist. "
+        "A sent email cannot be taken back."
+    )
     assert (email["usable"], email["not_usable_why"], email["server_name"]) == (True, None, None)
     notes = grants[ON]
     assert (notes["label"], notes["server_name"], notes["server_host"], notes["group"]) == (
@@ -417,7 +420,8 @@ async def test_the_read_lists_the_grants_and_the_tools_that_could_be_allowed(env
     assert set(available) == {"send_file", "browser_task", OFF}  # grantable, registered, not granted
     assert available["send_file"]["blocked"] is None
     assert available["send_file"]["confirm"] == (
-        f"Allow {_ref(goal)} to send files from the server to your Telegram chat without asking you each time? "
+        f"Allow {_ref(goal)} to send files this goal's work wrote to your Telegram chat without asking you each "
+        "time? "
         "A sent file cannot be taken back."
     )
     assert available[OFF]["blocked"]["code"] == "server_off"

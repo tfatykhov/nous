@@ -1667,6 +1667,98 @@ def lineage_bash_allowed(
         return False
 
 
+def _goal_root_dir(ctx: ExecutionContext, workspace_dir: str) -> Path | None:
+    """The turn's root's own directory, ``<workspace_dir>/intentions/<root_id>``, with the workspace resolved."""
+    if ctx.root_intention_id is None:
+        return None
+    return Path(workspace_dir).resolve() / "intentions" / str(ctx.root_intention_id)
+
+
+def _root_file(root_dir: Path, value: object) -> bool:
+    """``value`` names an existing regular file under ``root_dir`` by its full path, with no ``..`` step and no
+    symbolic link anywhere on the way. send_file and send_email open the path as given (a relative one against the
+    process's working directory), so these are the conditions under which the file checked here is the file read."""
+    if not isinstance(value, str) or not value or "\x00" in value:  # Windows' realpath drops a NUL (gh-106242)
+        return False
+    given = Path(value)
+    if not given.is_absolute() or ".." in given.parts:
+        return False
+    try:
+        spelled = Path(os.path.normpath(value))
+        if spelled == root_dir or not spelled.is_relative_to(root_dir):
+            return False
+        real = spelled.resolve(strict=True)
+        return real == spelled and real.is_file()  # a symbolic link on the way resolves elsewhere
+    except (OSError, ValueError, RuntimeError):  # missing, unresolvable, a link loop
+        return False
+
+
+def _attachment_paths(value: object) -> list[str] | None:
+    """The paths send_email attaches, read the way it reads them (``email_tools._normalize_paths``: one string or a
+    list, each stripped, empty ones skipped), or None for a value it would read some other way."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        return None
+    paths: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        if not isinstance(item, str):
+            return None
+        if item.strip():
+            paths.append(item.strip())
+    return paths
+
+
+def granted_call_violation(
+    ctx: ExecutionContext, name: str, tool_input: Mapping[str, Any], workspace_dir: str
+) -> str | None:
+    """The per-call rules of a call a goal's grant lifted (``internal_only_call_violation`` asks only then): the
+    files send_file sends and send_email attaches are files under the turn's root's own directory.
+
+    ``"grant_cleanup"``: send_file with ``cleanup`` set (it would delete the file). ``"grant_file"``: send_file's
+    ``file_path``, or any of send_email's ``attachments``, is not such a file (``_root_file``). The other tools a goal
+    may be given read no file of the server's: browser_task cannot upload one, and an MCP tool's arguments go to
+    its server."""
+    if name == "send_file":
+        if tool_input.get("cleanup") not in (None, False):
+            return "grant_cleanup"
+        paths: Sequence[object] | None = (tool_input.get("file_path"),)
+    elif name == "send_email":
+        paths = _attachment_paths(tool_input.get("attachments"))
+        if paths == []:
+            return None
+    else:
+        return None
+    root_dir = _goal_root_dir(ctx, workspace_dir)
+    if paths is None or root_dir is None or not all(_root_file(root_dir, path) for path in paths):
+        return "grant_file"
+    return None
+
+
+GRANT_CLEANUP_HINT = "With this goal's grant, send_file may not delete the file it sends: leave cleanup out."
+
+
+def granted_call_hint(ctx: ExecutionContext, name: str, workspace_dir: str, code: str) -> str:
+    """What a granted call may do, appended to its ``grant_file`` or ``grant_cleanup`` refusal."""
+    if code == "grant_cleanup":
+        return GRANT_CLEANUP_HINT
+    root_dir = _goal_root_dir(ctx, workspace_dir)
+    if root_dir is None:
+        return f"With this goal's grant, {name} may send no file in this turn: it has no root intention."
+    if name == "send_email":
+        return (
+            f"With this goal's grant, send_email attaches only regular files under {root_dir}/, each named by its "
+            "full path, with no symbolic link and no '..' in it."
+        )
+    return (
+        f"With this goal's grant, send_file sends only a regular file under {root_dir}/, named by its full path, "
+        "with no symbolic link and no '..' in it."
+    )
+
+
 def internal_only_call_violation(
     ctx: ExecutionContext,
     name: str,
@@ -1682,7 +1774,8 @@ def internal_only_call_violation(
 
     ``"external"``: ``classify_side_effect`` rates the call external (or
     irreversible), such as a URL in run_python; not returned when ``lifted`` applies to the tool (the owner allowed
-    it for the turn's goal, see ``internal_only_allowed``); for bash, the command is not on
+    it for the turn's goal, see ``internal_only_allowed``), whose call is held to ``granted_call_violation``
+    instead (``"grant_file"``, ``"grant_cleanup"``); for bash, the command is not on
     the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
     ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
@@ -1701,8 +1794,11 @@ def internal_only_call_violation(
         ):
             return "external"
         return None
-    if not _lift(name, lifted) and classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
+    lift = _lift(name, lifted)
+    if not lift and classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
         return "external"
+    if lift and (granted := granted_call_violation(ctx, name, tool_input, workspace_dir)) is not None:
+        return granted
     if name == "write_file" and not _write_path_allowed(
         ctx, tool_input, workspace_dir, lineage_shell=lineage_shell, extra_write_dirs=extra_write_dirs
     ):

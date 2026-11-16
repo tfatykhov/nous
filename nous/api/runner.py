@@ -1047,6 +1047,8 @@ class AgentRunner:
                     )
                 elif strict == "foreign_cancel":
                     text += " " + tool_policy.FOREIGN_CANCEL_HINT
+                elif strict in ("grant_file", "grant_cleanup"):
+                    text += " " + tool_policy.granted_call_hint(ctx, tool_name, self._settings.workspace_dir, strict)
                 return Refusal(text, "internal_only")
 
         # Gate criterion 1: a heartbeat triage turn may not act outward (the PR #721 merge), whatever the modes

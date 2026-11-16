@@ -112,11 +112,14 @@ def _file_ready(settings: Any) -> str | None:
 # Every built-in tool a goal may be given (tool_policy.grant_refusal), with its words. A test fails while one has none.
 GRANT_FACTS: Mapping[str, GrantFact] = MappingProxyType(
     {
+        # The files: tool_policy.granted_call_violation holds a granted call to its session root's own directory.
         "send_email": GrantFact(
-            "send email to the addresses on your email allowlist", "A sent email cannot be taken back.", _email_ready
+            "send email, with files this goal's work wrote, to the addresses on your email allowlist",
+            "A sent email cannot be taken back.",
+            _email_ready,
         ),
         "send_file": GrantFact(
-            "send files from the server to your Telegram chat", "A sent file cannot be taken back.", _file_ready
+            "send files this goal's work wrote to your Telegram chat", "A sent file cannot be taken back.", _file_ready
         ),
         "browser_task": GrantFact(
             "open web pages on the sites each call names, click and type",

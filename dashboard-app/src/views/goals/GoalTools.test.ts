@@ -46,7 +46,11 @@ describe('the tools a goal may use without asking', () => {
     expect(screen.getByText(LEAD)).toBeTruthy();
     expect(screen.getByText(NEVER)).toBeTruthy();
     const email = rowOf('send_email');
-    expect(within(email).getByText('Send email to the addresses on your email allowlist. A sent email cannot be taken back.')).toBeTruthy();
+    expect(
+      within(email).getByText(
+        "Send email, with files this goal's work wrote, to the addresses on your email allowlist. A sent email cannot be taken back.",
+      ),
+    ).toBeTruthy();
     expect(within(email).getByText('Allowed Nov 15 10:00 UTC.')).toBeTruthy();
     expect(within(email).getByRole('button', { name: 'Remove' })).toBeTruthy();
     expect(screen.getByText('A goal can have at most 20 tools.')).toBeTruthy();

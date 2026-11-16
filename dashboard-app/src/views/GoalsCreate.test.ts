@@ -189,7 +189,7 @@ describe('Goals: the create form and the tools a new goal may use (F115)', () =>
     expect(posts()).toEqual([]);
     const ask = within(form).getByRole('group', { name: 'Confirm: the tools of the new goal' });
     expect(within(ask).getByText(/^Allow this goal to use these tools without asking you each time/)).toBeTruthy();
-    expect(within(ask).getByText(/Send email to the addresses on your email allowlist/)).toBeTruthy();
+    expect(within(ask).getByText(/Send email, with files this goal's work wrote, to the addresses on your email allowlist/)).toBeTruthy();
     expect(within(ask).getByText(/Use search on notes \(notes\.example\.com\)/)).toBeTruthy();
     await fireEvent.click(within(ask).getByRole('button', { name: 'Yes, create' }));
     await waitFor(() => expect(posts().length).toBe(1));

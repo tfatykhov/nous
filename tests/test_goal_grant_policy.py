@@ -1,13 +1,14 @@
 """Per-goal tool grants, the policy side: which tools a goal may be given (``grant_refusal``), the kinds of turn a
 grant can reach (``GRANT_KINDS``), and what ``lifted`` changes in ``internal_only_allowed``,
 ``internal_only_call_violation`` and ``evaluate``: the class verdict only, never the denylist, the per-call path and
-cancel rules, the undoable rule or the spawn rule. Also the MCP client's record of which server and remote tool each
-registered MCP tool is (``mcp_tool_identity``)."""
+cancel rules, the undoable rule or the spawn rule; and the rules a granted call is held to instead (a granted send_file
+or send_email reads only regular files under the root's own directory, and send_file deletes none). Also the MCP
+client's record of which server and remote tool each registered MCP tool is (``mcp_tool_identity``)."""
 
 from __future__ import annotations
 
 import uuid
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from goal_grants_baseline import MCP_NOTED, SAMPLES, TOOLS, contexts, load
@@ -166,7 +167,11 @@ def test_lifted_changes_only_the_class_verdict_of_a_grantable_tool(mcp_registry)
             if off["allowed"][shell] != on["allowed"][shell]:
                 assert (off["allowed"][shell], on["allowed"][shell]) == (False, True), key
             if off["call"][shell] != on["call"][shell]:
-                assert (off["call"][shell], on["call"][shell]) == ("external", None), key
+                if on["call"][shell] == "grant_file":  # a granted send_file call names no file
+                    assert tool == "send_file" and "file_path" not in sample, key
+                    assert off["call"][shell] == "external", key
+                else:
+                    assert (off["call"][shell], on["call"][shell]) == ("external", None), key
         if off["evaluate"] != on["evaluate"]:
             assert off["evaluate"].startswith("level:") and on["evaluate"] is None, key
     assert changed == GRANTABLE | {"mcp__notes__search", "mcp__mail__send", "mcp__gone__thing"}
@@ -235,6 +240,191 @@ def test_lifted_does_not_reach_the_mcp_floor(mcp_registry):
     assert tool_policy.mcp_client_violation("continuation", "mcp__mail__send") == "mcp_context"
     assert tool_policy.mcp_client_violation("continuation", "mcp__gone__thing") == "mcp_unregistered"
     assert tool_policy.mcp_client_violation("continuation", "mcp__notes__search") is None
+
+
+# ---- a granted call's files -------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tree(tmp_path):
+    """A workspace with the root's directory, another root's, a file beside them and a directory outside."""
+    ws = tmp_path / "ws"
+    root_dir = ws / "intentions" / str(ROOT)
+    (root_dir / "sub").mkdir(parents=True)
+    (root_dir / "report.txt").write_text("r")
+    (root_dir / "sub" / "deep.txt").write_text("d")
+    other = ws / "intentions" / str(uuid.uuid4())
+    other.mkdir(parents=True)
+    (other / "x.txt").write_text("x")
+    (ws / "elsewhere.txt").write_text("e")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("s")
+    resolved = ws.resolve()
+    return SimpleNamespace(
+        ws=str(ws),
+        root=resolved / "intentions" / str(ROOT),
+        other=resolved / other.relative_to(ws),
+        elsewhere=resolved / "elsewhere.txt",
+        outside=outside.resolve(),
+    )
+
+
+def _link(link, target, *, is_dir: bool = False):
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except OSError as exc:  # Windows without the right to make links
+        pytest.skip(f"cannot make a symbolic link here ({type(exc).__name__})")
+
+
+def _send_file(tree, file_path, *, lifted=True, ctx=None, **extra):
+    call = {"file_path": file_path, **extra}
+    return tool_policy.internal_only_call_violation(
+        ctx or _cont(), "send_file", call, workspace_dir=tree.ws, lifted=lifted
+    )
+
+
+def _send_email(tree, attachments, *, lifted=True):
+    call = {**SEND_EMAIL, "attachments": attachments}
+    return tool_policy.internal_only_call_violation(_cont(), "send_email", call, workspace_dir=tree.ws, lifted=lifted)
+
+
+SEND_EMAIL = {"to": "a@example.com", "subject": "s", "body": "b"}
+
+
+def test_a_granted_send_file_may_send_a_file_under_the_roots_directory(tree):
+    assert _send_file(tree, str(tree.root / "report.txt")) is None
+    assert _send_file(tree, str(tree.root / "sub" / "deep.txt")) is None
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "relative",
+        "workspace",
+        "outside",
+        "other root",
+        "dotdot out",
+        "dotdot in",
+        "the directory",
+        "a subdirectory",
+        "missing",
+        "nul",
+        "empty",
+    ],
+)
+def test_a_granted_send_file_refuses_any_other_path(tree, where):
+    path = {
+        "relative": f"intentions/{ROOT}/report.txt",
+        "workspace": str(tree.elsewhere),
+        "outside": str(tree.outside / "secret.txt"),
+        "other root": str(tree.other / "x.txt"),
+        "dotdot out": str(tree.root) + f"/../{tree.other.name}/x.txt",
+        "dotdot in": str(tree.root) + "/sub/../report.txt",
+        "the directory": str(tree.root),
+        "a subdirectory": str(tree.root / "sub"),
+        "missing": str(tree.root / "nothing.txt"),
+        "nul": str(tree.root / "report.txt") + "\x00",
+        "empty": "",
+    }[where]
+    assert _send_file(tree, path) == "grant_file"
+    assert _send_file(tree, path, lifted=False) == "external"
+
+
+@pytest.mark.parametrize("value", [None, 7, ["a"], {"path": "x"}])
+def test_a_granted_send_file_refuses_a_file_path_that_is_not_text(tree, value):
+    assert _send_file(tree, value) == "grant_file"
+
+
+def test_a_granted_send_file_refuses_a_file_reached_through_a_symbolic_link(tree):
+    _link(tree.root / "link.txt", tree.outside / "secret.txt")
+    assert _send_file(tree, str(tree.root / "link.txt")) == "grant_file"
+    _link(tree.root / "linked", tree.outside, is_dir=True)
+    assert _send_file(tree, str(tree.root / "linked" / "secret.txt")) == "grant_file"
+    # Even a link that stays in the directory: the path must reach the file with no link at all.
+    _link(tree.root / "alias.txt", tree.root / "report.txt")
+    assert _send_file(tree, str(tree.root / "alias.txt")) == "grant_file"
+    assert _send_file(tree, str(tree.root / "report.txt")) is None
+
+
+@pytest.mark.parametrize("cleanup", [True, "true", "false", 1, "yes"])
+def test_a_granted_send_file_may_not_delete_the_file(tree, cleanup):
+    inside = str(tree.root / "report.txt")
+    assert _send_file(tree, inside, cleanup=cleanup) == "grant_cleanup"
+    assert _send_file(tree, inside, cleanup=cleanup, lifted=False) == "external"
+
+
+@pytest.mark.parametrize("cleanup", [False, None, 0])
+def test_a_granted_send_file_may_say_it_keeps_the_file(tree, cleanup):
+    assert _send_file(tree, str(tree.root / "report.txt"), cleanup=cleanup) is None
+
+
+def test_a_granted_send_file_with_no_root_sends_nothing(tree):
+    no_root = ExecutionContext(kind="subtask", authority="internal_only")
+    assert _send_file(tree, str(tree.root / "report.txt"), ctx=no_root) == "grant_file"
+
+
+@pytest.mark.parametrize(
+    "attachments",
+    [None, "", [], [""], ["  "], "REPORT", ["REPORT"], ["REPORT", "DEEP"], ("REPORT",), "  REPORT  "],
+)
+def test_a_granted_send_email_may_attach_files_under_the_roots_directory(tree, attachments):
+    report, deep = str(tree.root / "report.txt"), str(tree.root / "sub" / "deep.txt")
+
+    def spelled(item):
+        return item.replace("REPORT", report).replace("DEEP", deep)
+
+    value = spelled(attachments) if isinstance(attachments, str) else attachments
+    if isinstance(attachments, (list, tuple)):
+        value = type(attachments)(spelled(item) for item in attachments)
+    assert _send_email(tree, value) is None
+
+
+@pytest.mark.parametrize("where", ["outside", "workspace", "relative", "dotdot", "mixed", "not text", "a mapping"])
+def test_a_granted_send_email_refuses_any_other_attachment(tree, where):
+    inside = str(tree.root / "report.txt")
+    value = {
+        "outside": str(tree.outside / "secret.txt"),
+        "workspace": [str(tree.elsewhere)],
+        "relative": [f"intentions/{ROOT}/report.txt"],
+        "dotdot": [str(tree.root) + "/sub/../report.txt"],
+        "mixed": [inside, str(tree.outside / "secret.txt")],
+        "not text": [inside, 7],
+        "a mapping": {inside: True},
+    }[where]
+    assert _send_email(tree, value) == "grant_file"
+    assert _send_email(tree, value, lifted=False) == "external"
+
+
+def test_a_granted_send_email_refuses_an_attachment_reached_through_a_symbolic_link(tree):
+    _link(tree.root / "link.txt", tree.outside / "secret.txt")
+    assert _send_email(tree, [str(tree.root / "link.txt")]) == "grant_file"
+
+
+def test_only_send_file_and_send_email_have_the_file_rule(tree, mcp_registry):
+    elsewhere = {"file_path": str(tree.outside / "secret.txt"), "cleanup": True}
+    for tool in ("browser_task", "mcp__notes__search"):
+        verdict = tool_policy.internal_only_call_violation(_cont(), tool, elsewhere, workspace_dir=tree.ws, lifted=True)
+        assert verdict is None, tool
+
+
+def test_the_refusal_sentences(tree):
+    root = tree.root
+    assert tool_policy.granted_call_hint(_cont(), "send_file", tree.ws, "grant_file") == (
+        f"With this goal's grant, send_file sends only a regular file under {root}/, named by its full path, with no "
+        "symbolic link and no '..' in it."
+    )
+    assert tool_policy.granted_call_hint(_cont(), "send_email", tree.ws, "grant_file") == (
+        f"With this goal's grant, send_email attaches only regular files under {root}/, each named by its full path, "
+        "with no symbolic link and no '..' in it."
+    )
+    assert tool_policy.granted_call_hint(_cont(), "send_file", tree.ws, "grant_cleanup") == (
+        "With this goal's grant, send_file may not delete the file it sends: leave cleanup out."
+    )
+    no_root = ExecutionContext(kind="subtask", authority="internal_only")
+    assert tool_policy.granted_call_hint(no_root, "send_file", tree.ws, "grant_file") == (
+        "With this goal's grant, send_file may send no file in this turn: it has no root intention."
+    )
 
 
 # ---- the MCP client's identities --------------------------------------------------------------------------------

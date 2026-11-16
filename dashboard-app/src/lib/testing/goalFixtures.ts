@@ -114,8 +114,11 @@ export const NOTES_SERVER_ID = '00000000-0000-4000-8000-0000000000aa';
 
 export function toolWords(tool: string, ref = 'G-0001'): GoalToolWords {
   const words: Record<string, [string, string]> = {
-    send_email: ['send email to the addresses on your email allowlist', 'A sent email cannot be taken back.'],
-    send_file: ['send files from the server to your Telegram chat', 'A sent file cannot be taken back.'],
+    send_email: [
+      "send email, with files this goal's work wrote, to the addresses on your email allowlist",
+      'A sent email cannot be taken back.',
+    ],
+    send_file: ["send files this goal's work wrote to your Telegram chat", 'A sent file cannot be taken back.'],
     browser_task: [
       'open web pages on the sites each call names, click and type',
       'It has no logins, and it stops before a step that looks like signing in, paying, accepting terms, sending a message or deleting something.',
