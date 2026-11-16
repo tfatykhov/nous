@@ -207,10 +207,12 @@ async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeabl
         found += [Citeable(f"{kind}:{row_id}", _WHAT[kind]) for row_id in rows.scalars()]
     E = ExecutionLedgerEntry
     rows = await s.execute(
-        select(E.id, E.tool_name, E.created_at).where(*_ledger_where(scope)).order_by(E.created_at.desc()).limit(limit)
+        select(E.id, E.created_at).where(*_ledger_where(scope)).order_by(E.created_at.desc()).limit(limit)
     )
     found += [
-        Citeable(f"ledger:{row.id}", f"tool {row.tool_name} at {row.created_at:%Y-%m-%d %H:%M} UTC") for row in rows
+        # Never the tool's name: an MCP server names its own tools (mcp__<server>__<tool>).
+        Citeable(f"ledger:{row.id}", f"a recorded call at {row.created_at:%Y-%m-%d %H:%M} UTC")
+        for row in rows
     ]
     found += _files(scope)
     return found
