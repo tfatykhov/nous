@@ -201,6 +201,31 @@ async def test_at_most_twenty_tools(db):
     assert await store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
 
 
+@pytest.mark.parametrize("tool", ["bash", "run_python", "goal_note", "submit_final_report", "web_search", "not_a_tool"])
+async def test_a_tool_a_goal_may_never_be_given_is_refused_by_the_store_itself(db, tool):
+    """Whoever calls the store (not only the routes): the shell, Python, the harness's own tools, a tool that acts only
+    inside Nous and one nobody classified are refused, and nothing is written."""
+    store = _store(db)
+    goal = await _active(store)
+    before = [row.seq for row in await _state_rows(db, goal)]
+    with pytest.raises(GoalRefused) as refused:
+        await store.grant_tool(goal.id, tool, None, actor="owner", proof="owner")
+    assert str(refused.value) == f"{tool} cannot be given to a goal."
+    assert await _grants(db, goal) == [] and [row.seq for row in await _state_rows(db, goal)] == before
+    with pytest.raises(GoalRefused, match=f"^{tool} cannot be given to a goal.$"):
+        await store.create(
+            title="Tidy the notes",
+            objective="Merge the duplicate notes",
+            done_when="None are left",
+            proposed_by="owner",
+            tools=[("send_email", None), (tool, None)],
+            proof="owner",
+        )
+    async with db.session() as s:
+        goals = (await s.execute(select(Goal.id).where(Goal.agent_id == store.agent_id))).scalars().all()
+    assert list(goals) == [goal.id]  # nothing created
+
+
 async def test_only_the_owner_changes_a_goals_tools(db):
     store = _store(db)
     goal = await _active(store)

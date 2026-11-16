@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy import ColumnElement, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.api import tool_policy
 from nous.api.tool_classes import McpIdentity
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, validate
@@ -162,6 +163,13 @@ def _tools_changeable(goal: Goal) -> None:
         raise GoalRefused(f"{format_short_id(goal.short_id)} is finished; its tools can no longer be changed.")
 
 
+def _grantable(tool: str) -> None:
+    """Refused for a tool ``tool_policy.grant_refusal`` refuses (the shell, Python, the harness's own tools, a spawn
+    tool, one that acts only inside Nous, one nobody classified): no caller of the store writes a grant row for one."""
+    if tool_policy.grant_refusal(tool) is not None:
+        raise GoalRefused(f"{tool} cannot be given to a goal.")
+
+
 class GoalStore:
     """Goals of one agent. ``settings`` is read for the owner's default channel (``approve``)."""
 
@@ -269,7 +277,7 @@ class GoalStore:
         """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given. ``tools`` (F115
         per-goal tools, the owner's only): each ``(tool, identity)`` the goal may use without asking, granted in the
         same transaction as the goal, each with ``proof`` as ``granted_by`` and an owner ``state`` journal row after
-        the creation's; nothing is written when one cannot be."""
+        the creation's; nothing is written when one cannot be (a tool a goal may never be given among them)."""
         actor = _PROPOSER_ACTOR.get(proposed_by)
         if actor is None:
             raise GoalRefused(f"proposed_by must be one of {', '.join(_PROPOSER_ACTOR)}")
@@ -282,6 +290,8 @@ class GoalStore:
             names = [tool for tool, _identity in tools]
             if len(set(names)) != len(names):
                 raise GoalRefused("A tool is listed twice.")
+            for name in names:
+                _grantable(name)
         texts = {"title": title.strip(), "objective": objective.strip(), "done_when": done_when.strip()}
         for column, longest, words in _TEXT_BOUNDS:
             if not 1 <= len(texts[column]) <= longest:
@@ -514,8 +524,10 @@ class GoalStore:
         transaction under the goal row's lock. ``identity`` is an MCP tool's identity as the owner saw it (None for any
         other tool). False, and nothing written, when the tool is granted already with the same identity; an MCP tool
         granted with another identity has that grant revoked and a new one written. Refused past ``GRANTS_MAX``
-        grants. The goal's wake and request are not touched."""
+        grants, and for a tool a goal may never be given (``_grantable``). The goal's wake and request are not
+        touched."""
         _owner_only(actor, "change the tools a goal may use")
+        _grantable(tool)
         async with self._locked(ref) as (s, goal, now):
             _tools_changeable(goal)
             current = await self._active_grant(s, goal.id, tool)
