@@ -20,6 +20,8 @@
 
   /** How often the list is read while a code is on screen. */
   const POLL_MS = 15_000;
+  /** How long the sentence saying how a code ended stays, unless Done takes it away sooner. */
+  const ENDED_MS = 120_000;
 
   /** How many codes were made. A read carries the count it started under: one that started before the code on screen
    * was made says nothing about that code. */
@@ -38,7 +40,7 @@
   type Shown = { code: string; deadline: number; made: number; replaced: boolean };
   type Note = { text: string; ok: boolean };
   let shown = $state<Shown | null>(null);
-  /** How the code on screen ended: said in its place until a new one is made. */
+  /** How the code on screen ended: said in its place until Done, a new try, or two minutes, whichever is first. */
   let ended = $state<CodeEnd | null>(null);
   let name = $state('');
   /** The change in flight: 'pair', or the id of the device being revoked. */
@@ -83,6 +85,12 @@
   $effect(() => {
     if (shown && clock >= shown.deadline) untrack(() => finish('expired'));
   });
+  // The sentence does not stay for the rest of the visit.
+  $effect(() => {
+    if (!ended) return;
+    const clearing = setTimeout(() => (ended = null), ENDED_MS);
+    return () => clearTimeout(clearing);
+  });
 
   // While a code is on screen and the tab is shown, the list is read every 15 s; a tick finds a read in flight and
   // lets it finish (it is given up after 15 s on its own). A tab shown again reads at once.
@@ -125,8 +133,8 @@
       // With no answer, a new code may have been made and the one on screen replaced: it is not shown as working.
       if ((err as { status?: number } | null)?.status === undefined) shown = null;
     }
-    // A read may have ended the code on screen while this try was in flight: the try's answer speaks now, and the
-    // list's own line says what became of the earlier code.
+    // A read may have ended the code on screen while this try was in flight: the try's answer speaks now (and the
+    // list's line, for an earlier code still open or closed after wrong tries).
     ended = null;
     busy = null;
     void store.refresh();
@@ -134,8 +142,10 @@
     if (shown) byId('dev-code')?.focus();
   }
 
+  /** Done: the code on screen, or the sentence saying how it ended, leaves the screen. */
   async function done() {
     shown = null;
+    ended = null;
     await tick();
     byId('dev-pair')?.focus();
   }
@@ -220,7 +230,10 @@
         </div>
       </div>
     {:else if ended}
-      <p class="line {TONE[END_TEXT[ended].tone]}" role="status">{END_TEXT[ended].text}</p>
+      <div class="ended">
+        <p class="line {TONE[END_TEXT[ended].tone]}" role="status">{END_TEXT[ended].text}</p>
+        <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void done()}>Done</Button>
+      </div>
     {:else if serverLine}
       <p class="line {TONE[serverLine.tone]}">{serverLine.text}</p>
     {/if}
@@ -309,6 +322,8 @@
   .code:focus { outline: none; }
   .valid { font-size: 0.875rem; font-weight: 500; margin: 0.25rem 0 0; }
   .code-box .actions { margin-top: 0.625rem; }
+  .ended { display: flex; align-items: center; gap: 0.25rem 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+  .ended .line { margin: 0; }
   .devices { list-style: none; margin: 0; padding: 0; }
   /* A device: its name and line on the left, Revoke at the right whatever the name's length; the question below. */
   .device { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 0.75rem;

@@ -120,10 +120,11 @@ describe('the code and its countdown', () => {
     expect(pairingLine(OPEN(3))?.text).toBe(
       'A code made earlier is still open. It is shown only once: make a new one to pair a phone. 3 tries left before this code closes.');
     expect(pairingLine(OPEN(3))?.tone).toBe('warn');
-    expect(pairingLine({ state: 'used' })).toEqual({ text: 'The last code was used.', tone: 'neutral' });
     expect(pairingLine({ state: 'closed_tries' })?.text).toBe(
       'The last code was closed after too many wrong tries. If this was not you, check who can reach this host.');
-    expect(pairingLine({ state: 'expired' })).toEqual({ text: 'The last code expired.', tone: 'neutral' });
+    // A used or expired code needs no line of its own: the list shows the device, and an ended code was said on screen.
+    expect(pairingLine({ state: 'used' })).toBeNull();
+    expect(pairingLine({ state: 'expired' })).toBeNull();
   });
 });
 

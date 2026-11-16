@@ -386,6 +386,36 @@ describe('Devices: a pairing code', () => {
     expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
   });
 
+  it('the sentence about a code that ended goes after two minutes, and no line about the used code takes its place', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const USED = 'This code was used. The device is paired.';
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await vi.waitFor(() => expect(s.getByText(USED)).toBeTruthy());
+    await vi.advanceTimersByTimeAsync(117_000);
+    expect(s.getByText(USED)).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(s.queryByText(USED)).toBeNull());
+    expect(s.queryByText(/code/i, { selector: '.line' })).toBeNull();
+    expect(s.queryByRole('button', { name: 'Done' })).toBeNull();
+  });
+
+  it('Done takes the sentence about a code that ended away at once, and gives the focus to Show a code', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    listed = { ...listed, pairing: { state: 'expired' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await vi.waitFor(() => expect(s.getByText('This code has expired. Make a new one.')).toBeTruthy());
+    await fireEvent.click(s.getByRole('button', { name: 'Done' }));
+    expect(s.queryByText('This code has expired. Make a new one.')).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(s.getByRole('button', { name: 'Show a code' })));
+  });
+
   it('a code that a read ends while a new one is being made is not said once the new one is shown', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     opening();

@@ -101,7 +101,9 @@ export function triesText(pairing: Pairing): string {
   return `${n} ${n === 1 ? 'try' : 'tries'} left before this code closes.`;
 }
 
-/** The pairing state when no code is on screen (after a reload, or a code whose answer was lost); null for none. */
+/** The pairing state worth a line when no code is on screen (after a reload, or a code whose answer was lost): an open
+ * code, which a new one replaces, and a code closed after wrong tries. A used or expired code needs nothing: the list
+ * shows the device, and a code that ended on screen was said there. Null for none. */
 export function pairingLine(pairing: Pairing): { text: string; tone: Tone } | null {
   if (pairing === null) return null;
   switch (pairing.state) {
@@ -112,10 +114,8 @@ export function pairingLine(pairing: Pairing): { text: string; tone: Tone } | nu
         tone: tries ? 'warn' : 'neutral',
       };
     }
-    case 'used': return { text: 'The last code was used.', tone: 'neutral' };
     case 'closed_tries':
       return { text: 'The last code was closed after too many wrong tries. If this was not you, check who can reach this host.', tone: 'warn' };
-    case 'expired': return { text: 'The last code expired.', tone: 'neutral' };
     default: return null;
   }
 }
