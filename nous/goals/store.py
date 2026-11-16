@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.continuation import owner_channel
@@ -66,8 +66,9 @@ DELIVERED_CHANNEL_KINDS: tuple[str, ...] = ("telegram",)
 
 GoalRef = UUID | int | str
 # A plan keeps its open steps and its newest closed or dropped ones; an older one leaves the plan with one journal row
-# of the chain (kind ``plan``) whose text starts with ``MOVED_TEXT`` and whose evidence is ``moved:<step id>`` and the
-# refs the step was closed with, so one-use and step ids still see it.
+# of the chain (kind ``plan``) whose evidence is ``moved:<step id>`` and the refs the step was closed with, so one-use
+# and step ids still see it. The row is known by that first ref (``moved_row``), never by its text, which a note can
+# copy (``MOVED_TEXT`` only begins what a reader sees).
 MOVED_TEXT = "Moved out of the plan"
 MOVED_REF = "moved:"
 
@@ -594,18 +595,23 @@ class GoalStore:
         return row
 
 
+def moved_row() -> ColumnElement[bool]:
+    """A journal row that keeps a step the plan moved out: a ``plan`` row of the chain whose first evidence ref is
+    ``moved:<step id>``. Only the plan tool's own code writes that ref: a ref a call sends must pass
+    ``evidence.check`` (a subtask, a DAG, a recorded call or a file), and ``goal_note`` writes no evidence."""
+    return and_(
+        GoalJournal.kind == "plan",
+        GoalJournal.actor == "chain",
+        func.coalesce(GoalJournal.evidence[0].astext, "").startswith(MOVED_REF),
+    )
+
+
 async def moved_steps(session: AsyncSession, agent_id: str, goal_id: UUID) -> list[list[str]]:
-    """The evidence of each journal row that keeps a step the goal's plan moved out (``MOVED_TEXT``), oldest first:
+    """The evidence of each journal row that keeps a step the goal's plan moved out (``moved_row``), oldest first:
     ``moved:<step id>`` and the refs that step was closed with."""
     query = (
         select(GoalJournal.evidence)
-        .where(
-            GoalJournal.agent_id == agent_id,
-            GoalJournal.goal_id == goal_id,
-            GoalJournal.kind == "plan",
-            GoalJournal.actor == "chain",
-            GoalJournal.text.startswith(MOVED_TEXT),
-        )
+        .where(GoalJournal.agent_id == agent_id, GoalJournal.goal_id == goal_id, moved_row())
         .order_by(GoalJournal.seq)
     )
     return [[str(ref) for ref in evidence or []] for evidence in (await session.execute(query)).scalars()]

@@ -44,6 +44,7 @@ from nous.goals.store import (
     MOVED_TEXT,
     WAITING_REF,
     GoalStore,
+    moved_row,
     moved_steps,
 )
 from nous.storage.database import Database
@@ -191,15 +192,17 @@ class GoalTools:
 
     async def _written(self, s: AsyncSession, goal: Goal, row: GoalSession, kind: str) -> int:
         """How many journal rows of ``kind`` the chain wrote in this session (read under the session's lock, so two
-        calls cannot both pass a limit)."""
+        calls cannot both pass a limit). Every note and claim counts; of the plan rows, a moved step's row
+        (``moved_row``: known by its ref, never by its text) is not a change the chain asked for."""
         query = select(func.count()).where(
             GoalJournal.agent_id == self._agent_id,
             GoalJournal.goal_id == goal.id,
             GoalJournal.session_n == row.n,
             GoalJournal.kind == kind,
             GoalJournal.actor == "chain",
-            ~GoalJournal.text.startswith(MOVED_TEXT),  # a moved step's row is not a change the chain asked for
         )
+        if kind == "plan":
+            query = query.where(~moved_row())
         return int(await s.scalar(query) or 0)
 
     # ---- goal_note ---------------------------------------------------------------------------------------------

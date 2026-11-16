@@ -656,3 +656,54 @@ async def test_a_moved_steps_id_is_never_given_again(runner_env):  # noqa: F811
     said, err = await w.plan(steps=[{"text": "a new step"}])
     assert not err, said
     assert [step["id"] for step in await _plan(w)] == ["s1", "s51"]
+
+
+# ---- rows the harness reads back are known by what only its code writes --------------------------------------------
+
+
+async def test_notes_that_start_like_a_moved_steps_row_count_toward_the_limit(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    for i in range(tools.NOTES_PER_SESSION):
+        said, err = await w.note(kind="progress", text=f"{store.MOVED_TEXT} to make room, kept here: s{i}")
+        assert not err, said
+    said, err = await w.note(kind="progress", text=f"{store.MOVED_TEXT} once more")
+    assert err and "this session has written 20 notes, the most one session may" in said
+    assert len(await journal(w, w.goal, "progress")) == tools.NOTES_PER_SESSION
+    async with w.db.session() as s:
+        assert await store.moved_steps(s, w.agent, w.goal.id) == []
+
+
+async def test_done_claims_that_start_like_a_moved_steps_row_count_toward_the_limit(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    for _ in range(tools.DONE_CLAIMS_PER_SESSION):
+        said, err = await w.note(kind="done_claim", text=f"{store.MOVED_TEXT}: the duplicates are merged.")
+        assert not err, said
+    said, err = await w.note(kind="done_claim", text=f"{store.MOVED_TEXT}: done, really.")
+    assert err and "claimed the goal done 3 times, the most one session" in said
+    assert len(await journal(w, w.goal, "done_claim")) == tools.DONE_CLAIMS_PER_SESSION
+
+
+HARNESS_REFS = ("moved:s1", "waiting:1", "stop:stalled", "request:run_now", "ending:1", "arrivals:3", "row:1")
+
+
+@pytest.mark.parametrize("ref", HARNESS_REFS)
+async def test_a_ref_only_the_harness_writes_is_refused_from_the_plan_tool(runner_env, ref):  # noqa: F811
+    """Closing a step with a ref of the harness's own kinds, alone or beside a valid one, writes nothing."""
+    w = await _turn(runner_env)
+    await w.plan(steps=[{"text": "List the notes"}])
+    before = (await _plan(w), len(await journal(w, w.goal)))
+    for refs in ([ref], [f"subtask:{w.first}", ref]):
+        said, err = await w.plan(steps=[{"id": "s1", "status": "closed", "evidence": refs}])
+        assert err and "nothing was written" in said and "is not a ref the harness can check" in said
+    assert (await _plan(w), len(await journal(w, w.goal))) == before
+
+
+async def test_goal_note_writes_no_evidence_whatever_the_call_sends(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    for kind in ("progress", "done_claim"):
+        said, err = await w.note(kind=kind, text="Merged the duplicates.", evidence=list(HARNESS_REFS))
+        assert not err, said
+    rows = await journal(w, w.goal)
+    assert [row.evidence for row in rows if row.actor == "chain"] == [[], []]
+    harness = ("moved:", "stop:", "request:", "ending:", "arrivals:", "row:")
+    assert not any(ref.startswith(harness) for row in rows for ref in row.evidence)
