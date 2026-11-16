@@ -94,6 +94,7 @@ def test_twenty_grants_stay_within_the_bound_cutting_words_first():
     listed = text.split("\n", 1)[1].rsplit("\n", 1)[0]
     assert len(listed) <= TOOLS_SECTION_CHARS
     assert "a tool of the MCP server" not in text and all(line.tool in text for line in long)  # names kept
+    assert "more allowed tools not listed" not in text  # every name fits once the words go
     huge = [ToolLine(f"mcp__{'x' * 90}__{n:02d}{'y' * 100}", "does") for n in range(20)]
     text = tools_section(huge)
     listed = text.split("\n", 1)[1].rsplit("\n", 1)[0]
