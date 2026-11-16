@@ -159,6 +159,24 @@ describe('the tools a goal may use without asking', () => {
     expect(within(question).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Yes, allow', 'No']);
   });
 
+  it("an MCP grant's name line names its server, so two servers' tools of one name are told apart", async () => {
+    const other = toolGrant('mcp__notes__search', {
+      tool: 'mcp__wiki__search',
+      server_name: 'wiki',
+      server_host: 'wiki.example.com',
+      says: 'Use search on wiki (wiki.example.com). It can do whatever that tool does there, which Nous cannot check: read, change or delete things.',
+    });
+    current = goalToolsAnswer({ grants: [toolGrant('mcp__notes__search'), other, toolGrant('send_email')], available: [] });
+    render(GoalTools, { goal: GOAL });
+    const rows = await waitFor(() => {
+      const found = screen.getAllByText('search', { selector: '.name' });
+      expect(found).toHaveLength(2);
+      return found.map((name) => name.closest('li') as HTMLElement);
+    });
+    expect(rows.map((row) => row.querySelector('.title')?.textContent)).toEqual(['search on notes', 'search on wiki']);
+    expect(rowOf('send_email').querySelector('.title')?.textContent).toBe('send_email'); // a built-in tool: no server
+  });
+
   it("a refusal shows the server's sentence as it is", async () => {
     const sentence = 'send_email is switched off for background work. Set it to Allowed under Limits and tools first.';
     current = goalToolsAnswer({ grants: [], available: [toolOption('send_email')] });

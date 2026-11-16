@@ -177,7 +177,8 @@
       <ul class="tools" aria-label={TOOLS_TITLE}>
         {#each grants as grant (grant.tool)}
           <li class="tool">
-            <span class="name">{grant.label}</span>
+            <!-- An MCP tool's server on its name line: two servers can each have a tool of that name. -->
+            <span class="title"><span class="name">{grant.label}</span>{#if grant.server_name}{' '}<span class="server">on {grant.server_name}</span>{/if}</span>
             {#if canEdit}
               <div class="buttons">
                 <Button id="tool-r.{slug(grant.tool)}" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
@@ -259,6 +260,8 @@
   .tool:first-child { border-top: 0; }
   .about { grid-column: 1 / -1; min-width: 0; }
   .name { font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+  .title { min-width: 0; overflow-wrap: anywhere; }
+  .server { font-size: 0.8125rem; color: var(--muted); }
   .says { font-size: 0.75rem; line-height: 1.4; margin: 0.125rem 0 0; overflow-wrap: anywhere; }
   .when { color: var(--muted); }
   .line { font-size: 0.75rem; line-height: 1.4; color: var(--muted); margin: 0.125rem 0 0; overflow-wrap: anywhere; }
