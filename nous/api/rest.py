@@ -545,7 +545,8 @@ def create_app(
             if q:
                 # Existing search behavior
                 category = request.query_params.get("category")
-                facts = await heart.search_facts(q, limit=limit, category=category)
+                # A browse is not a recall: the results do not count toward recall_count.
+                facts = await heart.search_facts(q, limit=limit, category=category, track_access=False)
                 return JSONResponse({
                     "facts": [f.model_dump(mode="json") for f in facts],
                     "total": len(facts),
@@ -2831,6 +2832,7 @@ def create_app(
             query="rubric_dimension_proposal",
             limit=20,
             category="technical",
+            track_access=False,  # a listing is not a recall
         )
         return JSONResponse([
             {
