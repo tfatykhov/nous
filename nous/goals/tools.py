@@ -39,15 +39,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain import continuation
 from nous.goals import evidence
 from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible, neutralize
-from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore, clip, format_short_id
+from nous.goals.store import (
+    JOURNAL_MAX_CHARS,
+    MOVED_REF,
+    MOVED_TEXT,
+    GoalStore,
+    clip,
+    format_short_id,
+    moved_steps,
+)
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalJournal, GoalSession
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 20  # brain.goals.plan holds at most 20 steps (migration 113)
+MAX_STEPS = 20  # the steps one goal_plan call may send
+MAX_OPEN_STEPS = 20  # the open steps a plan holds
+KEPT_DONE_STEPS = 30  # the closed or dropped steps a plan keeps, newest; older ones move to the journal
+MAX_PLAN_ENTRIES = 20  # every step the plan holds: brain.goals' CHECK on the plan (migration 113)
 STEP_STATUSES = ("open", "closed", "dropped")
 NOTE_KINDS = ("progress", "done_claim")
+DONE_STATUSES = ("closed", "dropped")
 WRITABLE_STATES = ("active", "paused")  # a running session of a paused goal still runs to its end
 _STEP_ID = re.compile(r"s(\d{1,4})")
 # The owner message of a done claim: one per claim (its source id is derived from the claim's journal seq).
@@ -89,7 +101,8 @@ GOAL_PLAN_SCHEMA: dict[str, Any] = {
         "status 'closed' and 1 to 3 evidence refs from the goal block's list: at least one a completed subtask or "
         "workflow of this session's work (subtask:<id> or dag:<id>); files and recorded calls may be added as "
         "support. A ref closes one step only, and at most 3 steps close in one call. 'dropped' needs no evidence. A "
-        "closed step cannot change. If any step is refused, nothing is written. Does not end the turn."
+        "closed step cannot change. The plan holds 20 steps: when a new one needs room, the oldest closed or "
+        "dropped steps move to the journal. If any step is refused, nothing is written. Does not end the turn."
     ),
     "input_schema": {
         "type": "object",
@@ -188,6 +201,7 @@ class GoalTools:
             GoalJournal.session_n == row.n,
             GoalJournal.kind == kind,
             GoalJournal.actor == "chain",
+            ~GoalJournal.text.startswith(MOVED_TEXT),  # a moved step's row is not a change the chain asked for
         )
         return int(await s.scalar(query) or 0)
 
@@ -317,9 +331,21 @@ class GoalTools:
                     "nothing was written"
                 )
             plan = [dict(step) for step in goal.plan or [] if isinstance(step, dict)]
-            changes, cited, problems = await self._apply(s, plan, entries, ended=row.ended_at is not None)
-            if not problems and len(plan) > MAX_STEPS:
-                problems.append(f"the plan would have {len(plan)} steps; it holds at most {MAX_STEPS}")
+            moved_rows = await moved_steps(s, self._agent_id, goal.id)
+            changes, cited, problems = await self._apply(
+                s, plan, entries, ended=row.ended_at is not None, moved_rows=moved_rows
+            )
+            open_steps = sum(1 for step in plan if step.get("status") not in DONE_STATUSES)
+            if not problems and open_steps > MAX_OPEN_STEPS:
+                problems.append(f"the plan would have {open_steps} open steps; it holds at most {MAX_OPEN_STEPS}")
+            moving: list[dict[str, Any]] = []
+            if not problems:
+                moving, full = await self._make_room(s, goal, plan)
+                if full:
+                    problems.append(
+                        f"the plan is full: it holds {MAX_PLAN_ENTRIES} steps, and the closed ones among them were "
+                        "closed in the session still open, so none can leave it yet; drop an open step first"
+                    )
             if problems:
                 raise _Refused("nothing was written: " + "; ".join(problems))
             if not changes:
@@ -336,12 +362,51 @@ class GoalTools:
             if row.ended_at is not None:
                 note += f"\n(Written after session {row.n} had ended.)"
             self._store.add_journal_row(s, goal.id, "plan", note, actor="chain", session_n=row.n, evidence=cited)
+            for step in moving:  # one row each: its id and refs stay with it for one-use and step ids
+                self._store.add_journal_row(
+                    s, goal.id, "plan", _moved_note(step), actor="chain", session_n=row.n, evidence=_moved_refs(step)
+                )
             await s.commit()
         closed = sum(1 for step in plan if step.get("status") == "closed")
-        return f"Plan updated: {'; '.join(changes)}. It has {len(plan)} steps, {closed} closed."
+        said = f"Plan updated: {'; '.join(changes)}. It has {len(plan)} steps, {closed} closed."
+        if moving:
+            said += f" Moved to the journal to make room: {', '.join(str(step.get('id')) for step in moving)}."
+        return said
+
+    async def _make_room(self, s: AsyncSession, goal: Goal, plan: list[dict[str, Any]]) -> tuple[list[dict], bool]:
+        """Move the oldest closed or dropped steps out of ``plan`` (in place) while it holds more than
+        ``MAX_PLAN_ENTRIES`` steps or more than ``KEPT_DONE_STEPS`` closed or dropped ones. A step closed in the
+        goal's session that is still open stays: its close counts it (``steps_closed``). ``(moved, full)``: full when
+        the plan is still too long with nothing left that may move."""
+        open_n = await s.scalar(
+            select(GoalSession.n).where(
+                GoalSession.agent_id == self._agent_id, GoalSession.goal_id == goal.id, GoalSession.ended_at.is_(None)
+            )
+        )
+
+        def may_move(step: dict[str, Any]) -> bool:
+            if step.get("status") == "dropped":
+                return True
+            return step.get("status") == "closed" and (open_n is None or step.get("closed_session") != open_n)
+
+        moving: list[dict[str, Any]] = []
+        while len(plan) > MAX_PLAN_ENTRIES or sum(step.get("status") in DONE_STATUSES for step in plan) > (
+            KEPT_DONE_STEPS
+        ):
+            oldest = next((i for i, step in enumerate(plan) if may_move(step)), None)
+            if oldest is None:
+                return moving, True
+            moving.append(plan.pop(oldest))
+        return moving, False
 
     async def _apply(
-        self, s: AsyncSession, plan: list[dict[str, Any]], entries: list[dict[str, Any]], *, ended: bool
+        self,
+        s: AsyncSession,
+        plan: list[dict[str, Any]],
+        entries: list[dict[str, Any]],
+        *,
+        ended: bool,
+        moved_rows: list[list[str]] = (),
     ) -> tuple[list[str], list[str], list[str]]:
         """Apply ``entries`` to ``plan`` in place: ``(changes, cited refs, problems)``. A step closes only with a
         completed subtask or DAG of the lineage among its refs (``CLOSING_KINDS``), at most ``CLOSES_PER_CALL`` a
@@ -354,6 +419,13 @@ class GoalTools:
                 for ref in step.get("evidence") or []:
                     if isinstance(ref, str):
                         used[ref] = used[evidence.identity(self._scope, ref)] = step.get("id")
+        moved_ids: set[str] = set()
+        for refs in moved_rows:  # the steps the plan moved to the journal: their ids and refs stay taken
+            step_id = next((ref[len(MOVED_REF) :] for ref in refs if ref.startswith(MOVED_REF)), "a moved step")
+            moved_ids.add(step_id)
+            for ref in refs:
+                if not ref.startswith(MOVED_REF):
+                    used[ref] = used[evidence.identity(self._scope, ref)] = step_id
         already_closed = {key for key, step in by_id.items() if step.get("status") == "closed"}
         closing = [e for e in entries if e.get("status") == "closed" and e.get("id") not in already_closed]
         if len(closing) > CLOSES_PER_CALL:
@@ -407,7 +479,7 @@ class GoalTools:
                     problems.append(f"{label}: {CLOSE_RULE}")
                     continue
             if step is None:
-                step = {"id": _next_id(by_id), "text": entry["text"], "status": "open", "evidence": []}
+                step = {"id": _next_id(by_id, moved_ids), "text": entry["text"], "status": "open", "evidence": []}
                 plan.append(step)
                 by_id[step["id"]] = step
                 changes.append(f'added {step["id"]}: "{step["text"]}"')
@@ -440,8 +512,10 @@ def _differs(step: dict[str, Any], entry: dict[str, Any]) -> bool:
     return entry.get("status") not in (None, "closed")
 
 
-def _next_id(by_id: dict[Any, Any]) -> str:
-    taken = {int(m.group(1)) for key in by_id if isinstance(key, str) and (m := _STEP_ID.fullmatch(key))}
+def _next_id(by_id: dict[Any, Any], moved_ids: set[str] = frozenset()) -> str:
+    """A step id no step of the plan, and no step moved out of it, has had: one past the highest."""
+    keys = [*by_id, *moved_ids]
+    taken = {int(m.group(1)) for key in keys if isinstance(key, str) and (m := _STEP_ID.fullmatch(key))}
     k = max(taken, default=0) + 1
     return f"s{k}"
 
@@ -509,3 +583,17 @@ def make_goal_tools(
         "goal_note": (GOAL_NOTE_SCHEMA, tools.goal_note),
         "goal_plan": (GOAL_PLAN_SCHEMA, tools.goal_plan),
     }
+
+
+def _moved_note(step: dict[str, Any]) -> str:
+    """The journal row that keeps a step the plan moved out: its id and status in fixed words, then its text and its
+    refs as written (the journal quotes every entry as data when it is shown)."""
+    status = str(step.get("status"))
+    where = f", closed in session {step.get('closed_session')}" if status == "closed" else ""
+    note = f'{MOVED_TEXT} to make room, kept here: {step.get("id")} ({status}{where}): "{step.get("text", "")}"'
+    refs = [str(ref) for ref in step.get("evidence") or []]
+    return note + (f"\nEvidence: {', '.join(refs)}" if refs else "")
+
+
+def _moved_refs(step: dict[str, Any]) -> list[str]:
+    return [f"{MOVED_REF}{step.get('id')}", *(str(ref) for ref in step.get("evidence") or [])]

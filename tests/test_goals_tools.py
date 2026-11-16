@@ -32,8 +32,8 @@ from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.api.runner import TERMINAL_EXTRA_TOOLS
 from nous.api.tool_classes import tool_class
-from nous.goals import evidence, tools
-from nous.storage.models import ExecutionLedgerEntry, Goal, GoalSession, Intention
+from nous.goals import evidence, store, tools
+from nous.storage.models import ExecutionLedgerEntry, Goal, GoalSession, Intention, Subtask
 
 pytestmark = pytest.mark.postgres_only
 
@@ -548,3 +548,100 @@ async def test_two_sessions_of_one_goal_writing_the_plan_at_once_lose_neither_wr
     texts = sorted(step["text"] for step in await _plan(w))
     assert texts == ["from the open session 2", "from the reopened chain of session 1"]
     assert sorted(row.session_n for row in await journal(w, w.goal, "plan")) == [1, 2]
+
+
+# ---- a plan keeps its open steps and its newest done ones -----------------------------------------------------------
+
+
+def _closed(n: int, session: int, ref: str | None = None) -> dict:
+    return {
+        "id": f"s{n}",
+        "text": f"step {n}",
+        "status": "closed",
+        "evidence": [ref or f"subtask:{uuid.uuid4()}"],
+        "closed_session": session,
+    }
+
+
+async def _moved_rows(w: SimpleNamespace) -> list:
+    return [r for r in await journal(w, w.goal, "plan") if r.text.startswith(store.MOVED_TEXT)]
+
+
+async def test_a_goal_that_closed_twenty_steps_can_still_add_and_close_more(runner_env):  # noqa: F811
+    """Twenty steps closed by earlier sessions fill the plan; the session adds and closes five more, one a call:
+    each time the oldest closed step moves to the journal, so the goal goes on."""
+    w = await _turn(runner_env)
+    await set_goal(w, w.goal, plan=[_closed(n, session=99) for n in range(1, 21)])
+    for i in range(5):
+        child = await _completed_child(w)
+        said, err = await w.plan(steps=[{"text": f"new {i}", "status": "closed", "evidence": [f"subtask:{child}"]}])
+        assert not err and f"Moved to the journal to make room: s{i + 1}." in said, said
+    plan = await _plan(w)
+    assert len(plan) == tools.MAX_PLAN_ENTRIES and all(step["status"] == "closed" for step in plan)
+    assert [step["id"] for step in plan][-5:] == ["s21", "s22", "s23", "s24", "s25"]
+    assert [step["closed_session"] for step in plan][-5:] == [w.row.n] * 5
+    moved = await _moved_rows(w)
+    assert [r.evidence[0] for r in moved] == [f"moved:s{n}" for n in range(1, 6)]
+    said, err = await w.plan(steps=[{"text": "and one more"}])
+    assert not err and "s6" in said
+
+
+async def test_a_moved_step_keeps_its_id_and_its_evidence_taken(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    plan = [_closed(1, session=99, ref=f"subtask:{w.first}")]
+    plan += [{"id": f"s{n}", "text": f"step {n}", "status": "open", "evidence": []} for n in range(2, 21)]
+    await set_goal(w, w.goal, plan=plan)
+    said, err = await w.plan(steps=[{"text": "a new step"}])
+    assert not err, said
+    (row,) = await _moved_rows(w)
+    assert row.evidence == ["moved:s1", f"subtask:{w.first}"] and row.actor == "chain" and row.session_n == w.row.n
+    assert row.text.startswith(
+        f'{store.MOVED_TEXT} to make room, kept here: s1 (closed, closed in session 99): "step 1"'
+    )
+    ids = [step["id"] for step in await _plan(w)]
+    assert ids[0] == "s2" and ids[-1] == "s21"
+    said, err = await w.plan(steps=[{"id": "s2", "status": "closed", "evidence": [f"subtask:{w.first}"]}])
+    assert err and "already closes step s1" in said  # one-use reaches the moved step
+
+
+async def test_a_step_closed_in_the_open_session_never_moves_and_a_full_plan_is_refused(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    await set_goal(w, w.goal, plan=[_closed(n, session=w.row.n) for n in range(1, 21)])
+    said, err = await w.plan(steps=[{"text": "one more"}])
+    assert err and "the plan is full" in said
+    assert len(await _plan(w)) == 20 and await _moved_rows(w) == []
+
+
+async def test_a_moved_steps_row_is_not_counted_as_a_plan_change(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    await set_goal(w, w.goal, plan=[_closed(n, session=99) for n in range(1, 21)])
+    await _chain_rows(w, "plan", tools.PLAN_CHANGES_PER_SESSION - 2)
+    said, err = await w.plan(steps=[{"text": "the 29th change"}])
+    assert not err and "Moved to the journal" in said
+    said, err = await w.plan(steps=[{"text": "the 30th change"}])
+    assert not err, said
+
+
+async def test_the_goal_block_and_the_next_first_task_count_the_moved_steps(runner_env):  # noqa: F811
+    w = await world(runner_env, bind=True)
+    w.goal = await active(w)
+    w.root, w.row = await started(w, w.goal)
+    w.note, w.plan = goal_tools(w, w.goal, w.row)
+    await set_goal(w, w.goal, plan=[_closed(n, session=99) for n in range(1, 21)])
+    await w.plan(steps=[{"text": "a new step"}, {"text": "and another"}])
+    note = "(2 older closed or dropped plan steps were moved to the journal.)"
+    assert note in (await w.chain.turn_context(w.root.id)).block
+    async with w.db.session() as s:  # the session's chain ends; the next session's first task says it too
+        await s.execute(
+            update(Intention).where(Intention.root_id == w.root.id).values(state="closed", close_reason="resolved")
+        )
+        await s.commit()
+    assert (await w.driver.tick()).closed == 1
+    await set_goal(w, w.goal, next_wake_at=w.row.started_at)
+    (root_2,) = (await w.driver.tick()).started
+    async with w.db.session() as s:
+        first = (
+            await s.execute(select(GoalSession.first_subtask_id).where(GoalSession.root_id == root_2))
+        ).scalar_one()
+        task = (await s.execute(select(Subtask.task).where(Subtask.id == first))).scalar_one()
+    assert note in task

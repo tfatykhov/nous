@@ -106,8 +106,9 @@ _TASK_LAYOUT = _Layout()
 class _Fit:
     """What is shown of the plan and the journal while the text is cut down to its bound."""
 
-    def __init__(self, steps: list[Mapping[str, Any]], quoted: list[str], kept: list[int]) -> None:
+    def __init__(self, steps: list[Mapping[str, Any]], quoted: list[str], kept: list[int], moved: int = 0) -> None:
         self.steps = steps
+        self.moved = moved  # older closed or dropped steps the plan moved to the journal
         self.quoted = quoted
         self.kept = set(kept)
         self.shown_steps = set(range(len(steps)))
@@ -126,6 +127,8 @@ class _Fit:
         hidden_done = sum(1 for i in self.done if i not in self.shown_steps)
         hidden_open = sum(1 for i in self.open if i not in self.shown_steps)
         first_open_hidden = bool(self.open) and self.open[0] not in self.shown_steps
+        if self.moved:
+            notes.append(f"({self.moved} older closed or dropped plan steps were moved to the journal.)")
         if hidden_done:
             notes.append(f"({hidden_done} closed or dropped plan steps not shown.)")
         if first_open_hidden:
@@ -188,6 +191,7 @@ def build_session_task(
     spent: int,
     day_spent: int,
     max_chars: int = MAX_TASK_CHARS,
+    moved: int = 0,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today), the plan's steps and the journal's entries, newest first, both quoted as data, and what
@@ -200,10 +204,13 @@ def build_session_task(
     from the last back to the second, the owner's two newest entries (the older first), and last the first open
     step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
     cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
-    return _fitted(_charter(goal, spent=spent, day_spent=day_spent), plan, journal_rows, max_chars, _TASK_LAYOUT)
+    head = _charter(goal, spent=spent, day_spent=day_spent)
+    return _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
 
 
-def _fitted(head: str, plan: Sequence[Any], journal_rows: Sequence[Any], max_chars: int, layout: _Layout) -> str:
+def _fitted(
+    head: str, plan: Sequence[Any], journal_rows: Sequence[Any], max_chars: int, layout: _Layout, *, moved: int = 0
+) -> str:
     """``head``, then the plan and the journal quoted as data and cut in ``_Fit.cuts`` order until the whole text
     is at most ``max_chars``, then the closing words of ``layout``. ``ValueError`` when the head and the closing
     alone do not fit."""
@@ -221,7 +228,7 @@ def _fitted(head: str, plan: Sequence[Any], journal_rows: Sequence[Any], max_cha
                 break
             kept.append(index)
             used += len(entry)
-    fit = _Fit(steps, quoted, kept)
+    fit = _Fit(steps, quoted, kept, moved)
     cuts = fit.cuts(owner)
     text = fit.render(head, layout)
     while len(text) > max_chars:
@@ -300,6 +307,7 @@ def render_goal_block(
     citeable: Sequence[Any],
     root_dir: str | None = None,
     max_chars: int = MAX_BLOCK_CHARS,
+    moved: int = 0,
 ) -> str:
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
@@ -319,4 +327,4 @@ def render_goal_block(
     room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
     closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
     layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)
-    return _fitted(head, plan, journal_rows, max_chars, layout)
+    return _fitted(head, plan, journal_rows, max_chars, layout, moved=moved)

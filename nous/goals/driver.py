@@ -41,7 +41,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, roots, spend
-from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip
+from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -677,10 +677,13 @@ class GoalDriver:
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
+            moved = len(await moved_steps(s, self._agent_id, goal.id))  # steps the plan moved to the journal
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
-            return charter.build_session_task(goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars)
+            return charter.build_session_task(
+                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved
+            )
 
         task = build(charter.MAX_TASK_CHARS)
         rejection, gated = await gate_subtask_task(self._heart, task)

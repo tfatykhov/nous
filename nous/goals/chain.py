@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
 from nous.goals import charter, evidence, spend
-from nous.goals.store import GoalStore
+from nous.goals.store import GoalStore, moved_steps
 from nous.goals.tools import Executor, GoalSessionRef, make_goal_tools
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalSession, Intention
@@ -84,6 +84,7 @@ class GoalChain:
                 await s.execute(select(Goal).where(Goal.id == row.goal_id, Goal.agent_id == self._agent_id))
             ).scalar_one()
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
+            moved = len(await moved_steps(s, self._agent_id, goal.id))
             ref = GoalSessionRef(
                 goal_id=goal.id, session_id=row.id, session_n=row.n, root_id=root_id, started_at=row.started_at
             )
@@ -108,5 +109,6 @@ class GoalChain:
             session_ended=ended,
             citeable=refs,
             root_dir=scope.root_dir,
+            moved=moved,
         )
         return GoalTurn(block=block, tools=make_goal_tools(self._db, self._settings, self._store, ref))

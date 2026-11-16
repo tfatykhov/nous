@@ -62,6 +62,11 @@ _SHORT_ID_RE = re.compile(r"^(?:g-?)?0*(\d{1,12})$", re.IGNORECASE)
 DELIVERED_CHANNEL_KINDS: tuple[str, ...] = ("telegram",)
 
 GoalRef = UUID | int | str
+# A plan keeps its open steps and its newest closed or dropped ones; an older one leaves the plan with one journal row
+# of the chain (kind ``plan``) whose text starts with ``MOVED_TEXT`` and whose evidence is ``moved:<step id>`` and the
+# refs the step was closed with, so one-use and step ids still see it.
+MOVED_TEXT = "Moved out of the plan"
+MOVED_REF = "moved:"
 
 
 class GoalRefused(ValueError):
@@ -584,3 +589,20 @@ class GoalStore:
         )
         s.add(row)
         return row
+
+
+async def moved_steps(session: AsyncSession, agent_id: str, goal_id: UUID) -> list[list[str]]:
+    """The evidence of each journal row that keeps a step the goal's plan moved out (``MOVED_TEXT``), oldest first:
+    ``moved:<step id>`` and the refs that step was closed with."""
+    query = (
+        select(GoalJournal.evidence)
+        .where(
+            GoalJournal.agent_id == agent_id,
+            GoalJournal.goal_id == goal_id,
+            GoalJournal.kind == "plan",
+            GoalJournal.actor == "chain",
+            GoalJournal.text.startswith(MOVED_TEXT),
+        )
+        .order_by(GoalJournal.seq)
+    )
+    return [[str(ref) for ref in evidence or []] for evidence in (await session.execute(query)).scalars()]

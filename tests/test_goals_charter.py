@@ -250,3 +250,10 @@ def test_neutralize_escapes_every_delimiter_in_any_case_and_spacing():
     )
     step = quote_step({"id": "s3", "text": "y", "status": "open"})
     assert step == '<plan_step id="s3" status="open">\ny\n</plan_step>'
+
+
+def test_the_task_says_how_many_older_steps_the_plan_moved_to_the_journal():
+    plan = [{"id": "s5", "text": "List the notes", "status": "closed", "closed_session": 2, "evidence": ["x"]}]
+    text = build_session_task(_goal(), plan, [], spent=0, day_spent=0, moved=4)
+    assert "(4 older closed or dropped plan steps were moved to the journal.)" in text
+    assert "moved to the journal" not in build_session_task(_goal(), plan, [], spent=0, day_spent=0)
