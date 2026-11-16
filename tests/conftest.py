@@ -104,6 +104,16 @@ def _no_undo_journal():
     undo_journal.set_journal(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_tool_guard():
+    """F115: the tool guard is process-wide. Start and end every test without one."""
+    from nous.autonomy import tool_guard
+
+    tool_guard.install(None)
+    yield
+    tool_guard.install(None)
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------

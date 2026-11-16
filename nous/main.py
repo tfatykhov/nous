@@ -632,6 +632,27 @@ def _build_goals(
     return goal_driver
 
 
+async def _load_autonomy(settings: Settings, database: Any) -> Any | None:
+    """F115: with ``NOUS_AUTONOMY_SETTINGS_ENABLED`` on, the one autonomy store: built from ``settings`` (it keeps
+    the host's values) and loaded (the owner's stored limits applied in place, the tool guard installed with
+    ``NOUS_TOOL_GUARD_ENABLED``). Called before any component reads a limit. Off: None, and nothing is read; a host
+    ceiling or locked tool set without the setting it needs does nothing, and one warning says so."""
+    if not settings.autonomy_settings_enabled:
+        if settings.autonomy_ceilings.strip() or settings.autonomy_locked_tools.strip():
+            logger.warning(
+                "NOUS_AUTONOMY_CEILINGS and NOUS_AUTONOMY_LOCKED_TOOLS do nothing while NOUS_AUTONOMY_SETTINGS_ENABLED "
+                "is off"
+            )
+        return None
+    if settings.autonomy_locked_tools.strip() and not settings.tool_guard_enabled:
+        logger.warning("NOUS_AUTONOMY_LOCKED_TOOLS does nothing while NOUS_TOOL_GUARD_ENABLED is off")
+    from nous.autonomy.store import AutonomyStore
+
+    store = AutonomyStore(database, settings)
+    await store.load()
+    return store
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -663,6 +684,8 @@ async def create_components(settings: Settings) -> dict:
     runtime_cfg = RuntimeConfig.get()
     async with database.session() as cfg_session:
         await runtime_cfg.load_from_db(cfg_session)
+    # F115: the owner's limits are applied here, before any component reads one.
+    autonomy = await _load_autonomy(settings, database)
 
     embedding_provider = None
     if settings.openai_api_key:
@@ -2098,6 +2121,9 @@ async def create_components(settings: Settings) -> dict:
     # F114: the goal driver's loop, once the runner that works its sessions runs.
     if goal_driver is not None:
         await goal_driver.start()
+    # F115: a locked tool name that matches no tool registered by now locks nothing (an MCP tool may connect later).
+    if autonomy is not None:
+        autonomy.warn_unknown_locks(dispatcher.is_registered)
 
     return {
         "database": database,
@@ -2144,6 +2170,7 @@ async def create_components(settings: Settings) -> dict:
         "a2ui_sweep_task": a2ui_sweep_task,
         "check_audit_task": check_audit_task,
         "mcp_client": mcp_client,
+        "autonomy": autonomy,
     }
 
 
@@ -2155,6 +2182,11 @@ async def shutdown_components(components: dict) -> None:
     goal_driver = components.get("goal_driver")
     if goal_driver is not None:
         await goal_driver.stop()
+
+    # F115: the autonomy store stops reading its saved settings again, if it still was.
+    autonomy = components.get("autonomy")
+    if autonomy is not None:
+        await autonomy.close()
 
     # F099: stop the continuation runner first: its turns spawn work and write rows. Each running arrival
     # releases its claim without an attempt.
@@ -2440,6 +2472,8 @@ def build_app(settings: Settings) -> Starlette:
         model_call_text_store=_lazy_component(components, "model_call_text_store"),
         context_view=_lazy_component(components, "context_view"),
         mcp_client=_lazy_component(components, "mcp_client"),
+        autonomy=_lazy_component(components, "autonomy"),
+        dispatcher=_lazy_component(components, "dispatcher"),
     )
 
     if settings.mcp_enabled:

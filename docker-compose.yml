@@ -94,6 +94,12 @@ services:
       - NOUS_GOALS_MAX_ACTIVE_SESSIONS=${NOUS_GOALS_MAX_ACTIVE_SESSIONS:-1}
       - NOUS_GOALS_RESERVED_SLOTS=${NOUS_GOALS_RESERVED_SLOTS:-1}
       - NOUS_GOALS_QUEUE_HEADROOM=${NOUS_GOALS_QUEUE_HEADROOM:-2}
+      # F115 autonomy settings: the owner's limits of background work and the tool guard, set on the dashboard. Lands
+      # dark. The ceilings and the locked tools are host settings the screen cannot change.
+      - NOUS_AUTONOMY_SETTINGS_ENABLED=${NOUS_AUTONOMY_SETTINGS_ENABLED:-false}
+      - NOUS_TOOL_GUARD_ENABLED=${NOUS_TOOL_GUARD_ENABLED:-false}
+      - NOUS_AUTONOMY_CEILINGS=${NOUS_AUTONOMY_CEILINGS:-}
+      - NOUS_AUTONOMY_LOCKED_TOOLS=${NOUS_AUTONOMY_LOCKED_TOOLS:-}
       # F099 kill switches, both on by default: bash for internal_only turns (lineage_bash_allowed), and in it
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}

@@ -16,12 +16,12 @@ describe('Nav', () => {
     location.hash = '';
   });
 
-  it('renders one #/<route> link per known route (20), in route order, all router-parseable', () => {
+  it('renders one #/<route> link per known route (21), in route order, all router-parseable', () => {
     const { container } = render(Nav, { props: { currentRoute: 'overview' } });
     const hrefs = Array.from(container.querySelectorAll('a.nav-link')).map((a) =>
       a.getAttribute('href'),
     );
-    expect(hrefs.length).toBe(20);
+    expect(hrefs.length).toBe(21);
     expect(hrefs.length).toBe(ROUTES.length);
     for (const href of hrefs) {
       expect(href).toMatch(/^#\//); // must be a router-recognised fragment, not a bare anchor
@@ -73,7 +73,7 @@ describe('Nav groups', () => {
     ['Memory', [['graph', 'Graph'], ['browser', 'Browse'], ['health', 'Health'], ['retrieval', 'Retrieval'], ['consolidation', 'Consolidation']]],
     ['Execution', [['work', 'Work'], ['model-calls', 'Model calls'], ['dag', 'Workflows'], ['subtasks', 'Subtasks'], ['heartbeat', 'Heartbeat']]],
     ['Decisions', [['decisions', 'Decisions'], ['rubric', 'Scoring']]],
-    ['Autonomy', [['autonomy', 'Autonomy'], ['goals', 'Goals'], ['intentions', 'Intentions'], ['harness', 'Guards']]],
+    ['Autonomy', [['autonomy', 'Autonomy'], ['goals', 'Goals'], ['intentions', 'Intentions'], ['harness', 'Guards'], ['limits', 'Limits and tools']]],
     ['System', [['observability', 'Observability'], ['identity', 'Identity'], ['integrations', 'Integrations']]],
   ];
 

@@ -1548,6 +1548,19 @@ class Settings(BaseSettings):
     # Places a goal session leaves free in the subtask queue: none starts while fewer are free.
     goals_queue_headroom: int = Field(default=2, ge=0, le=4)
 
+    # F115 autonomy settings: the owner changes the limits of background work on the dashboard (nous/autonomy). Each
+    # change is a row of nous_system.autonomy_settings with a record in autonomy_settings_log, applied in place on
+    # this object with no restart and again at the next start. Off: no row is read and every limit is the host's.
+    autonomy_settings_enabled: bool = False
+    # The tool guard: per tool, the owner may switch a tool off for background work (it is then not offered to a
+    # background turn and a call to it is refused, in every enforcement mode). Needs autonomy_settings_enabled.
+    tool_guard_enabled: bool = False
+    # Host ceilings on the owner's limits: comma list of key=whole number (a key of nous/autonomy/registry.py). The
+    # owner cannot set a value above its ceiling, and a host value above it is lowered to it at start.
+    autonomy_ceilings: str = ""
+    # Tools background work may never use, whatever the owner sets: comma list of tool names. Needs the tool guard.
+    autonomy_locked_tools: str = ""
+
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.
     # Independent of result_inbox_enabled. Off: the hooks and the reconciler
@@ -4404,6 +4417,16 @@ class Settings(BaseSettings):
                 "NOUS_GOALS_ENABLED=true needs %s; goals stay OFF.", " and ".join(missing)
             )
             object.__setattr__(self, "goals_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tool_guard_dependency(self) -> "Settings":
+        """F115: the tool guard is part of the autonomy settings."""
+        if self.tool_guard_enabled and not self.autonomy_settings_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_TOOL_GUARD_ENABLED=true needs NOUS_AUTONOMY_SETTINGS_ENABLED=true; the tool guard stays OFF."
+            )
+            object.__setattr__(self, "tool_guard_enabled", False)
         return self
 
     @model_validator(mode="after")

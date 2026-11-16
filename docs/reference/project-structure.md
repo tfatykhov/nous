@@ -187,11 +187,17 @@ nous/
 │   │   ├── chain.py            # GoalChain.turn_context (the runner's set_goal_turns: a goal root's turn gets the goal block and the goal tools) and report_channel (continuation.set_goal_report_channel: a goal root's REPORT goes to goal:<id>)
 │   │   ├── owner_message.py    # tell_owner: the goal's own message to the owner (a done claim, a driver pause), keyed, in fixed sentences with the goal's quoted title
 │   │   └── seed.py             # `python -m nous.goals.seed create|list|show|approve|pause|resume|run-now|stop|cancel|confirm|note|raise-budget|extend`: the owner's host command; changes refused with the flag off
+│   ├── autonomy/               # F115 autonomy settings (NOUS_AUTONOMY_SETTINGS_ENABLED, NOUS_TOOL_GUARD_ENABLED, dark): the owner's limits of background work and the tools background work may use
+│   │   ├── registry.py         # The eleven limits the owner may change (each a Settings field, its words, hard range and when a change applies), the cross rule, NOUS_AUTONOMY_CEILINGS
+│   │   ├── store.py            # AutonomyStore: nous_system.autonomy_settings, autonomy_settings_log and tool_guard (migration 116); the host's values kept, the owner's applied in place on the shared Settings at start and on each change (written with its record in one transaction first)
+│   │   ├── tool_guard.py       # ToolGuard: the process-wide snapshot of the tools switched off for background work (the owner's and NOUS_AUTONOMY_LOCKED_TOOLS); which turns it holds; read by the runner's _offered_tools and _authorize_tool_call
+│   │   └── offered.py          # The kinds of background work the screen names, and why the code does not offer a tool to one (held equal to _offered_tools by a test)
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
 │       ├── companion_devices.py # Companion devices paired by a code: DeviceStore (nous_system.a2ui_devices, migration 115: each device's token as a SHA-256 only, revoke hooks), PairingDesk (the one open code, in memory), clean_name, and the /a2ui/devices routes (pairings, list, revoke, redeem, unpair)
 │       ├── goal_routes.py # F114 PR 2: the owner's /goals routes (list, options, one goal, a new draft, one POST per owner action), every one behind the owner guard; a goal's actions are the store's own rules
+│       ├── autonomy_routes.py # F115: the owner's /autonomy routes (the limits, the record of changes, the tools and their settings for background work), every one behind the owner guard
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
 │       ├── owner_guard.py # Owner routes require the owner's or the proxy's secret: the check and the route wrapper (OwnerGuard), and which proof grants which capability

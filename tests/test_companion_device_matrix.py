@@ -618,3 +618,23 @@ async def test_no_secret_in_any_log_record_at_debug(
         text = " ".join(str(getattr(row, column.key)) for column in A2uiAction.__table__.columns)
         for secret in secrets_seen:
             assert secret not in text
+
+
+async def test_a_device_token_is_refused_on_every_autonomy_route(
+    db, owned, service: SurfaceService, push: PushService
+) -> None:
+    """A paired device's token proves the companion's own calls, never the owner: each of the seven /autonomy routes
+    answers it 403, as it answers a call with no header."""
+    on = owned.model_copy(update={"autonomy_settings_enabled": True, "tool_guard_enabled": True})
+    app = _app(db, on, service, push)
+    device = await _pair(app)
+    routes = [route for route in app.routes if getattr(route, "path", "").startswith("/autonomy")]
+    seen = set()
+    for route in routes:
+        concrete = re.sub(r"\{[^}]+\}", "max_turns", route.path)
+        for method in sorted(route.methods - {"HEAD"}):
+            headers = {"X-Nous-Device-Token": device["token"], "content-type": JSON}
+            response = await _call(app, method, concrete, json={}, headers=headers)
+            assert (response.status_code, response.json()) == (403, {"error": "forbidden"}), (method, route.path)
+            seen.add((method, route.path))
+    assert len(seen) == 7

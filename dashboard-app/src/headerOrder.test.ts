@@ -11,7 +11,9 @@ import { sourceFiles } from './lib/testing/sources';
 const markup = (f: string) => markupOf(readFileSync(join(__dirname, f), 'utf-8'));
 const REFRESH = /<(?:Button|button)\b(?:=>|[^>])*>\s*(?:\{[^}]*'Refresh'[^}]*\}|Refresh)\s*<\/(?:Button|button)>/g;
 
-/** Every screen (or tab) with a page header that fetches through a poll store. */
+/** Every screen (or tab) with a page header that fetches through a poll store. The two Limits and tools tabs read once,
+ * not on a timer, so they say when they last read (or what failed) instead of the badge: views/Limits.test.ts holds
+ * their header to the same order, the read line then one Refresh. */
 const PAGES = ['views/Admission.svelte', 'views/Autonomy.svelte', 'views/Cache.svelte', 'views/Consolidation.svelte',
   'views/DagView.svelte', 'views/Decisions.svelte', 'views/Goals.svelte', 'views/GraphView.svelte', 'views/Harness.svelte', 'views/Heartbeat.svelte',
   'views/Integrations.svelte', 'views/Intentions.svelte', 'views/Ledger.svelte', 'views/MemoryWriteHealth.svelte', 'views/Observability.svelte',

@@ -57,6 +57,7 @@ from starlette.routing import Mount, Route
 from starlette.types import Scope
 
 from nous import undo_journal
+from nous.api.autonomy_routes import build_autonomy_routes
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.companion_devices import Device, DeviceStore, PairingDesk, build_device_routes
@@ -118,6 +119,8 @@ def create_app(
     model_call_text_store: Any | None = None,
     context_view: Any | None = None,
     mcp_client: Any | None = None,
+    autonomy: Any | None = None,
+    dispatcher: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -4135,6 +4138,13 @@ def create_app(
     goal_store = GoalStore(database, settings.agent_id, settings) if settings.goals_enabled else None
     routes.extend(
         build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard, driver=goal_driver)
+    )
+    # F115: the owner's limits of background work and the tool guard. Always mounted: with
+    # NOUS_AUTONOMY_SETTINGS_ENABLED off there is no store, and the routes give their fixed "off" answers.
+    routes.extend(
+        build_autonomy_routes(
+            database=database, settings=settings, store=autonomy, dispatcher=dispatcher, guard=owner_guard
+        )
     )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))

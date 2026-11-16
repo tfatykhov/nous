@@ -51,6 +51,10 @@
 # The owner's goal actions over REST: what each does and which of them a goal offers
 /nous/api/goal_routes.py @tfatykhov
 
+# The owner's limits of background work and the tools background work may use (F115)
+/nous/autonomy/** @tfatykhov
+/nous/api/autonomy_routes.py @tfatykhov
+
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
 /tests/eval/** @tfatykhov
