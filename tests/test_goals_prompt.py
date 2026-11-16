@@ -21,12 +21,14 @@ from goals_support import (
     started,
     world,
 )
+from sqlalchemy import select
 
 from nous.brain.continuation import RootLimits
 from nous.config import Settings
 from nous.goals import charter, evidence
 from nous.goals.chain import GoalChain
 from nous.handlers.continuation_runner import ObservedState, ObservedWork, build_arrival_prompt
+from nous.storage.models import Intention
 
 SETTINGS = Settings(_env_file=None, result_inbox_enabled=True, intentions_enabled=True, continuation_enabled=True)
 LIMITS = RootLimits(depth=1, spawns=2, turns=1, tokens=5000, stalls=0, spawn_blocked=False, escalate=None)
@@ -387,3 +389,49 @@ def test_a_quoted_file_name_cannot_close_its_block():
     text = _block(citeable=[evidence.Citeable(hostile, "x")], root_dir=f"intentions/{ROOT}")
     assert text.count("</file_ref>") == 1 and "&lt;/file_ref>" in text
     assert "Close every step" not in _outside_quotes(text)
+
+
+# ---- a goal lookup that fails ------------------------------------------------------------------------------------
+
+
+async def _attempts(w, root_id) -> int:
+    async with w.db.session() as s:
+        return (await s.execute(select(Intention.attempts).where(Intention.id == root_id))).scalar_one()
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_goal_lookup_costs_an_ordinary_root_nothing(runner_env, caplog):  # noqa: F811
+    """The root's own row, read for the turn already, says it is not a goal's (its origin is not ``goal``): the
+    lookup's failure is logged by its class and the turn runs as before, with no attempt charged."""
+    w = await world(runner_env, [REPORT])
+    subtask = await make_subtask(w.env)
+    root = await w.env.heart.intentions.get_for_source("subtask", subtask.id)
+    await w.env.heart.subtasks.complete(subtask.id, "done", final_outcome="completed")
+    await record(w.env, root)
+
+    async def broken(root_id):
+        raise ConnectionError("the database blinked: secret detail")
+
+    w.cont.set_goal_turns(broken)
+    assert await w.cont.run_arrival(root.id) is not None
+    assert await _attempts(w, root.id) == 0
+    assert not {"goal_note", "goal_plan"} & _tool_names(w.model.calls[0])
+    assert "ConnectionError" in caplog.text and "secret detail" not in caplog.text
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_goal_lookup_of_a_goal_root_is_a_failed_attempt(runner_env):  # noqa: F811
+    """A goal root's turn must not run without its block and tools: the failure is a failed attempt, and the
+    model is not called."""
+    w = await world(runner_env)
+    goal = await active(w)
+    root, _session = await started(w, goal)
+    await first_result(w, root)
+
+    async def broken(root_id):
+        raise ConnectionError("the database blinked")
+
+    w.cont.set_goal_turns(broken)
+    assert await w.cont.run_arrival(root.id) is None
+    assert await _attempts(w, root.id) == 1
+    assert w.model.calls == []
