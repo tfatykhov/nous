@@ -884,6 +884,9 @@ async def write_file_tool(
                 own_lock = lock
             # Passive before-state snapshot (never blocks: a failure is logged).
             await undo_journal.record_file_write(path, _workspace_dir)
+            if background_halt.call_refused():
+                # Goals PR 0c: the halt is checked again after the waits above, before the write.
+                return _tool_error(f"Refused to write '{path}': {background_halt.HALT_REASON}; nothing was written.")
         if outcome is None or outcome.write_target is None:
             # No snapshot is bound to this call (compensation off, or a call
             # nothing can revert): the file itself is written, as before
