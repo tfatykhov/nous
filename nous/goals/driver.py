@@ -40,7 +40,7 @@ from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
-from nous.goals import charter, roots, spend
+from nous.goals import charter, owner_message, roots, spend
 from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
@@ -76,6 +76,18 @@ ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
 STUCK_GRACE_SECONDS = 300
 ERRORS_BEFORE_PAUSE = 3  # sessions in a row that end in an error before the goal pauses (``error``)
 STOP_REASONS: tuple[str, ...] = ("deadline", "budget", "stalled", "error")  # stop conditions, in the order read
+# What the owner is told when the driver pauses a goal (failed starts pause it for ``error`` too), after the goal's
+# quoted title: fixed sentences only.
+PAUSE_SENTENCES: dict[str, str] = {
+    "deadline": "its deadline has passed. Extend the deadline and resume it on the Goals screen.",
+    "budget": "its total budget is spent. Raise the budget and resume it on the Goals screen.",
+    "stalled": "several sessions in a row took no step. Resume it on the Goals screen when it should go on.",
+    "error": (
+        "its sessions ended in errors, or it could not start one. Resume it on the Goals screen when it should go on."
+    ),
+}
+PAUSE_TOLD_WITHIN = timedelta(days=1)  # a pause the owner was not told of is tried again for this long
+PAUSES_TOLD_PER_TICK = 20
 # The refresh reads every closed session whose root's deadline has not passed. A root's deadline is the TTL counted
 # from the publish of its first task, which comes after the session's start; the scan is bounded by the start, with
 # this much room for the publish's delay and for a difference between this process's clock and the database's.
@@ -340,6 +352,7 @@ class GoalDriver:
             await self.refresh_sessions()
             paused = await self.apply_stop_conditions()
             started, held = await self._start_due()
+            await self.tell_owner_of_pauses()  # after every pause of this tick has committed
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
@@ -2073,6 +2086,112 @@ class GoalDriver:
                 )
             )
         return int(await s.scalar(select(func.count()).where(*counted)) or 0)
+
+    # ---- telling the owner of a pause ----------------------------------------------------------------------
+
+    async def tell_owner_of_pauses(self) -> int:
+        """Tell the owner of each pause the driver made (a stop condition, or failed starts: a harness row with
+        ``stop:<reason>``), once, after that pause's transaction has committed: one message keyed on the pause row's
+        id (``owner_message.tell_owner``), so a retry or a second driver writes nothing more. Only the goal's newest
+        such row, while the goal is still paused for that reason, within ``PAUSE_TOLD_WITHIN`` and at most
+        ``PAUSES_TOLD_PER_TICK`` a tick; the goal row is re-read under a share lock as the message is written, so a
+        resume meanwhile is not answered with "is paused". A failure is logged by its class and the pause stands; the
+        message is tried again on a later tick. The owner's own pause, stop or cancel has no such row: nothing is sent.
+        Returns the messages written."""
+        try:
+            pauses = await self._untold_pauses()
+        except Exception as exc:
+            logger.warning(
+                "Goal pauses could not be read to tell the owner (%s); tried again next tick", type(exc).__name__
+            )
+            return 0
+        told = 0
+        for row_id, goal_id, reason in pauses:
+            try:
+                async with self._db.session() as s:
+                    goal = (
+                        await s.execute(
+                            select(Goal)
+                            .where(
+                                Goal.id == goal_id,
+                                Goal.agent_id == self._agent_id,
+                                Goal.state == "paused",
+                                Goal.pause_reason == reason,
+                            )
+                            .with_for_update(read=True)
+                        )
+                    ).scalar_one_or_none()
+                    if goal is None:
+                        continue
+                    ref = owner_message.label(goal)
+                    body = f"Goal {ref} {owner_message.quoted_title(goal)} is paused: {PAUSE_SENTENCES[reason]}"
+                    written = await owner_message.tell_owner(
+                        s,
+                        self._agent_id,
+                        self._settings,
+                        goal=goal,
+                        source_id=row_id,
+                        title=f"Goal {ref} is paused",
+                        body=body,
+                    )
+                    await s.commit()
+                told += int(written)
+            except Exception as exc:  # the class only: an error's text can repeat a row's
+                logger.warning(
+                    "Goal %s: the owner could not be told of its pause (%s); tried again next tick",
+                    goal_id,
+                    type(exc).__name__,
+                )
+        return told
+
+    async def _untold_pauses(self) -> list[tuple[UUID, UUID, str]]:
+        """``(pause row id, goal id, reason)`` of the driver's pauses the owner has not been told of: the goal's newest
+        harness row with a ``stop:<reason>`` ref for a reason of ``PAUSE_SENTENCES``, written within
+        ``PAUSE_TOLD_WITHIN``, of a goal still paused for that reason, with no message keyed on the row yet."""
+
+        def stop_ref(row: Any) -> ColumnElement[bool]:
+            return or_(*[row.evidence.contains([f"{STOP_REF}{reason}"]) for reason in PAUSE_SENTENCES])
+
+        pause, newer = aliased(GoalJournal), aliased(GoalJournal)
+        newest = (
+            select(func.max(newer.seq))
+            .where(
+                newer.agent_id == self._agent_id,
+                newer.goal_id == pause.goal_id,
+                newer.kind == "state",
+                newer.actor == "harness",
+                stop_ref(newer),
+            )
+            .scalar_subquery()
+        )
+        told = exists().where(
+            ResultInbox.agent_id == self._agent_id,
+            ResultInbox.source_kind == continuation.SOURCE_INTENTION_REPORT,
+            ResultInbox.source_id == pause.id,
+        )
+        query = (
+            select(pause.id, pause.goal_id, pause.evidence, Goal.pause_reason)
+            .join(Goal, and_(Goal.id == pause.goal_id, Goal.agent_id == self._agent_id))
+            .where(
+                pause.agent_id == self._agent_id,
+                pause.kind == "state",
+                pause.actor == "harness",
+                stop_ref(pause),
+                pause.created_at > func.clock_timestamp() - PAUSE_TOLD_WITHIN,
+                pause.seq == newest,
+                Goal.state == "paused",
+                ~told,
+            )
+            .order_by(pause.seq)
+            .limit(PAUSES_TOLD_PER_TICK)
+        )
+        async with self._db.session() as s:
+            rows = (await s.execute(query)).all()
+        return [
+            (row.id, row.goal_id, row.pause_reason)
+            for row in rows
+            if row.pause_reason in PAUSE_SENTENCES and f"{STOP_REF}{row.pause_reason}" in (row.evidence or [])
+        ]
 
     # ---- the continuation runner's priority ----------------------------------------------------------------
 

@@ -36,16 +36,13 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.brain import continuation
-from nous.goals import evidence
-from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible, neutralize
+from nous.goals import evidence, owner_message
+from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible
 from nous.goals.store import (
     JOURNAL_MAX_CHARS,
     MOVED_REF,
     MOVED_TEXT,
     GoalStore,
-    clip,
-    format_short_id,
     moved_steps,
 )
 from nous.storage.database import Database
@@ -63,7 +60,7 @@ WRITABLE_STATES = ("active", "paused")  # a running session of a paused goal sti
 _STEP_ID = re.compile(r"s(\d{1,4})")
 # The owner message of a done claim: one per claim (its source id is derived from the claim's journal seq).
 DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
-MESSAGE_TITLE_CHARS = 120  # the goal's title, as the done message quotes it
+MESSAGE_TITLE_CHARS = owner_message.MESSAGE_TITLE_CHARS  # the goal's title, as the done message quotes it
 CLOSES_PER_CALL = 3  # plan steps one goal_plan call may close
 NOTES_PER_SESSION = 20  # progress notes one session may write (a done claim is not counted)
 DONE_CLAIMS_PER_SESSION = 3  # done claims one session may write
@@ -280,34 +277,21 @@ class GoalTools:
     async def _tell_owner(self, s: AsyncSession, goal: Goal, claim_seq: int) -> bool:
         """The done claim's message to the owner: one fixed sentence naming the goal by its ref and its title (the
         owner-approved charter's, on one line, quoted and bounded), and what only the owner can do. No text the chain
-        wrote and no command line (a claimed message reaches the next chat turn). It is the goal's message, not the
-        chain's: it carries no intention, so a cancel of the session's root never withdraws it. True when written."""
-        channel = continuation.owner_channel(self._settings, goal.origin_channel)
-        if channel is None:
-            logger.warning("F114: goal %s waits for the owner, who has no channel to be told on", goal.id)
-            return False
-        label = format_short_id(goal.short_id)
-        title = clip(neutralize(_one_line(goal.title)).replace('"', "'"), MESSAGE_TITLE_CHARS)
+        wrote and no command line (``owner_message``). True when written."""
+        ref = owner_message.label(goal)
         body = (
-            f'Goal {label} "{title}" says it is done; only you can finish it: on the Goals screen, confirm it done or '
-            "resume it."
+            f"Goal {ref} {owner_message.quoted_title(goal)} says it is done; only you can finish it: on the Goals "
+            "screen, confirm it done or resume it."
         )
-        source_id = uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{claim_seq}")
-        written = await continuation.insert_inbox_row(
+        return await owner_message.tell_owner(
             s,
             self._agent_id,
-            source_kind=continuation.SOURCE_INTENTION_REPORT,
-            source_id=source_id,
-            msg_type=continuation.MSG_REPORT,
-            title=f"Goal {label} may be done",
+            self._settings,
+            goal=goal,
+            source_id=uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{claim_seq}"),
+            title=f"Goal {ref} may be done",
             body=body,
-            channel=channel,
-            correlation_id=str(source_id),
-            push_after=await continuation.owner_push_after(
-                s, self._agent_id, self._settings, channel=channel, root_id=self._ref.root_id
-            ),
         )
-        return written is not None
 
     # ---- goal_plan ---------------------------------------------------------------------------------------------
 
