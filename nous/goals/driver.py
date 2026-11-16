@@ -79,6 +79,7 @@ ERRORS_BEFORE_PAUSE = 3  # sessions in a row that end in an error before the goa
 DEADLINE_SCAN_SLACK = timedelta(hours=1)
 # Evidence refs of the driver's own journal rows (``state``, actor ``harness``), read back by the driver:
 ENDING_REF = "ending:"  # + session id: the driver is ending this session's chain (a stop, a cancel, a stuck task)
+REQUEST_REF = "request:"  # + kind@time: the owner's stop or cancel an ending row was written for
 ARRIVALS_REF = "arrivals:"  # + n: a session's end row records its root's newest arrival number at the close
 RESUMED_REF = "resumed:"  # + arrival id: a closed session's chain resumed and ended again, up to that arrival
 STOP_REF = "stop:"  # + reason: a stop condition paused the goal; runs of outcomes restart after its session_n
@@ -152,6 +153,11 @@ def _budget_spent(spent: int, budget: int) -> bool:
 def _not_started(held: str) -> str:
     """The harness's row for a run-now request that a hold kept from starting."""
     return f"Run now was not started: {HELD_WORDS[held]}."
+
+
+def _request_ref(kind: str, at: datetime) -> str:
+    """The evidence ref of an ending row written for the owner's request ``kind`` made at ``at``."""
+    return f"{REQUEST_REF}{kind}@{at.isoformat()}"
 
 
 def _ending_text(why: str, n: int, *, resumed: bool = False) -> str:
@@ -913,8 +919,9 @@ class GoalDriver:
 
     async def _end_chain(self, session: GoalSession, why: str, *, request_at: datetime | None = None) -> bool:
         """End the chain of an open session (``why``: ``stop``, ``cancel`` or ``stuck``) and close the session. In
-        order: a harness ``state`` row naming the session (its evidence ``ending:<session id>``, written once,
-        committed before anything else, so the close never takes the cancel for the owner's), the root's cancel
+        order: a harness ``state`` row naming the session (its evidence ``ending:<session id>``, and for a stop or a
+        cancel the request's ``request:<kind>@<time>``; written once, committed before anything else, so the close
+        never takes the cancel for the owner's), the root's cancel
         through the continuation runner (``CancelRefused``, nothing left running, and ``RootNotFound`` are not
         errors), then the close, which finds the root marked. A session whose first task was never published is
         closed ``interrupted`` under its lock (a start still publishing it then publishes nothing). With
@@ -939,10 +946,11 @@ class GoalDriver:
         self, session_id: UUID, note: str, *, request: tuple[str, datetime] | None = None
     ) -> bool:
         """The harness's row saying it is ending this session's chain, once: under the session row's lock, skipped
-        when a row with its evidence ref exists (a retry after a crash between the row and the cancel). With
-        ``request`` (kind, time) the goal row is locked too (after the session row, the close's order) and nothing
-        is written unless that request is still the goal's: a resume or an approve clears it and a cancel replaces
-        a stop, any time after the tick read it. False when nothing may be done."""
+        when such a row still holds (``_harness_ended``: a retry after a crash between the row and the cancel). With
+        ``request`` (kind, time) the goal row is locked too (after the session row, the close's order), nothing is
+        written unless that request is still the goal's (a resume or an approve clears it and a cancel replaces a
+        stop, any time after the tick read it), and the row names the request (``request:<kind>@<time>``). False
+        when nothing may be done."""
         ref = f"{ENDING_REF}{session_id}"
         async with self._db.session() as s:
             row = (
@@ -952,37 +960,41 @@ class GoalDriver:
                     .with_for_update()
                 )
             ).scalar_one()
-            if request is not None:
-                pending = (
-                    await s.execute(
-                        select(Goal.pending_request, Goal.pending_request_at)
-                        .where(Goal.id == row.goal_id, Goal.agent_id == self._agent_id)
-                        .with_for_update()
-                    )
-                ).one()
-                if tuple(pending) != request:
-                    return False
-            if not await self._harness_ended(s, row):
-                self._journal(s, row.goal_id, "state", note, actor="harness", session_n=row.n, evidence=[ref])
+            query = select(Goal.pending_request, Goal.pending_request_at).where(
+                Goal.id == row.goal_id, Goal.agent_id == self._agent_id
+            )
+            pending = tuple((await s.execute(query.with_for_update() if request is not None else query)).one())
+            if request is not None and pending != request:
+                return False
+            if not await self._harness_ended(s, row, pending):
+                refs = [ref] if request is None else [ref, _request_ref(*request)]
+                self._journal(s, row.goal_id, "state", note, actor="harness", session_n=row.n, evidence=refs)
             await s.commit()
             return True
 
-    async def _harness_ended(self, s: AsyncSession, row: GoalSession) -> bool:
-        """Whether the driver wrote that it is ending this session's chain (``_journal_ending``)."""
+    async def _harness_ended(self, s: AsyncSession, row: GoalSession, pending: tuple[Any, ...]) -> bool:
+        """Whether a row of the driver's saying it is ending this session's chain (``_journal_ending``) still holds.
+        One written for a stuck task always does; one written for the owner's stop or cancel only while that request
+        is still the goal's (``pending``: its kind and time, as read from the goal row). So when a driver stopped
+        between such a row and its cancel and the owner then resumed the goal (the request cleared), a cancel the
+        owner makes later is not taken for the driver's: the close reads it as the owner's."""
         ref = f"{ENDING_REF}{row.id}"
-        return bool(
-            await s.scalar(
-                select(
-                    exists().where(
-                        GoalJournal.agent_id == self._agent_id,
-                        GoalJournal.goal_id == row.goal_id,
-                        GoalJournal.kind == "state",
-                        GoalJournal.actor == "harness",
-                        GoalJournal.evidence.contains([ref]),
-                    )
-                )
+        kind, at = pending
+        current = _request_ref(kind, at) if kind is not None and at is not None else None
+        rows = await s.scalars(
+            select(GoalJournal.evidence).where(
+                GoalJournal.agent_id == self._agent_id,
+                GoalJournal.goal_id == row.goal_id,
+                GoalJournal.kind == "state",
+                GoalJournal.actor == "harness",
+                GoalJournal.evidence.contains([ref]),
             )
         )
+        for evidence in rows:
+            asked = [e for e in evidence or [] if isinstance(e, str) and e.startswith(REQUEST_REF)]
+            if not asked or current in asked:
+                return True
+        return False
 
     async def _root_or_close_unpublished(self, session_id: UUID) -> UUID | None:
         """For an open session with no root id, under its lock: the root its first subtask has (attached), else
@@ -1216,8 +1228,10 @@ class GoalDriver:
                 )
             )
             # A cancel marker the driver did not announce is the owner's (the routes, the bot, the companion): the
-            # driver commits its ending row before it cancels, so its own cancels are never read as the owner's.
-            by_owner = state.cancelled and not await self._harness_ended(s, row)
+            # driver commits its ending row before it cancels, so its own cancels are never read as the owner's. A row
+            # written for a request the owner has since cleared announces nothing (``_harness_ended``).
+            pending = (goal.pending_request, goal.pending_request_at)
+            by_owner = state.cancelled and not await self._harness_ended(s, row, pending)
             await self._journal_questions_and_answers(s, goal.id, row)
             ended = await self._end(
                 s,

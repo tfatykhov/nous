@@ -138,7 +138,8 @@ async def test_stop_cancels_the_root_and_pauses_the_goal(env_factory, monkeypatc
     monkeypatch.setattr(w.runner, "cancel_root", cancel_root)
     report = await w.driver.tick()
     assert report.stopped == 1
-    assert [f"ending:{session.id}"] in seen_at_cancel
+    request = f"request:stop@{stopped.pending_request_at.isoformat()}"
+    assert [f"ending:{session.id}", request] in seen_at_cancel
     after_root = await _intention(w, root.id)
     assert after_root.root_cancelled_at is not None and after_root.state == "cancelled"
     async with w.db.session() as s:
@@ -153,7 +154,7 @@ async def test_stop_cancels_the_root_and_pauses_the_goal(env_factory, monkeypatc
         None,
     )
     harness = await _harness(w, goal)
-    ending = [r for r in harness if r.evidence == [f"ending:{session.id}"]]
+    ending = [r for r in harness if f"ending:{session.id}" in r.evidence]
     assert [r.text for r in ending] == ["Session 1 is being stopped: the owner asked to stop it."]
     assert ending[0].seq < next(r.seq for r in harness if r.text.startswith("Session 1 ended: interrupted"))
     assert not [r for r in harness if "owner cancelled session" in r.text]  # the driver's own cancel
@@ -203,9 +204,59 @@ async def test_a_crash_between_the_ending_row_and_the_cancel_writes_the_row_once
     assert (await _session(w, session.id)).ended_at is None
     monkeypatch.setattr(w.runner, "cancel_root", real_cancel)
     assert (await w.driver.tick()).stopped == 1
-    ending = [r for r in await _harness(w, goal) if r.evidence == [f"ending:{session.id}"]]
+    ending = [r for r in await _harness(w, goal) if f"ending:{session.id}" in r.evidence]
     assert len(ending) == 1
     assert (await _goal(w, goal)).pause_reason == "owner"
+    assert not [r for r in await _harness(w, goal) if "owner cancelled session" in r.text]
+
+
+async def _stop_cut_short_then_resumed(w: SimpleNamespace, goal: Goal, monkeypatch) -> GoalSession:
+    """A stop acted on up to its ending row, the process stopping before the cancel, then the owner's resume (which
+    clears the request). Returns the session, still open with its chain running."""
+    _root, session = await _started(w, goal)
+    await w.store.stop(goal.id, actor="host")
+    real_cancel = w.runner.cancel_root
+
+    async def crash(*args, **kwargs):
+        raise RuntimeError("the process stopped")
+
+    monkeypatch.setattr(w.runner, "cancel_root", crash)
+    assert (await w.driver.tick()).stopped == 0
+    assert [r for r in await _harness(w, goal) if f"ending:{session.id}" in r.evidence]
+    monkeypatch.setattr(w.runner, "cancel_root", real_cancel)
+    resumed = await w.store.resume(goal.id, actor="host")
+    assert (resumed.state, resumed.pending_request) == ("active", None)
+    return session
+
+
+async def test_an_ending_row_of_a_stop_the_owner_resumed_does_not_hide_a_later_owner_cancel(env_factory, monkeypatch):  # noqa: F811
+    """The ending row was written for the stop, which the resume cleared: the owner's later cancel of the chain's
+    root (the continuation's own cancel, as the routes call it) is read as the owner's, and pauses the goal."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    session = await _stop_cut_short_then_resumed(w, goal, monkeypatch)
+    await w.runner.cancel_root(session.root_id, reason="cancelled by the owner", actor="owner")
+    assert (await w.driver.tick()).closed == 1
+    closed = await _session(w, session.id)
+    assert (closed.ended_at is not None, closed.outcome) == (True, "interrupted")
+    after = await _goal(w, goal)
+    assert (after.state, after.pause_reason, after.next_wake_at) == ("paused", "owner", None)
+    assert (await _harness(w, goal))[-1].text == "Paused: the owner cancelled session 1's chain."
+
+
+async def test_a_new_stop_after_a_resume_writes_its_own_ending_row(env_factory, monkeypatch):  # noqa: F811
+    """The old row speaks for the cleared stop only, so the new stop writes a row of its own before its cancel, and
+    the close takes that cancel for the driver's."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    session = await _stop_cut_short_then_resumed(w, goal, monkeypatch)
+    stopped = await w.store.stop(goal.id, actor="host")
+    assert (await w.driver.tick()).stopped == 1
+    ending = [r for r in await _harness(w, goal) if f"ending:{session.id}" in r.evidence]
+    assert len(ending) == 2
+    assert ending[-1].evidence == [f"ending:{session.id}", f"request:stop@{stopped.pending_request_at.isoformat()}"]
+    assert not [r for r in await _harness(w, goal) if "owner cancelled session" in r.text]
+    assert (await _goal(w, goal)).pending_request is None
 
 
 async def test_a_stop_the_owner_takes_back_after_the_tick_read_it_ends_nothing(env_factory, monkeypatch):  # noqa: F811
@@ -225,7 +276,7 @@ async def test_a_stop_the_owner_takes_back_after_the_tick_read_it_ends_nothing(e
     assert (await w.driver.tick()).stopped == 0
     assert (await _intention(w, root.id)).root_cancelled_at is None
     assert (await _session(w, session.id)).ended_at is None
-    assert not [r for r in await _harness(w, goal) if r.evidence == [f"ending:{session.id}"]]
+    assert not [r for r in await _harness(w, goal) if f"ending:{session.id}" in r.evidence]
     assert (await _goal(w, goal)).state == "active"
 
 
@@ -246,7 +297,7 @@ async def test_a_cancel_that_replaces_a_stop_after_the_read_is_acted_on_as_a_can
     assert (await w.driver.tick()).stopped == 0  # the stop it read is gone
     assert (await _goal(w, goal)).pending_request == "cancel"
     assert (await w.driver.tick()).stopped == 1
-    ending = [r for r in await _harness(w, goal) if r.evidence == [f"ending:{session.id}"]]
+    ending = [r for r in await _harness(w, goal) if f"ending:{session.id}" in r.evidence]
     assert [r.text for r in ending] == ["Session 1 is being stopped: the owner cancelled the goal."]
     after = await _goal(w, goal)
     assert (after.state, after.pending_request) == ("cancelled", None)
