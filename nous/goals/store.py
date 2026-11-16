@@ -36,8 +36,9 @@ TAIL_ENTRY_CHARS = 1500
 CLIP_MARKER = " [clipped]"
 # Marks the chain's own words inside the harness's session-close journal row (written by the goal driver).
 SESSION_NOTE_LABEL = "Note written by the session:"
-# The evidence ref (+ the pause reason) of the harness row the goal driver writes with each pause it makes: the goal
-# routes select a paused goal's row by it, and the driver restarts runs of outcomes after its session.
+# The evidence ref (+ the pause reason) of the harness row the goal driver writes with each pause it makes for a
+# reason other than the owner's: the goal routes select a paused goal's row by it, and the driver restarts runs of
+# outcomes after its session.
 STOP_REF = "stop:"
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})

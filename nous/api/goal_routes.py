@@ -230,9 +230,9 @@ def resume_blocked(goal: Goal, *, spent: int, now: datetime) -> str | None:
 
 def pause_sentence_query(agent_id: str, goal_id: UUID, reason: str) -> Any:
     """The newest ``state`` row the harness wrote for ``goal_id`` with the evidence ref of a pause for ``reason``
-    (``stop:<reason>``): the goal driver writes one with each pause it makes (a stop condition, or failed starts), in
-    the transaction that pauses the goal. Every other harness row (a session's close, a chain being stopped) has no
-    such ref, so none written after the pause takes its place."""
+    (``stop:<reason>``): the goal driver writes one with each pause it makes for a reason other than the owner's (a
+    stop condition, or failed starts), in the transaction that pauses the goal. Every other harness row (a session's
+    close, a chain being stopped) has no such ref, so none written after the pause takes its place."""
     return (
         select(GoalJournal.text)
         .where(
