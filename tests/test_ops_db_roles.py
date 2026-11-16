@@ -493,6 +493,24 @@ def test_verify_check_count_matches_the_docs():
     assert f"{count} at present" in docs, count
 
 
+def test_a_check_waits_only_for_a_migration_after_106_that_exists():
+    """A check skipped until its migration is recorded must name a check of the script and a migration file after
+    106 (the first run in the DB roles job applies only up to 106): any other wait would skip a check for good."""
+    import json
+
+    waits = json.loads(re.search(r"waits jsonb := '(\{.*\})';", VERIFY).group(1))
+    assert waits == {"reader cannot read a device digest": "115"}
+    body = VERIFY.split("FOR c IN", 1)[1].split("AS t(label, run_as", 1)[0]
+    migrations = {path.name.split("_", 1)[0] for path in (OPS.parents[1] / "sql" / "migrations").glob("*.sql")}
+    for label, version in waits.items():
+        assert "('" + label.replace("'", "''") + "', " in body, label
+        assert version in migrations and int(version) > 106, version
+    # the wait comes before the role switch and the statement, and the notice reports how many wait
+    loop = VERIFY.split("LOOP", 1)[1]
+    assert loop.index("waiting := waiting + 1") < loop.index("SET LOCAL ROLE")
+    assert "checks wait for a migration that is not applied yet" in VERIFY
+
+
 def test_verify_checks_turn_numbers_and_text_denial():
     for row in (
         "('reader reads the turn numbers', 'nous_reader', 'SELECT count(*) FROM nous_system.agent_turn_log', 'ok', "
