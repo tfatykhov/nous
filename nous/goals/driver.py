@@ -17,7 +17,7 @@ on the limits of the goal (day budget, sessions of the day, quiet hours, job lau
 chain never takes the slots kept for the owner's own chains, and ``cancel_record_for`` tells its sweep who cancelled
 a stray DAG of a chain the driver ended.
 
-Nothing builds the driver yet: it is constructed by tests only.
+With ``NOUS_GOALS_ENABLED`` on, ``main.py`` builds one driver and runs its loop (``start``, ``stop``, ``running``).
 """
 
 from __future__ import annotations
@@ -2165,3 +2165,8 @@ class GoalDriver:
     ) -> GoalJournal:
         """A journal row in the caller's transaction (``GoalStore.add_journal_row``, with the journal's bounds)."""
         return self._store.add_journal_row(s, goal_id, kind, text, actor=actor, session_n=session_n, evidence=evidence)
+
+    @property
+    def running(self) -> bool:
+        """Whether the loop runs: ``start`` made its task and it has not ended (``GET /goals/options``)."""
+        return self._task is not None and not self._task.done()

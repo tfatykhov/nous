@@ -609,6 +609,25 @@ async def _build_continuation_runner(
     return continuation_runner
 
 
+def _build_goals(
+    settings: Settings, *, database: Database, heart: Heart, continuation_runner: Any | None
+) -> Any | None:
+    """F114: with ``NOUS_GOALS_ENABLED`` on (its validator turns it off unless continuation, intentions, the result
+    inbox and subtasks are on) and a continuation runner, bind the chain's two hooks (a goal session's REPORT goes to
+    the goal's journal; its decision turn sees its goal and gets the goal tools) and build the one goal driver. Its
+    loop is started by the caller, after the runner's. None otherwise: nothing of the chain is imported or bound."""
+    if not settings.goals_enabled or continuation_runner is None:
+        return None
+    from nous.goals.chain import GoalChain, report_channel
+    from nous.goals.driver import GoalDriver
+    from nous.goals.store import GoalStore
+
+    store = GoalStore(database, settings.agent_id, settings)
+    continuation.set_goal_report_channel(report_channel)
+    continuation_runner.set_goal_turns(GoalChain(database, settings, store).turn_context)
+    return GoalDriver(database, settings, heart, store, continuation_runner)
+
+
 async def create_components(settings: Settings) -> dict:
     """Initialize all components in dependency order.
 
@@ -1532,6 +1551,8 @@ async def create_components(settings: Settings) -> dict:
     continuation_runner = await _build_continuation_runner(
         settings, database=database, runner=runner, heart=heart, brain=brain, bus=bus, dispatcher=dispatcher
     )
+    # F114: the goal hooks are bound here, before anything below can write a goal chain's report or run its turn.
+    goal_driver = _build_goals(settings, database=database, heart=heart, continuation_runner=continuation_runner)
 
     # F098: repair inbox writes the subtask worker lost (codex P1 on #694),
     # and (Phase C) write results to memory that no hook wrote.
@@ -2070,6 +2091,9 @@ async def create_components(settings: Settings) -> dict:
     # F099 Phase 2c: started last, once every tool and component a continuation turn may use exists.
     if continuation_runner is not None:
         await continuation_runner.start()
+    # F114: the goal driver's loop, once the runner that works its sessions runs.
+    if goal_driver is not None:
+        await goal_driver.start()
 
     return {
         "database": database,
@@ -2095,6 +2119,7 @@ async def create_components(settings: Settings) -> dict:
         "heartbeat_runner": heartbeat_runner,
         "dag_orchestrator": dag_orchestrator,
         "continuation_runner": continuation_runner,
+        "goal_driver": goal_driver,
         "context_logger": context_logger,
         "context_view": context_view,
         "context_log_retention_task": context_log_retention_task,
@@ -2121,6 +2146,11 @@ async def create_components(settings: Settings) -> dict:
 async def shutdown_components(components: dict) -> None:
     """Graceful shutdown in reverse order."""
     logger.info("Shutting down Nous...")
+
+    # F114: no goal session may start while the continuation runner winds down.
+    goal_driver = components.get("goal_driver")
+    if goal_driver is not None:
+        await goal_driver.stop()
 
     # F099: stop the continuation runner first: its turns spawn work and write rows. Each running arrival
     # releases its claim without an attempt.
@@ -2317,6 +2347,9 @@ async def shutdown_components(components: dict) -> None:
     if work_view_writer is not None:
         await work_view_writer.drain(_WORK_VIEW_DRAIN_SECONDS)
 
+    # F114: the goals' report hook is module-level (per process): no writer of a report runs any more.
+    continuation.set_goal_report_channel(None)
+
     database = components.get("database")
     if database:
         await database.disconnect()  # F1: disconnect() not close()
@@ -2394,6 +2427,7 @@ def build_app(settings: Settings) -> Starlette:
         action_router=_lazy_component(components, "action_router"),
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
         continuation_runner=_lazy_component(components, "continuation_runner"),
+        goal_driver=_lazy_component(components, "goal_driver"),
         tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
         model_call_recorder=_lazy_component(components, "model_call_recorder"),
         model_call_text_store=_lazy_component(components, "model_call_text_store"),

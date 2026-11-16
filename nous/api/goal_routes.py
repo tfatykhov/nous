@@ -435,9 +435,12 @@ def _no_goal(ref: str) -> JSONResponse:
 # ---- the routes --------------------------------------------------------------------------------------------------
 
 
-def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, guard: OwnerGuard) -> list[Route]:
-    """The goal routes, every one behind ``guard``. ``goals`` is None with the flag off. Literal paths come before
-    ``/goals/{ref}``."""
+def build_goal_routes(
+    *, database: Any, settings: Any, goals: GoalStore | None, guard: OwnerGuard, driver: Any = None
+) -> list[Route]:
+    """The goal routes, every one behind ``guard``. ``goals`` is None with the flag off. ``driver`` is the app's
+    goal driver component (main.py passes its lazy proxy, falsy until the lifespan built one), read at each request.
+    Literal paths come before ``/goals/{ref}``."""
     agent_id = settings.agent_id
 
     async def tallies(goal_ids: list[UUID]) -> tuple[datetime, dict[UUID, Tally]]:
@@ -559,8 +562,8 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                     "deadline_days": MAX_DEADLINE_DAYS,
                     "journal": JOURNAL_MAX,
                 },
-                # No driver is started by the app yet: rows change, and no session follows.
-                "driver_running": False,
+                # Whether the app's goal driver runs its loop now: without it, rows change and no session follows.
+                "driver_running": bool(driver) and driver.running is True,
                 "spend_note": SPEND_NOTE,
             }
         )
