@@ -3952,7 +3952,7 @@ def create_app(
         # F097 push. Detail before collection, same rule as the surfaces pair
         # above: Starlette matches top-down.
         Route("/a2ui/push/config", a2ui_push_config),
-        Route("/a2ui/push/installations", a2ui_push_installations),
+        owner_guard.route("/a2ui/push/installations", a2ui_push_installations, methods=["GET"]),
         Route("/a2ui/push/test", a2ui_push_test, methods=["POST"]),
         Route(
             "/a2ui/push/tokens/{installation_id}",

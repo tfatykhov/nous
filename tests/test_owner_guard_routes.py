@@ -269,6 +269,7 @@ REST_ROUTE_SET = {
     ("POST", "/rubric/rollback"),
     ("POST", "/rubric/evolve"),
     ("POST", "/dashboard/memory-write-health/acknowledge"),
+    ("GET", "/a2ui/push/installations"),
 }
 
 
@@ -375,6 +376,47 @@ async def test_a_proxy_call_with_no_body_still_needs_the_json_media_type(tmp_pat
     typed_delete = await _send(rest, "DELETE", "/facts/abc", headers={**PROXY, "content-type": "application/json"})
     assert (bare_delete.status_code, bare_delete.json()) == (415, NOT_JSON)
     assert (typed_delete.status_code, typed_delete.json()) == (400, {"error": "invalid fact id"})
+
+
+# Each guarded read, and what its handler answers with the stand-ins (proof it ran). A GET with only the proxy's
+# secret needs no media type.
+GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
+    "/a2ui/push/installations": (503, {"error": "A2UI not available"}),
+}
+
+
+@pytest.mark.parametrize("path", list(GUARDED_READS))
+@pytest.mark.parametrize(
+    ("headers", "allowed"),
+    [
+        ({}, False),
+        (OWNER, True),
+        (PROXY, True),
+        ({**PROXY, "content-type": "text/plain"}, True),
+        ({"X-Nous-Owner-Secret": "a-wrong-value"}, False),
+    ],
+    ids=["none", "owner", "proxy-no-type", "proxy-text", "wrong"],
+)
+async def test_each_guarded_read_against_each_proof(
+    tmp_path, path: str, headers: dict[str, str], allowed: bool
+) -> None:
+    response = await _send(_rest_app(tmp_path), "GET", path, headers=headers)
+    if allowed:
+        status, body = GUARDED_READS[path]
+        assert response.status_code == status, response.text
+        if body is not None:
+            assert response.json() == body
+    else:
+        assert (response.status_code, response.json()) == (403, FORBIDDEN)
+
+
+@pytest.mark.parametrize("path", list(GUARDED_READS))
+@pytest.mark.parametrize("headers", [OWNER, PROXY], ids=["owner", "proxy"])
+async def test_with_no_digest_each_guarded_read_is_403_even_with_a_header(
+    tmp_path, path: str, headers: dict[str, str]
+) -> None:
+    response = await _send(_rest_app(tmp_path, owner=False, proxy=False), "GET", path, headers=headers)
+    assert (response.status_code, response.json()) == (403, FORBIDDEN)
 
 
 async def test_the_reads_beside_them_need_no_secret(tmp_path) -> None:
