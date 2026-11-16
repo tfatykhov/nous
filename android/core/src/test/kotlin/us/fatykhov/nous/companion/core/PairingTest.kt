@@ -29,7 +29,7 @@ private fun res(status: Int, body: String, vararg headers: Pair<String, String>)
 const val SAMPLE_TOKEN = "nd1_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE"
 
 class PairingTest {
-    private val base = "https://nous.example"
+    private val base = Endpoint("https", "nous.example", 443)
 
     @Test fun a_code_is_normalised() {
         assertEquals("K7QM2XRD", PairingCode.normalise("K7QM-2XRD"))
@@ -103,16 +103,24 @@ class PairingTest {
     }
 
     @Test fun redeem_refuses_a_non_https_address_before_sending() = runTest {
-        for (address in listOf("http://nous.example", "http://nous.example:8000", "http://192.0.2.10:8000")) {
+        for (address in listOf(Endpoint("http", "nous.example", 80), Endpoint("http", "nous.example", 8000), Endpoint("http", "192.0.2.10", 8000))) {
             val http = ScriptedHttp { _, _ -> error("nothing may be sent") }
-            assertEquals(PairingError.NoHttps, assertIs<RedeemOutcome.Refused>(Pairing.redeem(http, address, "K7QM2XRD", "i", "n", debuggable = true)).error, address)
+            assertEquals(PairingError.NoHttps, assertIs<RedeemOutcome.Refused>(Pairing.redeem(http, address, "K7QM2XRD", "i", "n", debuggable = true)).error, address.toString())
             assertTrue(http.log.isEmpty())
         }
+        val emulatorHost = Endpoint("http", "10.0.2.2", 8000)
         val release = ScriptedHttp { _, _ -> error("nothing may be sent") }
-        assertEquals(PairingError.NoHttps, assertIs<RedeemOutcome.Refused>(Pairing.redeem(release, "http://10.0.2.2:8000", "K7QM2XRD", "i", "n", debuggable = false)).error)
+        assertEquals(PairingError.NoHttps, assertIs<RedeemOutcome.Refused>(Pairing.redeem(release, emulatorHost, "K7QM2XRD", "i", "n", debuggable = false)).error)
         val emulator = ScriptedHttp { _, _ -> res(404, """{"error":"that code is not valid"}""") }
-        Pairing.redeem(emulator, "http://10.0.2.2:8000", "K7QM2XRD", "i", "n", debuggable = true)
+        Pairing.redeem(emulator, emulatorHost, "K7QM2XRD", "i", "n", debuggable = true)
         assertEquals(listOf("POST /a2ui/devices/redeem"), emulator.log)
+    }
+
+    @Test fun redeem_refuses_an_address_the_client_cannot_parse_before_sending() = runTest {
+        val http = ScriptedHttp { _, _ -> error("nothing may be sent") }
+        assertEquals(PairingError.BadAddress, assertIs<RedeemOutcome.Refused>(Pairing.redeem(http, null, "K7QM2XRD", "i", "n", true)).error)
+        assertTrue(http.log.isEmpty())
+        assertTrue(PairingWords.of(PairingError.BadAddress).contains("https address"))
     }
 
     @Test fun a_malformed_code_is_refused_before_sending() = runTest {
@@ -124,7 +132,7 @@ class PairingTest {
     @Test fun no_sentence_or_error_string_contains_the_token_or_the_code() = runTest {
         val code = "B4XW9PQT"
         val errors = listOf(PairingError.Malformed, PairingError.NotValid, PairingError.TooManyTries(5), PairingError.TooManyTries(null),
-            PairingError.Unsupported, PairingError.NoHttps, PairingError.Unreachable, PairingError.Failed(500))
+            PairingError.Unsupported, PairingError.NoHttps, PairingError.BadAddress, PairingError.Unreachable, PairingError.Failed(500))
         val sentences = errors.map { PairingWords.of(it) } + errors.map { it.toString() } + listOf(
             PairingWords.TAP_NOT_PAIRED, PairingWords.TOKEN_REJECTED, PairingWords.NOT_CHECKED, PairingWords.INBOX_NOT_PAIRED,
             PairingWords.UNPAIRED, PairingWords.UNPAIRED_UNCONFIRMED, PairingWords.NOT_STORED, PairingWords.paired("Pixel"),
@@ -205,51 +213,40 @@ class RefusalTest {
 
 class TokenPolicyTest {
     @Test fun https_may_carry_the_token_anywhere() {
-        assertTrue(TokenPolicy.mayCarry("https://nous.example", debuggable = false))
-        assertTrue(TokenPolicy.mayCarry("https://nous.example:8443/x", debuggable = false))
-        assertTrue(TokenPolicy.mayCarry("HTTPS://NOUS.EXAMPLE", debuggable = true))
+        assertTrue(TokenPolicy.mayCarry("https", "nous.example", debuggable = false))
+        assertTrue(TokenPolicy.mayCarry("HTTPS", "203.0.113.5", debuggable = true))
     }
 
     @Test fun plain_http_only_to_the_emulator_hosts_on_a_debuggable_build() {
-        assertTrue(TokenPolicy.mayCarry("http://10.0.2.2:8000", debuggable = true))
-        assertTrue(TokenPolicy.mayCarry("http://localhost:8000", debuggable = true))
-        assertFalse(TokenPolicy.mayCarry("http://10.0.2.2:8000", debuggable = false))
-        assertFalse(TokenPolicy.mayCarry("http://localhost:8000", debuggable = false))
-        for (url in listOf("http://nous.example", "http://127.0.0.1:8000", "http://192.0.2.10:8000", "http://10.0.2.3"))
-            assertFalse(TokenPolicy.mayCarry(url, debuggable = true), url)
+        assertTrue(TokenPolicy.mayCarry("http", "10.0.2.2", debuggable = true))
+        assertTrue(TokenPolicy.mayCarry("http", "localhost", debuggable = true))
+        assertFalse(TokenPolicy.mayCarry("http", "10.0.2.2", debuggable = false))
+        assertFalse(TokenPolicy.mayCarry("http", "localhost", debuggable = false))
+        for (host in listOf("nous.example", "127.0.0.1", "192.0.2.10", "10.0.2.3"))
+            assertFalse(TokenPolicy.mayCarry("http", host, debuggable = true), host)
     }
 
     @Test fun nothing_else() {
-        for (url in listOf("ftp://nous.example", "nous.example", "", "https://", "ws://nous.example"))
-            assertFalse(TokenPolicy.mayCarry(url, debuggable = true), url)
+        for (scheme in listOf("ftp", "ws", ""))
+            assertFalse(TokenPolicy.mayCarry(scheme, "nous.example", debuggable = true), scheme)
     }
 }
 
+/** The origin from parts; the address itself is parsed by the app's HTTP client (see the app's `EndpointsTest`). */
 class OriginTest {
-    @Test fun the_default_port_is_filled_in() {
-        assertEquals("https://nous.example:443", Origin.of("https://nous.example"))
-        assertEquals(Origin.of("https://nous.example:443/companion"), Origin.of("https://nous.example"))
-        assertEquals(Origin.of("http://nous.example:80"), Origin.of("http://nous.example"))
+    @Test fun scheme_and_host_are_lower_case() {
+        assertEquals("https://nous.example:443", Origin.of("HTTPS", "Nous.Example", 443))
+        assertEquals(Endpoint("https", "nous.example", 443).origin, Origin.of("https", "NOUS.example", 443))
     }
 
-    @Test fun case_userinfo_path_query_and_fragment_do_not_matter() {
-        assertEquals(Origin.of("https://nous.example"), Origin.of("HTTPS://Nous.Example/a2ui?x=1#y"))
-        assertEquals(Origin.of("https://nous.example"), Origin.of("https://user:pw@nous.example"))
+    @Test fun an_ipv6_host_is_written_without_brackets() {
+        assertEquals("http://fd00::1:8000", Origin.of("http", "[fd00::1]", 8000))
+        assertEquals(Origin.of("http", "fd00::1", 8000), Origin.of("http", "[fd00::1]", 8000))
     }
 
     @Test fun scheme_host_and_port_each_make_another_origin() {
-        val paired = Origin.of("https://nous.example")
-        for (other in listOf("http://nous.example", "https://nous.example:8443", "https://other.example", "https://nous.example.other.example"))
-            assertFalse(paired == Origin.of(other), other)
-    }
-
-    @Test fun the_parts_form_matches_the_url_form() {
-        assertEquals(Origin.of("https://nous.example"), Origin.of("https", "NOUS.example", 443))
-        assertEquals(Origin.of("http://[fd00::1]:8000"), Origin.of("http", "fd00::1", 8000))
-    }
-
-    @Test fun an_address_that_is_not_an_http_url_has_no_origin() {
-        for (bad in listOf("", "nous.example", "ftp://nous.example", "https://", "http://bad host"))
-            assertNull(Origin.of(bad), bad)
+        val paired = Origin.of("https", "nous.example", 443)
+        for ((s, h, p) in listOf(Triple("http", "nous.example", 443), Triple("https", "nous.example", 8443), Triple("https", "other.example", 443)))
+            assertFalse(paired == Origin.of(s, h, p), "$s $h $p")
     }
 }

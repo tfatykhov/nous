@@ -17,9 +17,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  * every change. The token is never written in plain text; it is held in
  * memory after the first read, because every request asks for it.
  *
- * The token belongs to one origin (scheme, host, port): [tokenFor] and
- * [pairedFor] answer only for that origin, so a changed server address is
- * not paired until it is paired itself.
+ * The token belongs to one origin (scheme, host, port, as OkHttp parses the
+ * address: [Endpoints]): [tokenFor] and [pairedFor] answer only for that
+ * origin, so a changed server address is not paired until it is paired itself.
  *
  * Anything that cannot be read or opened (no file, a damaged file, a
  * Keystore failure) reads as not paired.
@@ -47,7 +47,7 @@ class DeviceCredential(private val file: File, private val box: SecretBox) {
 
     /** The pairing for [baseUrl]'s origin, or null when this phone is not paired there. */
     fun pairedFor(baseUrl: String): PairedDevice? {
-        val origin = Origin.of(baseUrl) ?: return null
+        val origin = Endpoints.of(baseUrl)?.origin ?: return null
         val h = current() ?: return null
         return if (h.origin == origin) PairedDevice(h.name, h.publicBaseUrl) else null
     }
@@ -60,7 +60,7 @@ class DeviceCredential(private val file: File, private val box: SecretBox) {
 
     /** Seal and store [paired] for [baseUrl]'s origin. False, and nothing stored, when it cannot be sealed or written. */
     fun save(paired: Paired, baseUrl: String): Boolean {
-        val origin = Origin.of(baseUrl) ?: return false
+        val origin = Endpoints.of(baseUrl)?.origin ?: return false
         val sealed = box.seal(paired.token.toByteArray(Charsets.UTF_8)) ?: return false
         val p = Properties()
         p.setProperty(ORIGIN, origin)

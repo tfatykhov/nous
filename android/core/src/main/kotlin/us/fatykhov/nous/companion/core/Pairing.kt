@@ -38,23 +38,23 @@ object PairingCode {
 }
 
 /**
- * An origin as `scheme://host:port`: scheme and host in lower case, the
- * default port filled in, userinfo, path, query and fragment ignored. Two
+ * An origin as `scheme://host:port`, scheme and host in lower case. Two
  * addresses are the same server for the device token only when their
  * origins are equal.
  */
 object Origin {
     fun of(scheme: String, host: String, port: Int): String =
         scheme.lowercase() + "://" + host.lowercase().removePrefix("[").removeSuffix("]") + ":" + port
+}
 
-    /** Null when the address is not an absolute http or https URL with a host. */
-    fun of(url: String): String? = try {
-        val u = java.net.URI(url.trim())
-        val scheme = u.scheme?.lowercase()
-        val host = u.host
-        if ((scheme != "http" && scheme != "https") || host.isNullOrEmpty()) null
-        else of(scheme, host, if (u.port == -1) (if (scheme == "https") 443 else 80) else u.port)
-    } catch (_: Exception) { null }
+/**
+ * An address as the app's HTTP client parses it: scheme, canonical host and
+ * port (the default filled in). `:core` parses no address itself, so the
+ * origin stored at pairing and the one each request is checked against come
+ * from the same parser.
+ */
+data class Endpoint(val scheme: String, val host: String, val port: Int) {
+    val origin: String get() = Origin.of(scheme, host, port)
 }
 
 /**
@@ -69,13 +69,6 @@ object TokenPolicy {
         "https" -> true
         "http" -> debuggable && host.lowercase() in EMULATOR_HOSTS
         else -> false
-    }
-
-    fun mayCarry(url: String, debuggable: Boolean): Boolean {
-        val u = try { java.net.URI(url.trim()) } catch (_: Exception) { return false }
-        val scheme = u.scheme ?: return false
-        val host = u.host ?: return false
-        return mayCarry(scheme, host, debuggable)
     }
 }
 
@@ -123,6 +116,8 @@ sealed interface PairingError {
     data class TooManyTries(val retryAfterSeconds: Int?) : PairingError
     /** The server does not know the route: a Nous older than pairing. */
     data object Unsupported : PairingError
+    /** The HTTP client cannot parse the configured address; nothing was sent. */
+    data object BadAddress : PairingError
     /** The configured address is not one the token may be sent to; nothing was sent. */
     data object NoHttps : PairingError
     /** No answer at all. */
@@ -164,6 +159,7 @@ object PairingWords {
         is PairingError.TooManyTries -> "Too many tries. " + (error.retryAfterSeconds?.let { "Wait $it seconds, then try again." } ?: "Wait a minute, then try again.")
         PairingError.Unsupported -> "This server does not support pairing yet."
         PairingError.NoHttps -> "Pairing needs the https address of Nous. Disconnect, then connect again with the https address."
+        PairingError.BadAddress -> "This address cannot be used for pairing. Disconnect, then connect again with the https address of Nous."
         PairingError.Unreachable -> "Couldn't reach Nous. Check Tailscale and try again."
         is PairingError.Failed -> "Pairing did not work (HTTP ${error.status}). Try again."
     }
@@ -173,11 +169,14 @@ object Pairing {
     const val BOUND_MS = 5_000L
 
     /**
-     * Redeem [code] at [baseUrl]. Refuses before sending anything when the
-     * address may not carry a token or the code is not 8 letters and digits.
+     * Redeem [code] at the configured address, [endpoint] as the HTTP client
+     * parsed it (null when it could not). Refuses before sending anything when
+     * the address cannot be parsed or may not carry a token, or the code is not
+     * 8 letters and digits.
      */
-    suspend fun redeem(http: Http, baseUrl: String, code: String, installationId: String, name: String, debuggable: Boolean): RedeemOutcome {
-        if (!TokenPolicy.mayCarry(baseUrl, debuggable)) return RedeemOutcome.Refused(PairingError.NoHttps)
+    suspend fun redeem(http: Http, endpoint: Endpoint?, code: String, installationId: String, name: String, debuggable: Boolean): RedeemOutcome {
+        if (endpoint == null) return RedeemOutcome.Refused(PairingError.BadAddress)
+        if (!TokenPolicy.mayCarry(endpoint.scheme, endpoint.host, debuggable)) return RedeemOutcome.Refused(PairingError.NoHttps)
         val normal = PairingCode.normalise(code) ?: return RedeemOutcome.Refused(PairingError.Malformed)
         val body = buildJsonObject { put("code", normal); put("installation_id", installationId); put("name", name) }
         val res = try { http.postJson(DeviceToken.REDEEM_PATH, body.toString()) }

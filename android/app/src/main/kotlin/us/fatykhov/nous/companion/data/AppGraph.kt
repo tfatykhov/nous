@@ -26,8 +26,10 @@ class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
     val engine = SyncEngine(store, http, mainScope, tokenSent = ::tokenSent)
 
     /** Whether calls to the configured address carry the device token (paired there, and the policy allows it). */
-    fun tokenSent(): Boolean =
-        credential.pairedFor(settings.baseUrl) != null && TokenPolicy.mayCarry(settings.baseUrl, debuggable)
+    fun tokenSent(): Boolean {
+        val e = Endpoints.of(settings.baseUrl) ?: return false
+        return credential.pairedFor(settings.baseUrl) != null && TokenPolicy.mayCarry(e.scheme, e.host, debuggable)
+    }
 
     /**
      * Where the web links open: the public base URL the pairing returned, when this

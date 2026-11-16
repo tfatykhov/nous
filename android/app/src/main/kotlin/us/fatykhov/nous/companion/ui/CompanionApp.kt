@@ -431,7 +431,7 @@ private fun PairingSection(graph: AppGraph) {
                 busy = true; note = ""
                 scope.launch {
                     val base = graph.settings.baseUrl
-                    when (val out = Pairing.redeem(graph.http, base, code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
+                    when (val out = Pairing.redeem(graph.http, us.fatykhov.nous.companion.data.Endpoints.of(base), code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
                         is RedeemOutcome.Done -> if (graph.credential.save(out.paired, base)) {
                             code = ""; note = PairingWords.paired(out.paired.name); noteIsError = false
                             graph.engine.connect()
