@@ -62,6 +62,7 @@ from nous.autonomy import tool_guard
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.goals.charter import ToolLine
 from nous.goals.commands import MODE_COMMANDS, CommandsEntry, decide_commands
+from nous.goals.commands import enabled as commands_enabled
 from nous.goals.store import grant_identity
 from nous.storage.models import Goal, GoalSession, GoalToolGrant
 
@@ -94,6 +95,26 @@ NEVER_NAMED: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "changing settings": ("create_censor", "store_identity", "learn_skill", "heartbeat_check_manage"),
     }
 )
+# With NOUS_GOAL_COMMANDS_ENABLED on: the shell is not a tool a goal is given, it is a goal's mode, chosen when the goal
+# is created (nous/goals/commands.py).
+NEVER_SENTENCE_WITH_COMMANDS = (
+    "Python cannot be allowed here. Neither can scheduling, starting other work, or changing settings. Running "
+    "commands is set when the goal is created, not as a tool."
+)
+NEVER_NAMED_WITH_COMMANDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {words: tools for words, tools in NEVER_NAMED.items() if words != "The shell"}
+)
+
+
+def never_sentence(settings: Any) -> str:
+    """What the tools form says can never be allowed: ``NEVER_SENTENCE``, or with goals that may run any command
+    ``NEVER_SENTENCE_WITH_COMMANDS``."""
+    return NEVER_SENTENCE_WITH_COMMANDS if commands_enabled(settings) else NEVER_SENTENCE
+
+
+def never_named(settings: Any) -> Mapping[str, tuple[str, ...]]:
+    """The tools each phrase of ``never_sentence(settings)`` stands for."""
+    return NEVER_NAMED_WITH_COMMANDS if commands_enabled(settings) else NEVER_NAMED
 
 
 @dataclass(frozen=True)

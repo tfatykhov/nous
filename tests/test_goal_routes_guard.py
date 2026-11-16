@@ -23,17 +23,20 @@ POSTS = [
     "/goals/G-0001/budget",
     "/goals/G-0001/deadline",
     "/goals/G-0001/note",
+    "/goals/G-0001/contained",
 ]
 READS = {
     "/goals": {"enabled": False, "goals": []},
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
     "/goals/G-0001/tools": {"enabled": False},
+    "/goals/commands": {"enabled": False, "allowed": False, "active": []},
 }
 GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("POST", "/goals"),
     ("GET", "/goals/options"),
+    ("GET", "/goals/commands"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
     ("PUT", "/goals/{ref}/tools/{tool}"),
@@ -51,6 +54,7 @@ GOAL_ROUTE_SET = {
             "budget",
             "deadline",
             "note",
+            "contained",
         )
     },
 }

@@ -31,9 +31,9 @@ ROW_KEYS = {
 }
 DETAIL_KEYS = ROW_KEYS | {
     "enabled", "objective", "done_when", "origin_channel", "deadline_days", "sessions_per_day",
-    "min_interval_seconds", "jobs_per_day", "quiet_hours_ok", "stall_limit", "mode_until", "approved_at",
-    "finished_at", "created_at", "plan", "sessions", "sessions_total", "journal", "pause_sentence", "actions",
-    "resume_blocked", "spend_note",
+    "min_interval_seconds", "jobs_per_day", "quiet_hours_ok", "stall_limit", "mode_until", "mode_hours", "commands",
+    "approved_at", "finished_at", "created_at", "plan", "sessions", "sessions_total", "journal", "pause_sentence",
+    "actions", "resume_blocked", "spend_note",
 }
 
 

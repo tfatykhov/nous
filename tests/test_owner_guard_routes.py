@@ -173,7 +173,7 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
                 f"/goals/G-0001/{action}"
                 for action in (
                     "approve", "pause", "resume", "confirm-done", "stop", "cancel", "run-now", "budget", "deadline",
-                    "note",
+                    "note", "contained",
                 )
             ),
         )
@@ -233,6 +233,7 @@ GOAL_READS = {
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
     "/goals/G-0001/tools": {"enabled": False},
+    "/goals/commands": {"enabled": False, "allowed": False, "active": []},
 }
 # F115: the autonomy reads require a secret too.
 AUTONOMY_READS = {
@@ -252,6 +253,7 @@ AUTONOMY_ROUTE_SET = {
 GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("GET", "/goals/options"),
+    ("GET", "/goals/commands"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
     # The {tool} of a goal's tool route is not made by the G-0001 replacement below.
@@ -489,7 +491,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         for method in route.methods - {"HEAD"}
     }
     assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
-    assert len(GOAL_ROUTE_SET) == 17
+    assert len(GOAL_ROUTE_SET) == 19
     assert len(AUTONOMY_ROUTE_SET) == 7
 
 

@@ -27,6 +27,13 @@ its server row, URL digest and remote tool name the screen showed) and ``DELETE 
 read answers ``grants_enabled: false`` and the changes 503 ``GRANTS_OFF``. After a change, and after every action
 that can change whether a goal is active, the runner's view of the goal's grants is read again; when that read fails
 the answer carries ``reload: true`` and no tool of any goal is used without asking until a later read.
+
+A goal that may run any command (``nous.goals.commands``, with ``NOUS_GOAL_COMMANDS_ENABLED`` on): ``POST /goals`` takes
+``commands`` (the hours from approval and the sentence typed, ``commands.confirm_sentence``); ``POST
+/goals/{ref}/contained`` returns a goal to contained (the one later change); ``GET /goals/options`` carries the form's
+words only with the flag on; ``GET /goals/commands`` lists the goals that may run any command now, for the screen's
+banner. A goal's detail says the state of its mode (``commands``) and whether its tasks run any command now. Each
+refusal is the store's sentence, as written in ``commands``.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -51,8 +58,9 @@ from nous.api.owner_guard import OwnerGuard
 from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_background, mcp_tool_identity
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
+from nous.goals import commands as goal_commands
 from nous.goals.envelope import _RANGES, PRESETS
-from nous.goals.grants import CREATE_CONFIRM, NEVER_SENTENCE, identity_token, lead_sentence, not_ready, words_for
+from nous.goals.grants import CREATE_CONFIRM, identity_token, lead_sentence, never_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import (
@@ -103,10 +111,12 @@ ACTIONS: tuple[str, ...] = (
     "deadline",
     "note",
     "cancel",
+    "contained",
 )
 ACTOR = "owner"
-# The actions that can change whether a goal is active: after each, its tool grants are read again (F115).
-STATE_ACTIONS: frozenset[str] = frozenset({"approve", "pause", "resume", "stop", "cancel", "confirm-done"})
+# The actions that can change whether a goal is active, or whether it may run any command: after each, its tool grants
+# are read again (F115).
+STATE_ACTIONS: frozenset[str] = frozenset({"approve", "pause", "resume", "stop", "cancel", "confirm-done", "contained"})
 JOURNAL_DEFAULT = 50
 JOURNAL_MAX = 200
 QUERY_NUMBER_DIGITS = 9  # a longer number in a query is refused, never converted
@@ -169,9 +179,17 @@ class GrantItem(_Body):
     identity: Text | None = Field(default=None, max_length=64)
 
 
+class CommandsBody(_Body):
+    """A new goal that may run any command: the hours from its approval, and the sentence the owner typed."""
+
+    hours: StrictInt
+    confirm: Text = Field(max_length=200)
+
+
 class CreateGoal(_Body):
     """``POST /goals``: a new draft. ``origin_channel`` is ``telegram:<chat id>``, or none for the owner's default.
-    ``tools`` (F115 per-goal tools): the tools it may use without asking, granted with it or not at all."""
+    ``tools`` (F115 per-goal tools): the tools it may use without asking, granted with it or not at all. ``commands``:
+    its tasks may run any command for that many hours from its approval."""
 
     title: Text = Field(max_length=TITLE_MAX_CHARS)
     objective: Text = Field(max_length=OBJECTIVE_MAX_CHARS)
@@ -180,6 +198,7 @@ class CreateGoal(_Body):
     limits: Limits | None = None
     origin_channel: Text | None = Field(default=None, max_length=CHANNEL_MAX_CHARS)
     tools: list[GrantItem] | None = None
+    commands: CommandsBody | None = None
 
 
 class BudgetChange(_Body):
@@ -308,6 +327,8 @@ def available_actions(goal: Goal, *, tally: Tally, now: datetime, settings: Any)
         offered.add("stop")
         if not session_open:
             offered.add("run-now")
+    if goal.mode != goal_commands.MODE_CONTAINED:
+        offered.add("contained")
     if goal.state == "paused":
         if resume_blocked(goal, spent=tally.spent_total, now=now) is None:
             offered.add("resume")
@@ -384,6 +405,43 @@ def goal_row(goal: Goal, tally: Tally) -> dict[str, Any]:
     }
 
 
+def commands_state(goal: Goal, *, now: datetime, settings: Any, ended: str | None) -> dict[str, Any]:
+    """Whether ``goal`` may run any command, as its page shows it: ``state`` (``off``; ``set``, a draft's choice;
+    ``on``, with its end; ``ended``, with the text of the row that ended it), the sentence it ``says``
+    (``commands.WORDS``), whether its tasks run any command now (``usable``) and why not, and for an armed draft what
+    approving it starts (``approve``)."""
+    words = goal_commands.WORDS
+    if goal.mode == goal_commands.MODE_CONTAINED:
+        state, says = ("ended", words["ended"].format(reason=ended)) if ended else ("off", words["off"])
+        return {"state": state, "says": says, "usable": False, "not_usable_why": None, "approve": None}
+    hours = goal_commands.hours_words(int(goal.mode_hours or 0))
+    if goal.mode_until is None:
+        state, says = "set", words["set"].format(hours=hours)
+    else:
+        state, says = "on", words["on"].format(until=f"{goal.mode_until:%Y-%m-%d %H:%M}")
+    why = goal_commands.not_usable(goal, now=now, settings=settings)
+    approve = words["approve"].format(hours=hours) if goal.state == "draft" else None
+    return {"state": state, "says": says, "usable": why is None, "not_usable_why": why, "approve": approve}
+
+
+def mode_row_query(agent_id: str, goal_id: UUID) -> Any:
+    """The newest row of a change of ``goal_id``'s mode (owner, host or harness, with a ``mode:`` ref): its text and
+    evidence."""
+    refs = [f"{goal_commands.MODE_REF}{state}" for state in ("armed", "on", "off")]
+    return (
+        select(GoalJournal.text, GoalJournal.evidence)
+        .where(
+            GoalJournal.agent_id == agent_id,
+            GoalJournal.goal_id == goal_id,
+            GoalJournal.kind == "state",
+            GoalJournal.actor.in_(("owner", "host", "harness")),
+            or_(*(GoalJournal.evidence.contains([ref]) for ref in refs)),
+        )
+        .order_by(GoalJournal.seq.desc())
+        .limit(1)
+    )
+
+
 def goal_detail(
     goal: Goal,
     tally: Tally,
@@ -394,10 +452,12 @@ def goal_detail(
     journal: list[GoalJournal],
     pause_sentence: str | None,
     settings: Any,
+    mode_ended: str | None = None,
 ) -> dict[str, Any]:
     """A goal in full: its row, charter, limits, plan, its newest sessions (the oldest of them first) and how many it
-    has in all, journal (newest first), why the harness paused it, the actions the store accepts now and the
-    sentence of what its spend does not count."""
+    has in all, journal (newest first), why the harness paused it, the actions the store accepts now, the
+    sentence of what its spend does not count, and whether it may run any command (``commands_state``; ``mode_ended``
+    is the text of the row that ended its mode, when that is its newest change of mode)."""
     return {
         "enabled": True,
         **goal_row(goal, tally),
@@ -411,6 +471,8 @@ def goal_detail(
         "quiet_hours_ok": goal.quiet_hours_ok,
         "stall_limit": goal.stall_limit,
         "mode_until": _iso(goal.mode_until),
+        "mode_hours": goal.mode_hours,
+        "commands": commands_state(goal, now=now, settings=settings, ended=mode_ended),
         "approved_at": _iso(goal.approved_at),
         "finished_at": _iso(goal.finished_at),
         "created_at": _iso(goal.created_at),
@@ -658,6 +720,14 @@ def build_goal_routes(
             found = await session.scalar(pause_sentence_query(agent_id, goal.id, goal.pause_reason))
         return clip(found, PAUSE_SENTENCE_CHARS) if found is not None else None
 
+    async def mode_ended(goal: Goal) -> str | None:
+        """The text of the row that ended ``goal``'s mode, when its newest change of mode is an end."""
+        async with database.session() as session:
+            found = (await session.execute(mode_row_query(agent_id, goal.id))).first()
+        if found is None or f"{goal_commands.MODE_REF}off" not in (found.evidence or []):
+            return None
+        return clip(found.text, PAUSE_SENTENCE_CHARS)
+
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
         assert goals is not None
         now, tally = await tallies([goal.id])
@@ -671,6 +741,7 @@ def build_goal_routes(
             journal=await goals.journal(goal.id, limit=journal_limit),
             pause_sentence=await harness_pause_sentence(goal),
             settings=settings,
+            mode_ended=await mode_ended(goal),
         )
 
     async def changed_answer(changed: Goal, what: str, status: int = 200) -> JSONResponse:
@@ -741,8 +812,48 @@ def build_goal_routes(
                 "spend_note": SPEND_NOTE,
                 # F115 per-goal tools, with that flag on: what a new goal may be allowed when it is created.
                 **({"tools": new_goal_tools()} if grants_on() else {}),
+                # With goals that may run any command: the form's words, the sentence to type and the ceiling.
+                **({"commands": commands_options()} if goal_commands.enabled(settings) else {}),
             }
         )
+
+    def commands_options() -> dict[str, Any]:
+        return {
+            "max_hours": goal_commands.max_hours(settings),
+            "sentence": goal_commands.CONFIRM_TEMPLATE,
+            "hour_one": goal_commands.HOUR_ONE,
+            "hours_many": goal_commands.HOURS_MANY,
+            "words": dict(goal_commands.WORDS),
+        }
+
+    async def commands_now(request: Request) -> Response:
+        """GET /goals/commands: the goals whose tasks may run any command now, for the screen's banner."""
+        if not goals:
+            return JSONResponse({"enabled": False, "allowed": False, "active": []})
+        if not goal_commands.enabled(settings):
+            return JSONResponse({"enabled": True, "allowed": False, "active": []})
+        query = (
+            select(Goal)
+            .where(
+                Goal.agent_id == agent_id,
+                Goal.state == "active",
+                Goal.mode == goal_commands.MODE_COMMANDS,
+                Goal.mode_until.is_not(None),
+                Goal.mode_until > func.clock_timestamp(),
+            )
+            .order_by(Goal.short_id)
+        )
+        try:
+            async with database.session() as session:
+                rows = list((await session.execute(query)).scalars())
+        except Exception as exc:
+            return failed("listing the goals that may run any command", exc)
+        active = []
+        for goal in rows:
+            ref, until = format_short_id(goal.short_id), f"{goal.mode_until:%Y-%m-%d %H:%M}"
+            says = goal_commands.WORDS["banner"].format(ref=ref, until=until)
+            active.append({"ref": ref, "title": goal.title, "until": _iso(goal.mode_until), "says": says})
+        return JSONResponse({"enabled": True, "allowed": True, "active": active})
 
     async def get_goal(request: Request) -> Response:
         """GET /goals/{ref}?journal=50"""
@@ -776,6 +887,11 @@ def build_goal_routes(
             if isinstance(checked, JSONResponse):
                 return checked
             tools = checked
+        extra: dict[str, Any] = {"tools": tools} if tools else {}
+        if body.commands is not None:
+            extra["commands"] = goal_commands.CommandsRequest(body.commands.hours, body.commands.confirm)
+        if extra:
+            extra["proof"] = guard.proof(request)
         try:
             made = await goals.create(
                 title=body.title,
@@ -785,7 +901,7 @@ def build_goal_routes(
                 overrides=body.limits.model_dump(exclude_none=True) if body.limits else None,
                 proposed_by=ACTOR,
                 origin_channel=body.origin_channel,
-                **({"tools": tools, "proof": guard.proof(request)} if tools else {}),
+                **extra,
             )
         except GoalRefused as exc:
             return _error(409, str(exc))
@@ -793,9 +909,11 @@ def build_goal_routes(
             return failed("creating a goal", exc)
         return await changed_answer(made, "creating a goal", status=201)
 
-    def action(name: str, model: type[_Body], call: Callable[[GoalStore, UUID, Any], Awaitable[Goal]]) -> Route:
-        """``POST /goals/{ref}/<name>``: the body as ``model``, the goal looked up (404), then ``call`` (409 on a
-        refusal), answered with the goal's detail (``changed_answer``)."""
+    def action(
+        name: str, model: type[_Body], call: Callable[[GoalStore, UUID, Any, str | None], Awaitable[Goal]]
+    ) -> Route:
+        """``POST /goals/{ref}/<name>``: the body as ``model``, the goal looked up (404), then ``call`` with the proof
+        the guard accepted (409 on a refusal), answered with the goal's detail (``changed_answer``)."""
 
         async def run(request: Request) -> Response:
             if not goals:
@@ -809,7 +927,7 @@ def build_goal_routes(
                 goal = await goals.get(ref)
                 if goal is None:
                     return _no_goal(ref)
-                changed = await call(goals, goal.id, body)
+                changed = await call(goals, goal.id, body, guard.proof(request))
             except GoalRefused as exc:
                 return _error(409, str(exc))
             except Exception as exc:
@@ -822,7 +940,7 @@ def build_goal_routes(
         path = f"/goals/{{ref}}/{name}"
         return guard.route(path, run, methods=["POST"])
 
-    def budget(store: GoalStore, goal_id: UUID, body: BudgetChange) -> Awaitable[Goal]:
+    def budget(store: GoalStore, goal_id: UUID, body: BudgetChange, _proof: str | None) -> Awaitable[Goal]:
         return store.raise_budget(goal_id, total=body.total, day=body.day, actor=ACTOR)
 
     # ---- the tools a goal may use without asking (F115) ----------------------------------------------------------
@@ -865,7 +983,7 @@ def build_goal_routes(
         goal", and the one question asked before it is created with any."""
         return {
             "applies_in": lead_sentence(),
-            "never": NEVER_SENTENCE,
+            "never": never_sentence(settings),
             "limit": GRANTS_MAX,
             "confirm": CREATE_CONFIRM,
             "available": [available_row("this goal", name, full=False) for name in grantable(listed(), set())],
@@ -916,7 +1034,7 @@ def build_goal_routes(
             "can_edit": goal.state in LIVE_STATES,
             "limit": GRANTS_MAX,
             "applies_in": lead_sentence(),
-            "never": NEVER_SENTENCE,
+            "never": never_sentence(settings),
             "grants": [grant_row(goal, row, tools) for row in rows],
             "available": [
                 available_row(format_short_id(goal.short_id), name, full=full) for name in grantable(tools, granted)
@@ -1030,18 +1148,26 @@ def build_goal_routes(
         guard.route("/goals", list_goals, methods=["GET"]),
         guard.route("/goals", create, methods=["POST"]),
         guard.route("/goals/options", options, methods=["GET"]),
+        guard.route("/goals/commands", commands_now, methods=["GET"]),
         guard.route("/goals/{ref}", get_goal, methods=["GET"]),
         guard.route("/goals/{ref}/tools", tools_of, methods=["GET"]),
         guard.route("/goals/{ref}/tools/{tool}", allow_tool, methods=["PUT"]),
         guard.route("/goals/{ref}/tools/{tool}", remove_tool, methods=["DELETE"]),
-        action("approve", NoBody, lambda store, gid, _b: store.approve(gid, actor=ACTOR)),
-        action("pause", NoBody, lambda store, gid, _b: store.pause(gid, actor=ACTOR)),
-        action("resume", NoBody, lambda store, gid, _b: store.resume(gid, actor=ACTOR)),
-        action("confirm-done", NoBody, lambda store, gid, _b: store.confirm_done(gid, actor=ACTOR)),
-        action("stop", NoBody, lambda store, gid, _b: store.stop(gid, actor=ACTOR)),
-        action("cancel", NoBody, lambda store, gid, _b: store.cancel(gid, actor=ACTOR)),
-        action("run-now", NoBody, lambda store, gid, _b: store.request_run_now(gid, actor=ACTOR)),
+        action("approve", NoBody, lambda store, gid, _b, proof: store.approve(gid, actor=ACTOR, proof=proof)),
+        action("pause", NoBody, lambda store, gid, _b, _p: store.pause(gid, actor=ACTOR)),
+        action("resume", NoBody, lambda store, gid, _b, _p: store.resume(gid, actor=ACTOR)),
+        action("confirm-done", NoBody, lambda store, gid, _b, _p: store.confirm_done(gid, actor=ACTOR)),
+        action("stop", NoBody, lambda store, gid, _b, _p: store.stop(gid, actor=ACTOR)),
+        action("cancel", NoBody, lambda store, gid, _b, _p: store.cancel(gid, actor=ACTOR)),
+        action("run-now", NoBody, lambda store, gid, _b, _p: store.request_run_now(gid, actor=ACTOR)),
         action("budget", BudgetChange, budget),
-        action("deadline", DeadlineChange, lambda store, gid, b: store.extend_deadline(gid, days=b.days, actor=ACTOR)),
-        action("note", NoteBody, lambda store, gid, b: store.add_note(gid, b.text, actor=ACTOR)),
+        action(
+            "deadline", DeadlineChange, lambda store, gid, b, _p: store.extend_deadline(gid, days=b.days, actor=ACTOR)
+        ),
+        action("note", NoteBody, lambda store, gid, b, _p: store.add_note(gid, b.text, actor=ACTOR)),
+        action(
+            "contained",
+            NoBody,
+            lambda store, gid, _b, proof: store.return_to_contained(gid, actor=ACTOR, proof=proof),
+        ),
     ]

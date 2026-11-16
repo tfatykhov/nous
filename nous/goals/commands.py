@@ -111,14 +111,20 @@ ENDED: Mapping[str, str] = MappingProxyType(
 )
 
 
+# The sentence the owner types, and the hours in it (one, or more): the screen builds it from these.
+CONFIRM_TEMPLATE = "allow this goal to run any command for {hours}"
+HOUR_ONE = "{n} hour"
+HOURS_MANY = "{n} hours"
+
+
 def hours_words(hours: int) -> str:
     """``1 hour``, ``5 hours``."""
-    return f"{hours} hour" if hours == 1 else f"{hours} hours"
+    return (HOUR_ONE if hours == 1 else HOURS_MANY).format(n=hours)
 
 
 def confirm_sentence(hours: int) -> str:
     """The sentence the owner types to create a goal that may run any command for ``hours`` hours."""
-    return f"allow this goal to run any command for {hours_words(hours)}"
+    return CONFIRM_TEMPLATE.format(hours=hours_words(hours))
 
 
 def armed_text(hours: int) -> str:
