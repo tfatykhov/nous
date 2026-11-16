@@ -514,6 +514,73 @@ async def test_a_scan_the_deadline_cuts_short_is_reported_incomplete(tmp_path, m
     assert report.as_dict()["jobs_not_checked"] == 5
 
 
+def _jobs_sweeper(tmp_path, runner) -> HaltSweeper:
+    return HaltSweeper(
+        settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
+        heart=MagicMock(),
+        halt=_halt(),
+        run_runner=runner,
+    )
+
+
+async def test_at_the_deadline_only_jobs_without_a_final_word_count_as_not_checked(tmp_path, monkeypatch):
+    _many_jobs(tmp_path, 6, running={0, 3})  # four finished, two running
+    monkeypatch.setattr(halt_sweep, "JOBS_SCAN_SECONDS", -1.0)  # already past it
+    runner = AsyncMock(return_value=(0, "Status: running\n"))
+    report = HaltReport()
+    await _jobs_sweeper(tmp_path, runner)._jobs(report)
+    runner.assert_not_awaited()
+    assert report.jobs_not_checked == 2 and report.failed == ["jobs"]
+    assert "2 Claude Code jobs could not be checked." in report.describe()
+
+
+async def test_jobs_whose_status_file_cannot_be_read_are_asked_after_the_others(tmp_path):
+    names = _many_jobs(tmp_path, 2, running={0})  # the older one is running, the newer one finished
+    unread = ["job-20261115-235958-0000fffe", "job-20261115-235959-0000ffff"]  # newer still, with no status file
+    for name in unread:
+        (tmp_path / "claude-jobs" / name).mkdir()
+    calls: list[list[str]] = []
+
+    async def runner(workspace, args, timeout):
+        calls.append(args)
+        return 0, "Status: completed\n"
+
+    await _jobs_sweeper(tmp_path, runner)._jobs(HaltReport())
+    assert calls == [["status", names[0]], ["status", unread[1]], ["status", unread[0]]]
+
+
+@pytest.mark.parametrize(
+    ("word", "asked"),
+    [("completed", False), ("failed", False), ("cancelled", False), ("starting", True), ("", True)],
+)
+async def test_only_the_runners_final_words_spare_a_job_the_question(tmp_path, word, asked):
+    job = tmp_path / "claude-jobs" / JOB_A
+    job.mkdir(parents=True)
+    (job / "status").write_text(f"{word}\n", encoding="utf-8")
+    runner = AsyncMock(return_value=(0, "Status: completed\n"))
+    await _jobs_sweeper(tmp_path, runner)._jobs(HaltReport())
+    assert runner.await_count == (1 if asked else 0)
+
+
+async def test_the_status_files_are_read_off_the_event_loop(tmp_path, monkeypatch):
+    import threading
+
+    from nous.dag import typed_checks
+
+    _many_jobs(tmp_path, 3, running={1})
+    on_loop: list[bool] = []
+    read = typed_checks.job_state_for
+
+    def recording(*args, **kwargs):
+        on_loop.append(threading.current_thread() is threading.main_thread())
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(typed_checks, "job_state_for", recording)
+    runner = AsyncMock(return_value=(0, "Status: completed\n"))
+    await _jobs_sweeper(tmp_path, runner)._jobs(HaltReport())
+    assert on_loop == [False, False, False]
+
+
 @pytest.mark.parametrize("cancel_answer", [(1, "no such job"), (None, "")], ids=["nonzero", "timed out"])
 async def test_a_failed_cancel_is_counted_and_the_scan_goes_on(tmp_path, cancel_answer):
     names = _many_jobs(tmp_path, 3, running={0, 2})

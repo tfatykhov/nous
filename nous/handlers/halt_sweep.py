@@ -45,6 +45,9 @@ ROOTS_BATCH = 8
 # The jobs step starts no new job after this many seconds, so a status and a cancel call still fit in its timeout.
 JOBS_SCAN_SECONDS = JOBS_TIMEOUT_SECONDS - 2 * RUNNER_CALL_SECONDS
 HALT_REASON_TEXT = "halted by the owner"
+# The words claude-jobs/runner.sh writes to a job's status file when the job has ended, and "gone" (a running job
+# whose worker is known to be gone, nous.dag.typed_checks.job_state_for). Any other word, or none, is asked.
+FINAL_JOB_WORDS = frozenset({"completed", "failed", "cancelled", "gone"})
 
 _STEP_WORDS = {
     "subtasks": "subtasks",
@@ -71,7 +74,9 @@ class HaltReport:
     commands: int = 0
     jobs: int = 0
     jobs_checked: bool = True
-    jobs_not_checked: int = 0  # running jobs whose status could not be read, or that the deadline left unscanned
+    # Job directories whose status file shows no final word and whose job was not asked to the end: its status
+    # could not be read from the runner, or the deadline came first.
+    jobs_not_checked: int = 0
     jobs_not_cancelled: int = 0  # running jobs whose cancel failed or timed out
     chains_truncated: bool = False
     failed: list[str] = field(default_factory=list)
@@ -160,6 +165,33 @@ async def open_root_ids(session: Any, agent_id: str, *, limit: int = ROOTS_MAX) 
         .limit(limit)
     )
     return list((await session.execute(query)).scalars())
+
+
+def _jobs_to_ask(jobs_dir: Path, workspace: str) -> list[str]:
+    """The job directories (names that are job ids, real directories) whose status file does not show a final word
+    (``FINAL_JOB_WORDS``): those with a status word, newest first, then those whose status file could not be read,
+    newest first. Reads files: run it in a thread. The status file is trusted: a job whose file shows a final word
+    is not asked, even if something else is still running under it."""
+    from nous.api.job_marks import JOB_ID_RE
+    from nous.dag.typed_checks import job_state_for
+
+    names = sorted(
+        (
+            entry.name
+            for entry in os.scandir(jobs_dir)
+            if JOB_ID_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)
+        ),
+        reverse=True,
+    )
+    worded: list[str] = []
+    unread: list[str] = []
+    for job_id in names:
+        recorded = job_state_for(job_id, workspace)
+        if recorded is None:
+            unread.append(job_id)
+        elif recorded[0] not in FINAL_JOB_WORDS:
+            worded.append(job_id)
+    return worded + unread
 
 
 class HaltSweeper:
@@ -278,35 +310,27 @@ class HaltSweeper:
         report.commands += background_processes.kill_all()
 
     async def _jobs(self, report: HaltReport, epoch: int | None = None) -> None:
-        """Claude Code jobs: every job directory (names that are job ids, real directories), newest first. A job whose
-        status file records a final word is skipped; any other is asked ``runner.sh status``, and one that says
-        running is cancelled and marked as cancelled by the harness. A cancel that fails is counted and the scan
-        goes on. A status that cannot be read, and the jobs the deadline (``JOBS_SCAN_SECONDS``) leaves unscanned, are
-        counted as not checked. Either count marks the step failed, so the owner is offered the retry."""
+        """Claude Code jobs: the job directories whose status file shows no final word (``_jobs_to_ask``, read off
+        the event loop) are asked ``runner.sh status``, those with a status word first, newest first, then those
+        whose status file could not be read, so a halt pressed again reaches further when some of them are slow to
+        answer. One that says running is cancelled and marked as cancelled by the harness. A cancel that fails is
+        counted and the scan goes on. A job whose status the runner did not give, and the jobs the deadline
+        (``JOBS_SCAN_SECONDS``) leaves unasked, are counted as not checked. Either count marks the step failed, so
+        the owner is offered the retry."""
         workspace = getattr(self._settings, "workspace_dir", "")
         jobs_dir = Path(workspace) / "claude-jobs" if workspace else None
         if jobs_dir is None or not jobs_dir.is_dir():
             return
-        from nous.api.job_marks import JOB_ID_RE
         from nous.cognitive.execution_ledger import observed_status
 
-        names = sorted(
-            (
-                entry.name
-                for entry in os.scandir(jobs_dir)
-                if JOB_ID_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)
-            ),
-            reverse=True,
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + JOBS_SCAN_SECONDS
+        names = await asyncio.to_thread(_jobs_to_ask, jobs_dir, workspace)
         if not names:
             return
-        from nous.dag.typed_checks import job_state_for
-
         run_runner = self._run_runner
         if run_runner is None:
             from nous.api.builtin_tools import run_runner
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + JOBS_SCAN_SECONDS
         unread = failed = 0
         for index, job_id in enumerate(names):
             if epoch is not None and not self._still_halted(epoch):
@@ -315,9 +339,6 @@ class HaltSweeper:
             if loop.time() > deadline:
                 unread += len(names) - index
                 break
-            recorded = job_state_for(job_id, workspace)
-            if recorded is not None and recorded[0] != "running":
-                continue  # a final word (or a worker known gone): nothing to cancel
             code, out = await run_runner(workspace, ["status", job_id], RUNNER_CALL_SECONDS)
             status = observed_status(out) if code == 0 else None
             if status is None:
