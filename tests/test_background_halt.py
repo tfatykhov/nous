@@ -234,6 +234,21 @@ def test_the_turn_epoch_scope_restores_the_outer_value():
     assert background_halt.turn_epoch() == background_halt.current().epoch
 
 
+def test_inside_a_tool_call_the_turn_epoch_is_the_calls_unless_an_outer_one_is_set():
+    token = background_halt.CALL_SCOPE.set(("interactive", "claude-job-1", 4))  # as the dispatcher sets it
+    try:
+        assert background_halt.turn_epoch() == 4
+        with background_halt.epoch_scope(2):
+            assert background_halt.turn_epoch() == 2  # the earliest start wins
+    finally:
+        background_halt.CALL_SCOPE.reset(token)
+    token = background_halt.CALL_SCOPE.set(("subtask", "subtask-1", None))  # a call handed no epoch
+    try:
+        assert background_halt.turn_epoch() == background_halt.current().epoch
+    finally:
+        background_halt.CALL_SCOPE.reset(token)
+
+
 async def test_announce_false_records_and_gates_and_tells_the_caller_to_send_nothing():
     store = FakeStore()
     halt = make(store)

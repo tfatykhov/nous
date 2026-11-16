@@ -190,6 +190,31 @@ async def test_a_background_command_is_not_spawned_while_halted(tmp_path, monkey
     assert spawned == ["echo hi"]
 
 
+async def test_a_dispatched_background_command_is_checked_with_its_calls_epoch(tmp_path, monkeypatch):
+    """A command of a turn that started before a halt is refused after the resume, when the epoch reaches the call
+    only through its scope (the streaming loop sets no TURN_EPOCH in the task it dispatches in)."""
+    from nous import background_halt
+
+    spawned: list[str] = []
+
+    async def fake_spawn(command, **kwargs):
+        spawned.append(command)
+        raise RuntimeError("spawned")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_spawn)
+    halt = background_halt.BackgroundHalt(host_hold=False)
+    background_halt.install(halt)
+    before = halt.epoch
+    await halt.halt(actor="t", surface="dashboard")
+    await halt.resume(actor="t", via="dashboard")
+    token = background_halt.CALL_SCOPE.set(("interactive", "claude-job-1", before))
+    try:
+        refused = await bash_tool("echo hi", 5, _workspace_dir=str(tmp_path), _background=True)
+    finally:
+        background_halt.CALL_SCOPE.reset(token)
+    assert _text(refused) == background_halt.HALTED_TOOL_TEXT and spawned == []
+
+
 @linux_only
 async def test_a_group_whose_members_all_started_after_the_leaders_exit_is_dropped_not_signalled(tmp_path):
     result = await bash_tool(

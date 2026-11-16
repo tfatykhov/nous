@@ -196,7 +196,7 @@ async def run_runner(workspace_dir: str, args: list[str], timeout: float) -> tup
 
 
 def _halt_refuses() -> bool:
-    return background_halt.current().refuses("background", None, background_halt.TURN_EPOCH.get())
+    return background_halt.current().refuses("background", None, background_halt.turn_epoch())
 
 
 async def bash_tool(

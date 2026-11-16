@@ -453,8 +453,12 @@ def call_refused() -> bool:
 
 def turn_epoch() -> int:
     """The epoch a turn starting now captures: the one already in ``TURN_EPOCH`` (set by the work that claimed this
-    turn, so the earliest start wins), else the current one."""
+    turn, so the earliest start wins), else the one of the tool call running now (``CALL_SCOPE``: the dispatcher is
+    handed it explicitly, which the streaming loop needs), else the current one."""
     outer = TURN_EPOCH.get()
+    if outer is None:
+        scope = CALL_SCOPE.get()
+        outer = scope[2] if scope is not None else None
     return outer if outer is not None else current().epoch
 
 
