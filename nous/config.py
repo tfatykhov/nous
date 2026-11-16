@@ -1552,6 +1552,13 @@ class Settings(BaseSettings):
     # goals_enabled, autonomy_settings_enabled and tool_guard_enabled; without them a WARNING and it stays off.
     # Default off.
     goal_tool_grants_enabled: bool = False
+    # The owner may let one goal's tasks run any command with bash until an end time, chosen only when the goal is
+    # created (nous/goals/commands.py). Needs goals_enabled, autonomy_settings_enabled, tool_guard_enabled,
+    # goal_tool_grants_enabled, owner_entry_mode=enforce and both owner digests (owner_route_secret_sha256,
+    # mcp_client_ui_secret_sha256); without them a WARNING and it stays off. Default off.
+    goal_commands_enabled: bool = False
+    # The most hours such a goal may run any command from its approval (also never past its deadline).
+    goal_commands_max_hours: int = Field(default=24, ge=1, le=2160)
 
     # F115 autonomy settings: the owner changes the limits of background work on the dashboard (nous/autonomy). Each
     # change is a row of nous_system.autonomy_settings with a record in autonomy_settings_log, applied in place on
@@ -4452,6 +4459,34 @@ class Settings(BaseSettings):
                 "NOUS_GOAL_TOOL_GRANTS_ENABLED=true needs %s; goal tool grants stay OFF.", " and ".join(missing)
             )
             object.__setattr__(self, "goal_tool_grants_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_goal_commands_dependency(self) -> "Settings":
+        """A goal that may run any command is set when the goal is created, through the owner's routes: it needs
+        what per-goal tool grants need, the grants themselves, the chat routes refusing a call that carries no proof
+        (``enforce``), and both owner digests. Runs after the goal tool grants validator, so a flag it forced off
+        forces this off too. One warning names everything missing."""
+        if not self.goal_commands_enabled:
+            return self
+        from nous.api.owner_guard import secret_digest
+
+        needed = {
+            "NOUS_GOALS_ENABLED=true": self.goals_enabled,
+            "NOUS_AUTONOMY_SETTINGS_ENABLED=true": self.autonomy_settings_enabled,
+            "NOUS_TOOL_GUARD_ENABLED=true": self.tool_guard_enabled,
+            "NOUS_GOAL_TOOL_GRANTS_ENABLED=true": self.goal_tool_grants_enabled,
+            "NOUS_OWNER_ENTRY_MODE=enforce": self.owner_entry_mode == "enforce",
+            "NOUS_OWNER_ROUTE_SECRET_SHA256 (a SHA-256 digest)": secret_digest(self.owner_route_secret_sha256) != "",
+            "NOUS_MCP_CLIENT_UI_SECRET_SHA256 (a SHA-256 digest)": secret_digest(self.mcp_client_ui_secret_sha256)
+            != "",
+        }
+        missing = [name for name, on in needed.items() if not on]
+        if missing:
+            logging.getLogger(__name__).warning(
+                "NOUS_GOAL_COMMANDS_ENABLED=true needs %s; running any command stays OFF.", " and ".join(missing)
+            )
+            object.__setattr__(self, "goal_commands_enabled", False)
         return self
 
     @model_validator(mode="after")

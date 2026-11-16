@@ -292,6 +292,11 @@ class GoalToolGrants:
         """``decide``'s answer, as the runner's hook takes it."""
         return decide(self, ctx, tool).lifted
 
+    @property
+    def commands_on(self) -> bool:
+        """Whether the view reads which goals may run any command (built with ``commands``)."""
+        return self._commands_on
+
     def now(self) -> float:
         """The view's clock (monotonic), which the ends of ``commands_entry`` are on."""
         return self._clock()

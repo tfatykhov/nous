@@ -374,6 +374,11 @@ async def _recorded_policy_note(spec: intentions.IntentionSpec | None, read: Cal
     return f" (wake_policy '{spec.wake_policy}' is not available from a {spec.origin_kind} turn; recorded '{recorded}')"
 
 
+def _no_goal_commands(_ctx: ExecutionContext) -> None:
+    """The dispatcher's default commands hook: no turn's goal may run any command."""
+    return None
+
+
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -412,6 +417,14 @@ class ToolDispatcher:
         # Old tool names: an alias the runner rewrites to its target before any check, or a retired name
         # that answers with its message. Never offered, never registered (see nous/tool_names.py).
         self._aliases: dict[str, ToolAlias] = {}
+        # A goal that may run any command (``set_goal_commands``): the same hook the runner asks, read here for the
+        # environment of a lineage's bash call. None until main.py installs it.
+        self._goal_commands: Callable[[ExecutionContext], Any] = _no_goal_commands
+
+    def set_goal_commands(self, commands: Callable[[ExecutionContext], Any] | None) -> None:
+        """Install the hook that returns the entry letting a turn run any command with bash
+        (``nous.goals.grants.GoalToolGrants.commands_for``), or None; None puts the default back."""
+        self._goal_commands = commands if commands is not None else _no_goal_commands
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
@@ -672,8 +685,20 @@ class ToolDispatcher:
                     # command (git, pytest, ruff, make) runs the repo's code: it gets no GitHub token either.
                     # A runner.sh command gets no GH_REPO: the Claude Code job it starts would inherit it.
                     command = str(args.get("command", ""))
-                    build, runner = lineage_runs_build(command), lineage_runs_runner(command)
-                    args = {**args, "_lineage": True, "_lineage_build": build, "_lineage_runner": runner}
+                    runner = lineage_runs_runner(command)
+                    if self._goal_commands(ctx) is not None:
+                        # A turn whose goal may run any command: the lineage environment, never the build one (so
+                        # git push keeps the code-host token), and no stdin.
+                        args = {
+                            **args,
+                            "_lineage": True,
+                            "_lineage_build": False,
+                            "_lineage_runner": runner,
+                            "_goal_commands": True,
+                        }
+                    else:
+                        build = lineage_runs_build(command)
+                        args = {**args, "_lineage": True, "_lineage_build": build, "_lineage_runner": runner}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.

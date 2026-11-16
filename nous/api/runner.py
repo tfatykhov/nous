@@ -145,6 +145,12 @@ def _no_goal_note_use(_ctx: ExecutionContext, _tool_name: str) -> None:
     return None
 
 
+def _no_goal_commands(_ctx: ExecutionContext) -> None:
+    """The default commands hook: no turn's goal may run any command. Installed until ``set_goal_commands``
+    replaces it."""
+    return None
+
+
 _COMMAND_HEAD_CHARS = 300
 
 
@@ -590,6 +596,9 @@ class AgentRunner:
         # hook told when such a call was authorized; nothing is lifted until main.py installs them.
         self._goal_lift: Callable[[ExecutionContext, str], bool] = _no_goal_lift
         self._goal_note_use: Callable[[ExecutionContext, str], None] = _no_goal_note_use
+        # A goal that may run any command: the hook that returns the entry that lets a turn run any command with bash
+        # (``set_goal_commands``), or None; every reader tests ``is not None``. None until main.py installs it.
+        self._goal_commands: Callable[[ExecutionContext], Any] = _no_goal_commands
         # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
@@ -833,7 +842,9 @@ class AgentRunner:
         is true, for every kind whose ``ctx.authority`` is ``internal_only`` (a lineage
         check's ``tool_filter`` included: a tool must pass both), with ``lifted`` from the per-goal
         tool grant hook (``set_goal_lift``); the MCP floor and the guard still drop a lifted tool after it.
-        Extra tools are the caller's and are not filtered.
+        For bash alone, ``commands`` comes from the commands hook (``set_goal_commands``): when it answers, bash is
+        offered whatever the lineage shell says, and its offered copy's description says it runs any command
+        (``tool_policy.commands_bash_description``). Extra tools are the caller's and are not filtered.
         """
         tools = self._dispatcher.available_tools(frame_id)
         if is_subtask:
@@ -857,13 +868,21 @@ class AgentRunner:
             before = len(tools)
             tools = [t for t in tools if t["name"] not in denylist]
             logger.info("F078 refuse: stripped %d state-modifying tool(s)", before - len(tools))
+        commands = False
         if ctx.authority == AUTHORITY_INTERNAL:
             lineage_shell = self._settings.f099_lineage_shell
+            commands = any(t["name"] == tool_policy.COMMANDS_TOOL for t in tools) and (
+                self._goal_commands(ctx) is not None
+            )
             tools = [
                 t
                 for t in tools
                 if tool_policy.internal_only_allowed(
-                    t["name"], ctx=ctx, lineage_shell=lineage_shell, lifted=self._goal_lift(ctx, t["name"])
+                    t["name"],
+                    ctx=ctx,
+                    lineage_shell=lineage_shell,
+                    lifted=self._goal_lift(ctx, t["name"]),
+                    commands=commands and t["name"] == tool_policy.COMMANDS_TOOL,
                 )
             ]
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
@@ -875,6 +894,20 @@ class AgentRunner:
         guard = tool_guard.current()
         if guard is not None:
             tools = [t for t in tools if not guard.denies(ctx.kind, ctx.session_id, t["name"])]
+        if commands:
+            # An offered copy, as add_reason_field makes: the dispatcher's schema and its per-frame cache keep theirs.
+            build_commands = self._settings.f099_lineage_build_commands
+            tools = [
+                {
+                    **t,
+                    "description": tool_policy.commands_bash_description(
+                        t.get("description", ""), build_commands=build_commands
+                    ),
+                }
+                if t["name"] == tool_policy.COMMANDS_TOOL
+                else t
+                for t in tools
+            ]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         if self._settings.tool_reason_enabled:
@@ -945,6 +978,11 @@ class AgentRunner:
         or locked by the host) is refused, whatever the two mode settings say. The turn's session is read from
         ``ctx``, as ``_offered_tools`` reads it. Neither of these two reads ``lifted``: it goes only to
         ``tool_policy.internal_only_call_violation`` and ``tool_policy.evaluate``.
+
+        After those two, a bash call asks the commands hook (``set_goal_commands``), at every call: its answer
+        (``commands``) goes to the same two functions. A bash call of a task or a workflow step whose answer is None
+        while the lineage shell is off is refused (``not_allowed``): bash reached that turn's offered set only while
+        its goal could run any command.
         """
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
@@ -981,6 +1019,8 @@ class AgentRunner:
                 session_id=session_id,
             )
             return Refusal(tool_guard.ToolGuard.refusal(tool_name, held_by), "tool_guard")
+        # A goal that may run any command: asked for every bash call, after the two checks above, which never read it.
+        commands = tool_name == tool_policy.COMMANDS_TOOL and self._goal_commands(ctx) is not None
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
         # tuning the ordinary rules; this is a security floor. For both, a call to a
@@ -1005,7 +1045,16 @@ class AgentRunner:
                     build_commands=self._settings.f099_lineage_build_commands,
                     extra_write_dirs=self._settings.f099_lineage_write_dirs,
                     lifted=lifted,
+                    commands=commands,
                 )
+                if (
+                    strict is None
+                    and tool_name == tool_policy.COMMANDS_TOOL
+                    and ctx.kind in tool_policy.COMMANDS_KINDS
+                    and not self._settings.f099_lineage_shell
+                    and not commands
+                ):
+                    strict = "not_allowed"
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
                 logger.warning(
@@ -1162,6 +1211,7 @@ class AgentRunner:
                 workspace_dir=self._settings.workspace_dir,
                 extra_write_dirs=self._settings.f099_lineage_write_dirs,
                 lifted=lifted,
+                commands=commands,
             )
         if violation is None:
             return None
@@ -1233,6 +1283,14 @@ class AgentRunner:
         self._goal_note_use = note_use if note_use is not None else _no_goal_note_use
         for fork in self._forks:
             fork.set_goal_lift(lift, note_use)
+
+    def set_goal_commands(self, commands: Callable[[ExecutionContext], Any] | None) -> None:
+        """Install the hook that returns the entry letting a turn run any command with bash
+        (``nous.goals.grants.GoalToolGrants.commands_for``), or None; None puts the default back (no turn may).
+        Propagated to the forks, as the per-goal tool grant hook is."""
+        self._goal_commands = commands if commands is not None else _no_goal_commands
+        for fork in self._forks:
+            fork.set_goal_commands(commands)
 
     def root_cancelled(self, root_id: UUID) -> bool:
         """F099 2e: whether the view of cancelled roots says ``root_id`` was cancelled, as ``_authorize_tool_call``
@@ -1979,6 +2037,7 @@ class AgentRunner:
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         forked._goal_lift = self._goal_lift  # F115: and set_goal_lift propagates later hooks
         forked._goal_note_use = self._goal_note_use
+        forked._goal_commands = self._goal_commands  # and set_goal_commands propagates a later one
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
         forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
