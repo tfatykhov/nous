@@ -148,6 +148,14 @@ def test_the_cross_rule_is_the_two_subtask_timeouts():
     assert cross_problem({"max_turns": 10}) is None
 
 
+def test_the_cross_rule_judges_only_a_pair_that_holds_a_changed_key():
+    host = {"subtask_default_timeout": 4000, "subtask_max_timeout": 3600, "max_turns": 10}
+    assert cross_problem(host) is not None
+    assert cross_problem(host, changed=["max_turns"]) is None
+    assert cross_problem(host, changed=[]) is None
+    assert cross_problem(host, changed=["subtask_max_timeout"]) is not None
+
+
 def test_by_key_of_an_unknown_key_is_none():
     assert by_key("nope") is None
     assert by_key("goals_queue_headroom") is None

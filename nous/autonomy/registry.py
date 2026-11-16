@@ -10,7 +10,7 @@ what the host started with.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -133,10 +133,14 @@ def ceiling_problem(limit: Limit, value: int, ceiling: int | None) -> str | None
     return f"The server allows at most {_n(ceiling)} for {limit.label.lower()}."
 
 
-def cross_problem(values: Mapping[str, float]) -> str | None:
+def cross_problem(values: Mapping[str, float], changed: Iterable[str] | None = None) -> str | None:
     """Why the effective values in ``values`` break the cross rule (a default subtask time limit above the largest),
-    else None. A pair with either key missing is not checked."""
+    else None. A pair with either key missing is not checked, and with ``changed`` given, neither is a pair that
+    holds none of those keys (the host's own values are the host's)."""
+    keys = None if changed is None else set(changed)
     for lower, upper in _ORDERED:
+        if keys is not None and not keys & {lower, upper}:
+            continue
         if lower in values and upper in values and values[lower] > values[upper]:
             return (
                 f"{_BY_KEY[lower].label} ({_n(values[lower])} {_BY_KEY[lower].unit}) cannot be above "

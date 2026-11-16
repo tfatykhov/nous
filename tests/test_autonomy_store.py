@@ -257,6 +257,20 @@ async def test_the_cross_rule_refuses_a_default_above_the_largest(db, agent_id, 
     assert (settings.subtask_default_timeout, settings.subtask_max_timeout) == (4000, 5000)
 
 
+async def test_a_host_whose_own_time_limits_disagree_can_still_change_another_limit(db, agent_id, cleanup, caplog):
+    caplog.set_level(logging.WARNING)
+    settings = _settings(agent_id, subtask_default_timeout=4000, subtask_max_timeout=3600)
+    store = AutonomyStore(db, settings)
+    await store.load()
+    assert not [r for r in caplog.records if "cross rule" in r.getMessage()]  # no stored value: nothing skipped
+    await store.set_limit("max_turns", 50, "owner")
+    with pytest.raises(AutonomyRefused) as refused:
+        await store.set_limit("subtask_max_timeout", 3700, "owner")  # still below the host's default of 4,000
+    assert refused.value.status == 409
+    await store.set_limit("subtask_default_timeout", 3000, "owner")
+    assert (settings.max_turns, settings.subtask_default_timeout) == (50, 3000)
+
+
 async def test_two_changes_of_one_limit_at_once_both_land_in_order(db, agent_id, cleanup):
     settings = _settings(agent_id)
     store = AutonomyStore(db, settings)

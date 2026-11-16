@@ -176,7 +176,7 @@ class AutonomyStore:
                 logger.warning("F115: the stored value of %s is outside its range or ceiling; skipped", key)
                 continue
             owner[key] = value
-        problem = cross_problem({**self.baseline, **owner})
+        problem = cross_problem({**self.baseline, **owner}, changed=owner)
         if problem is not None:
             logger.warning("F115: the stored subtask time limits break the cross rule; both skipped")
             owner.pop("subtask_default_timeout", None)
@@ -206,7 +206,7 @@ class AutonomyStore:
         if problem is not None:
             raise AutonomyRefused(409, problem)
         async with self._lock:
-            problem = cross_problem({**self.effective(), key: value})
+            problem = cross_problem({**self.effective(), key: value}, changed=[key])
             if problem is not None:
                 raise AutonomyRefused(409, problem)
             async with self._db.session() as session:
@@ -229,7 +229,7 @@ class AutonomyStore:
         False (and no record) when the owner had set nothing; 409 when the host's value would break the cross rule."""
         self._limit(key)
         async with self._lock:
-            problem = cross_problem({**self.effective(), key: self.baseline[key]})
+            problem = cross_problem({**self.effective(), key: self.baseline[key]}, changed=[key])
             if problem is not None:
                 raise AutonomyRefused(409, problem)
             async with self._db.session() as session:

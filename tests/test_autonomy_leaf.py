@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from f099_support import (
     CONT,
+    add_arrival,
     claim,
     commit_ask,
     env_factory,  # noqa: F401
@@ -107,6 +108,34 @@ async def test_a_running_chain_meets_the_new_depth_and_spawn_limits(env_factory,
     await store.set_limit("continuation_max_spawns_per_root", 1, "owner")
     got = await limits()
     assert got.escalate == "limit_spawns" and got.spawn_blocked
+
+
+async def test_a_running_chain_meets_the_new_decision_token_and_stall_limits(env_factory, store_for):  # noqa: F811
+    env = await env_factory(**CONT)
+    root = await make_root(env)
+    await add_arrival(env, root.id, 1, progress=True, tokens=(15_000, 5_000))  # one decision, 20,000 tokens
+    store = store_for(env)
+
+    async def escalate():
+        async with env.db.session() as s:
+            one = await continuation.root_limits(s, env.agent, root.id, settings=env.settings)
+            many = await continuation.root_limits_many(s, env.agent, [root.id], settings=env.settings)
+        assert many[root.id] == one
+        return one.escalate
+
+    assert await escalate() is None
+    for key, value, verdict in [
+        ("continuation_max_turns_per_root", 1, "budget_turns"),
+        ("continuation_max_tokens_per_root", 10_000, "budget_tokens"),
+    ]:
+        await store.set_limit(key, value, "owner")
+        assert await escalate() == verdict, key
+        await store.clear_limit(key, "owner")
+        assert await escalate() is None, key
+    await add_arrival(env, root.id, 2, progress=False)  # one step without progress: below the host's 2
+    assert await escalate() is None
+    await store.set_limit("continuation_stall_limit", 1, "owner")
+    assert await escalate() == "budget_stall"
 
 
 async def test_a_chain_started_after_the_change_gets_the_new_lifetime(env_factory, store_for):  # noqa: F811
