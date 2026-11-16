@@ -9,8 +9,9 @@ fails if any ``dispatcher.register("<name>", ...)`` has no entry here.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
@@ -93,10 +94,26 @@ _NETWORK_CODE = re.compile(
     re.MULTILINE)
 
 
+@dataclass(frozen=True)
+class McpIdentity:
+    """Which server and which of its tools a registered MCP client tool is: the server's row id (``server_id``), the
+    SHA-256 of the server's full URL (``url_sha256``, never the URL itself) and the server's own name for the tool
+    (``remote_tool``). Two identities are equal when these three are; ``server_name`` and ``server_host`` are for
+    showing it and are not compared."""
+
+    server_id: uuid.UUID
+    url_sha256: str
+    remote_tool: str
+    server_name: str = field(default="", compare=False)
+    server_host: str = field(default="", compare=False)
+
+
 # The MCP client's tools that are registered now, each with its server's "available to background work" switch.
 # Filled by nous.mcp_client's manager through note_mcp_tool / forget_mcp_tool; read by refuse_denylist and the
 # runner's MCP floor. A dict, not the frozen table above: the set changes when the manager starts and closes.
 _MCP_TOOLS: dict[str, bool] = {}
+# The identity of each registered MCP client tool the manager named one for (note_mcp_tool's ``identity``).
+_MCP_IDENTITIES: dict[str, McpIdentity] = {}
 
 
 def tool_class(name: str) -> ToolClass | None:
@@ -107,21 +124,32 @@ def tool_class(name: str) -> ToolClass | None:
     return TOOL_CLASSES.get(name)
 
 
-def note_mcp_tool(name: str, *, background: bool) -> None:
-    """Record that the MCP client registered ``name``; ``background`` is its server's background switch."""
+def note_mcp_tool(name: str, *, background: bool, identity: McpIdentity | None = None) -> None:
+    """Record that the MCP client registered ``name``; ``background`` is its server's background switch and
+    ``identity`` which server and remote tool it is (None: none is known, and any earlier one is dropped)."""
     if not name.startswith(MCP_TOOL_PREFIX):
         raise ValueError(f"{name!r} is not an MCP client tool name")
     _MCP_TOOLS[name] = background
+    if identity is None:
+        _MCP_IDENTITIES.pop(name, None)
+    else:
+        _MCP_IDENTITIES[name] = identity
 
 
 def forget_mcp_tool(name: str) -> None:
     """Record that the MCP client no longer has ``name`` registered (no error when it never had)."""
     _MCP_TOOLS.pop(name, None)
+    _MCP_IDENTITIES.pop(name, None)
 
 
 def mcp_tool_background(name: str) -> bool | None:
     """The background switch of a registered MCP client tool, or None when ``name`` is not one."""
     return _MCP_TOOLS.get(name)
+
+
+def mcp_tool_identity(name: str) -> McpIdentity | None:
+    """The identity of a registered MCP client tool, or None when ``name`` is not one or has none."""
+    return _MCP_IDENTITIES.get(name)
 
 
 def is_compensable_call(name: str, tool_input: Mapping[str, object]) -> bool:

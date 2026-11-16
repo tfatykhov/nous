@@ -133,6 +133,10 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("POST", "/goals/{ref}/budget"): OWNER,
     ("POST", "/goals/{ref}/deadline"): OWNER,
     ("POST", "/goals/{ref}/note"): OWNER,
+    # F115 per-goal tools (the read included)
+    ("GET", "/goals/{ref}/tools"): OWNER,
+    ("PUT", "/goals/{ref}/tools/{tool}"): OWNER,
+    ("DELETE", "/goals/{ref}/tools/{tool}"): OWNER,
     # F115 autonomy settings: the limits, the record of changes and the tools (reads included)
     ("GET", "/autonomy/limits"): OWNER,
     ("PUT", "/autonomy/limits/{key}"): OWNER,

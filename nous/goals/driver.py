@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, false, func, or_, select, text, tuple_, update
@@ -57,6 +57,9 @@ from nous.storage.models import (
     ResultInbox,
     Subtask,
 )
+
+if TYPE_CHECKING:
+    from nous.goals.grants import GoalToolGrants
 
 logger = logging.getLogger(__name__)
 
@@ -275,13 +278,25 @@ class GoalDriver:
     still the one read, a pause only while its condition still holds, and wake changes compared with the wake read.
     """
 
-    def __init__(self, database: Database, settings: Any, heart: Any, store: GoalStore, runner: Any) -> None:
+    def __init__(
+        self,
+        database: Database,
+        settings: Any,
+        heart: Any,
+        store: GoalStore,
+        runner: Any,
+        *,
+        tool_grants: GoalToolGrants | None = None,
+    ) -> None:
         self._db = database
         self._settings = settings
         self._heart = heart
         self._store = store
         self._runner = runner
         self._agent_id = store.agent_id
+        # F115 per-goal tools: the runner's view of the goals' tool grants (main.py, with the flag on), read again at
+        # the start, at the end of every tick, after a session starts and after one closes. None: no grants.
+        self.tool_grants = tool_grants
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
@@ -303,6 +318,7 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
+        await self._read_grants()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
         logger.info("Goal driver started (tick=%ds)", self._settings.goals_tick_seconds)
@@ -341,7 +357,8 @@ class GoalDriver:
         and recently closed sessions spent (and journal what a resumed chain of a closed one asked the owner and how
         it ended), pause the goals a stop condition holds, then start: the run-now requests first, then the sessions
         that are due. Stop conditions run before any start, so a goal that should pause never gets one more session.
-        With goals off it does nothing. A second call waits for this one to end (``_tick_lock``)."""
+        Last, the view of the goals' tool grants is read again (``tool_grants``, when set), so this tick's pauses and
+        closes reach it. With goals off it does nothing. A second call waits for this one to end (``_tick_lock``)."""
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
@@ -353,9 +370,27 @@ class GoalDriver:
             paused = await self.apply_stop_conditions()
             started, held = await self._start_due()
             await self.tell_owner_of_pauses()  # after every pause of this tick has committed
+            await self._read_grants()  # F115: after this tick's pauses, closes and starts
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
+
+    async def _read_grants(self, root_id: UUID | None = None, *, goal_id: UUID | None = None) -> None:
+        """F115: read the goals' tool grants into the runner's view again (all of them, one session's root, or one
+        goal's), when a view is set. Called after the driver's own transactions have committed, so it holds no row
+        lock of theirs. A read that fails (the view is then empty) never fails the tick, the start, the close or the
+        pause: logged by its class."""
+        if self.tool_grants is None:
+            return
+        try:
+            if goal_id is not None:
+                await self.tool_grants.refresh_goal(goal_id)
+            elif root_id is None:
+                await self.tool_grants.refresh()
+            else:
+                await self.tool_grants.refresh_root(root_id)
+        except Exception as exc:
+            logger.warning("F115: the goals' tool grants were not read again (%s)", type(exc).__name__)
 
     # ---- starting a session --------------------------------------------------------------------------------
 
@@ -588,6 +623,7 @@ class GoalDriver:
             return _Start()
         self._failures.pop(goal_id, None)
         self._failures_since.pop(goal_id, None)
+        await self._read_grants(root_id)  # F115: the new session's first task is offered the goal's tools
         self._runner.wake()
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
         return _Start(root_id=root_id)
@@ -647,7 +683,8 @@ class GoalDriver:
         recovery of a session whose first subtask never appeared takes the same lock, so the two cannot both win:
         either recovery closed the session first and nothing is published (None; the start counts no failure), or
         the work and the root id are committed together and recovery then finds the root. The root's id, or None.
-        A failure raises with nothing published."""
+        A failure raises with nothing published. With the F115 view set, the root's grants enter it in this
+        transaction, before the commit (``GoalToolGrants.publishing``)."""
         async with self._db.session() as s:
             still_open = (
                 await s.execute(
@@ -679,7 +716,12 @@ class GoalDriver:
             if not await self._set_root(s, session_id, root_id):
                 await s.rollback()
                 return None
-            await s.commit()
+            if self.tool_grants is None:
+                await s.commit()
+            else:
+                # F115: the root's grants are in the runner's view before this commit makes the first task claimable.
+                async with self.tool_grants.publishing(s, root_id):
+                    await s.commit()
             return root_id
 
     async def _gated_task(self, goal: Goal) -> tuple[str | None, str]:
@@ -691,11 +733,12 @@ class GoalDriver:
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
             moved = len(await moved_steps(s, self._agent_id, goal.id))  # steps the plan moved to the journal
+        tools = await self._tool_lines(goal) if self.tool_grants is not None else None
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
             return charter.build_session_task(
-                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved
+                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved, tools=tools
             )
 
         task = build(charter.MAX_TASK_CHARS)
@@ -706,6 +749,16 @@ class GoalDriver:
             raise ValueError("the censor gate changed the task instead of adding to it")
         guidance = gated[len(task) :]
         return None, build(charter.MAX_TASK_CHARS - len(guidance)) + guidance
+
+    async def _tool_lines(self, goal: Goal) -> list[Any]:
+        """F115 per-goal tools: what a new session's first task is told of the goal's grants, each available when
+        its first task would be offered it (``grants.lifted_for_a_new_session``, then the guard and the MCP floor)."""
+        from nous.goals.grants import lifted_for_a_new_session, offered_now, session_tool_lines
+
+        grants = await self._store.tool_grants(goal.id)
+        return session_tool_lines(
+            grants, lambda grant: offered_now(grant.tool, lifted=lifted_for_a_new_session(goal, grant))
+        )
 
     async def _has_open_session(self, s: AsyncSession, goal_id: UUID) -> bool:
         query = select(
@@ -852,7 +905,8 @@ class GoalDriver:
                 return False
             await self._paused(s, goal_id, "error", note, evidence=[f"{STOP_REF}error"])
             await s.commit()
-            return True
+        await self._read_grants(goal_id=goal_id)  # F115: a paused goal's tools stop now, not at the tick's end
+        return True
 
     async def _newest_pause_seq(self, s: AsyncSession, goal_id: UUID, reason: str) -> int:
         """The journal seq of the goal's newest harness pause row for ``reason`` (``stop:<reason>``), else 0."""
@@ -1327,7 +1381,8 @@ class GoalDriver:
             await s.commit()
             self._following.add(row.id)  # read once more after the close, and while its lineage is unsettled
             logger.info("Goal %s: session %d closed (%s, %d tokens)", goal.id, row.n, outcome, spent)
-            return True
+        await self._read_grants(row.root_id)  # F115: a closed session's root keeps no grant
+        return True
 
     async def _root_state(self, s: AsyncSession, root_id: UUID) -> _RootState:
         marks = (
@@ -2032,7 +2087,8 @@ class GoalDriver:
             if not await self._paused(s, goal_id, reason, note, evidence=[f"{STOP_REF}{reason}"], newest_session=True):
                 return False
             await s.commit()
-            return True
+        await self._read_grants(goal_id=goal_id)  # F115: a paused goal's tools stop now, not at the tick's end
+        return True
 
     async def _run_length(
         self,

@@ -135,6 +135,16 @@ def _no_cancelled_roots(_root_id: UUID) -> bool:
     return False
 
 
+def _no_goal_lift(_ctx: ExecutionContext, _tool_name: str) -> bool:
+    """The default per-goal tool grant: none (F115). Installed until ``set_goal_lift`` replaces it."""
+    return False
+
+
+def _no_goal_note_use(_ctx: ExecutionContext, _tool_name: str) -> None:
+    """The default first-use hook of a per-goal tool grant: nothing to note."""
+    return None
+
+
 _COMMAND_HEAD_CHARS = 300
 
 
@@ -576,6 +586,10 @@ class AgentRunner:
         # F099 2e: the owner's cancel, as an in-process view (``set_cancelled_roots``); nothing is cancelled until
         # the continuation runner installs one.
         self._root_cancelled: Callable[[UUID], bool] = _no_cancelled_roots
+        # F115 per-goal tools: whether a turn may use a tool the owner allowed its goal (``set_goal_lift``), and the
+        # hook told when such a call was authorized; nothing is lifted until main.py installs them.
+        self._goal_lift: Callable[[ExecutionContext, str], bool] = _no_goal_lift
+        self._goal_note_use: Callable[[ExecutionContext, str], None] = _no_goal_note_use
         # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
@@ -817,7 +831,8 @@ class AgentRunner:
         Both loops call this, so there is one definition of the offered set. The
         narrowing keeps only tools for which ``tool_policy.internal_only_allowed``
         is true, for every kind whose ``ctx.authority`` is ``internal_only`` (a lineage
-        check's ``tool_filter`` included: the intersection spec section 4.4 names).
+        check's ``tool_filter`` included: a tool must pass both), with ``lifted`` from the per-goal
+        tool grant hook (``set_goal_lift``); the MCP floor and the guard still drop a lifted tool after it.
         Extra tools are the caller's and are not filtered.
         """
         tools = self._dispatcher.available_tools(frame_id)
@@ -845,7 +860,11 @@ class AgentRunner:
         if ctx.authority == AUTHORITY_INTERNAL:
             lineage_shell = self._settings.f099_lineage_shell
             tools = [
-                t for t in tools if tool_policy.internal_only_allowed(t["name"], ctx=ctx, lineage_shell=lineage_shell)
+                t
+                for t in tools
+                if tool_policy.internal_only_allowed(
+                    t["name"], ctx=ctx, lineage_shell=lineage_shell, lifted=self._goal_lift(ctx, t["name"])
+                )
             ]
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
         # that floor. An earlier floor may still refuse one that stays (a heartbeat_triage turn may not act outward).
@@ -890,6 +909,25 @@ class AgentRunner:
         session_id: str | None,
         tool_input: dict,
     ) -> Refusal | None:
+        """Return a refusal for a call the harness must not execute, else None (``_authorize_checks``).
+
+        F115 per-goal tools: the per-goal tool grant hook (``set_goal_lift``) is asked once per call; its answer
+        reaches only the class verdicts of the internal_only floor and of the context policy. The first-use hook is
+        not told here: ``_tool_loop`` reads the lift of an authorized call again, with no await in between, and hands
+        it to ``_dispatch_with_ledger``, which tells the hook only once the call is dispatched."""
+        lifted = self._goal_lift(ctx, tool_name)
+        return self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted)
+
+    def _authorize_checks(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        offered_names: frozenset[str],
+        session_id: str | None,
+        tool_input: dict,
+        *,
+        lifted: bool,
+    ) -> Refusal | None:
         """Return a refusal for a call the harness must not execute, else None.
 
         The single choke point both loops call before gating and dispatch:
@@ -905,7 +943,8 @@ class AgentRunner:
 
         F115: next, a call from a turn the tool guard holds to a tool switched off for background work (by the owner,
         or locked by the host) is refused, whatever the two mode settings say. The turn's session is read from
-        ``ctx``, as ``_offered_tools`` reads it.
+        ``ctx``, as ``_offered_tools`` reads it. Neither of these two reads ``lifted``: it goes only to
+        ``tool_policy.internal_only_call_violation`` and ``tool_policy.evaluate``.
         """
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
@@ -965,6 +1004,7 @@ class AgentRunner:
                     lineage_shell=self._settings.f099_lineage_shell,
                     build_commands=self._settings.f099_lineage_build_commands,
                     extra_write_dirs=self._settings.f099_lineage_write_dirs,
+                    lifted=lifted,
                 )
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
@@ -1005,6 +1045,8 @@ class AgentRunner:
                     )
                 elif strict == "foreign_cancel":
                     text += " " + tool_policy.FOREIGN_CANCEL_HINT
+                elif strict in ("grant_file", "grant_cleanup"):
+                    text += " " + tool_policy.granted_call_hint(ctx, tool_name, self._settings.workspace_dir, strict)
                 return Refusal(text, "internal_only")
 
         # Gate criterion 1: a heartbeat triage turn may not act outward (the PR #721 merge), whatever the modes
@@ -1119,6 +1161,7 @@ class AgentRunner:
                 tool_input,
                 workspace_dir=self._settings.workspace_dir,
                 extra_write_dirs=self._settings.f099_lineage_write_dirs,
+                lifted=lifted,
             )
         if violation is None:
             return None
@@ -1176,6 +1219,20 @@ class AgentRunner:
         self._root_cancelled = view
         for fork in self._forks:
             fork.set_cancelled_roots(view)
+
+    def set_goal_lift(
+        self,
+        lift: Callable[[ExecutionContext, str], bool] | None,
+        note_use: Callable[[ExecutionContext, str], None] | None = None,
+    ) -> None:
+        """F115 per-goal tools: install the hook that says whether a turn may use a tool the owner allowed its goal
+        (``nous.goals.grants.GoalToolGrants.lifts``) and the one told when such a call is authorized
+        (``note_used``). None puts the defaults back (nothing lifted). Propagated to the forks, as the view of
+        cancelled roots is."""
+        self._goal_lift = lift if lift is not None else _no_goal_lift
+        self._goal_note_use = note_use if note_use is not None else _no_goal_note_use
+        for fork in self._forks:
+            fork.set_goal_lift(lift, note_use)
 
     def root_cancelled(self, root_id: UUID) -> bool:
         """F099 2e: whether the view of cancelled roots says ``root_id`` was cancelled, as ``_authorize_tool_call``
@@ -1920,6 +1977,8 @@ class AgentRunner:
         forked._workspace_dir = self._workspace_dir
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
+        forked._goal_lift = self._goal_lift  # F115: and set_goal_lift propagates later hooks
+        forked._goal_note_use = self._goal_note_use
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
         forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
@@ -3960,11 +4019,13 @@ class AgentRunner:
         turn_number: int | None,
         is_background: bool,
         turn_id: UUID | None = None,
+        goal_lifted: bool = False,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
         snapshot, the dispatch, the close of the row (a cancellation closes it ``unknown`` and re-raises, any
-        other exception closes it and re-raises) and the review-card hand-off.
+        other exception closes it and re-raises) and the review-card hand-off. ``goal_lifted`` (a goal's grant lifted
+        the call, read by ``_tool_loop``): the first-use hook is told right before the dispatch.
 
         Lifted UNCHANGED out of ``_tool_loop`` (F099 2d) so that the approved-action path
         (``execute_single_call``) runs the very same code: one definition of the ledger invariants. The
@@ -4029,6 +4090,8 @@ class AgentRunner:
                 result_text, is_error = suppressed.text, suppressed.is_error
             else:
                 keyed = send_key is not None
+                if goal_lifted:  # F115: past every check that could still refuse it
+                    self._goal_note_use(ctx, tool_name)
                 self._note_ingress(session_id, tool_name, tool_input)
                 # @codex P1 on e8841b2: in-flight heartbeat
                 # for tool calls that may exceed stall_timeout.
@@ -4576,6 +4639,9 @@ class AgentRunner:
 
                     # Harness: was this tool offered this iteration, and may this context use it?
                     refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
+                    # F115: whether a goal's grant lifted it, read with no await since the authorization; the
+                    # first-use hook is told at the dispatch (``_dispatch_with_ledger``).
+                    goal_lifted = refusal is None and self._goal_lift(ctx, tool_name)
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
@@ -4703,6 +4769,7 @@ class AgentRunner:
                                 turn_number=turn_number,
                                 is_background=is_background,
                                 turn_id=turn_id,
+                                goal_lifted=goal_lifted,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             call_images = dispatched.images

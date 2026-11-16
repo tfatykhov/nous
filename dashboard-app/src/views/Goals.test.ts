@@ -57,6 +57,8 @@ function install(goals: GoalDetail[] = [A, B, C]) {
     else if (handlers[`${method} ${path}`]) answer = handlers[`${method} ${path}`](body);
     else if (method === 'GET' && path.split('/').length === 3 && ref in details) answer = [200, details[ref]];
     else if (method === 'GET' && path.split('/').length === 3) answer = [404, { error: `no goal ${ref}` }];
+    // F115: a server with per-goal tools off, as the route answers then.
+    else if (method === 'GET' && path.split('/').length === 4 && path.endsWith('/tools')) answer = [200, { enabled: true, grants_enabled: false }];
     else answer = [500, { error: `unexpected ${method} ${url}` }];
     const [status, payload] = await answer;
     if (status === 0) throw new TypeError('Failed to fetch');

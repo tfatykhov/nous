@@ -346,3 +346,53 @@ describe('a lost answer is replaced only on evidence of that change', () => {
     expect(changeLanded(lostOf('deadline', draft, { days: 4 }), { ...draft, deadline_days: 11 })).toBe(false);
   });
 });
+
+describe('the tools a goal may use without asking (F115)', () => {
+  it('groups the tools that can be allowed: the built-in ones, then each server by name', () => {
+    const built = { tool: 'send_email', server_name: null, server_host: null } as unknown as goals.GoalToolOption;
+    const notes = { tool: 'mcp__notes__a', server_name: 'notes', server_host: 'notes.example.com' } as unknown as goals.GoalToolOption;
+    const alpha = { tool: 'mcp__alpha__b', server_name: 'alpha', server_host: 'alpha.example.com' } as unknown as goals.GoalToolOption;
+    const groups = goals.toolGroups([notes, built, alpha]);
+    expect(groups.map((g) => [g.words, g.rows.map((r) => r.tool)])).toEqual([
+      ['Reaching outside', ['send_email']],
+      ['Tools from other servers: alpha (alpha.example.com)', ['mcp__alpha__b']],
+      ['Tools from other servers: notes (notes.example.com)', ['mcp__notes__a']],
+    ]);
+    expect(goals.toolGroups([])).toEqual([]);
+  });
+
+  it('sends the confirmation, an MCP tool its server id, and a removal an empty object', async () => {
+    const sent: [string, string, unknown][] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+      sent.push([init.method ?? 'GET', url, init.body === undefined ? undefined : JSON.parse(String(init.body))]);
+      return new Response(JSON.stringify({ enabled: true, grants_enabled: true, changed: true }), { status: 200 });
+    }));
+    await goals.allowTool('G-0001', { tool: 'send_email', server_id: null, identity: null } as unknown as goals.GoalToolOption);
+    await goals.allowTool('G-0001', { tool: 'mcp__notes__a', server_id: 'abc', identity: 'f00d' } as unknown as goals.GoalToolOption);
+    await goals.removeTool('G-0001', 'send_email');
+    await goals.goalTools('G 1');
+    expect(sent).toEqual([
+      ['PUT', '/goals/G-0001/tools/send_email', { confirm: true }],
+      ['PUT', '/goals/G-0001/tools/mcp__notes__a', { confirm: true, identity: 'f00d' }],
+      ['DELETE', '/goals/G-0001/tools/send_email', {}],
+      ['GET', '/goals/G%201/tools', undefined],
+    ]);
+  });
+
+  it("a refused tool change is the server's sentence as sent", () => {
+    const err = Object.assign(new Error('x'), { status: 409, body: { error: 'send_email is locked by the server and cannot be given to a goal.' } });
+    expect(goals.toolRefusalText(err)).toBe('send_email is locked by the server and cannot be given to a goal.');
+    expect(goals.toolRefusalText(Object.assign(new Error('x'), { status: undefined }))).toBe(goals.NO_ANSWER_TEXT);
+  });
+
+  it('the words have no glyph standing for a word', () => {
+    for (const text of [
+      goals.TOOLS_TITLE, goals.TOOLS_NONE_TEXT, goals.TOOLS_ADD_TITLE, goals.TOOLS_NOT_USED_TEXT, goals.TOOL_ALLOWED_TEXT,
+      goals.TOOL_ALREADY_ALLOWED_TEXT, goals.TOOL_REMOVED_TEXT, goals.TOOL_ALREADY_REMOVED_TEXT, goals.TOOL_RELOAD_TEXT,
+      goals.toolsLimitText(20), goals.toolAllowedOnText('2026-11-15T10:00:00+00:00'),
+    ]) {
+      expect(text).not.toMatch(GLYPH);
+      expect(text).toMatch(/[.]$|^[A-Z][a-z]/);
+    }
+  });
+});

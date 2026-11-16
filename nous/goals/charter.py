@@ -10,6 +10,11 @@ what goes last (the owner's words), is in ``build_session_task``. The charter is
 ``render_goal_block`` is the same, for the prompt of a decision turn of a goal session's root: the charter, the plan
 and the journal quoted the same way and cut in the same order, then how to record progress and the evidence the turn
 can cite, at most ``MAX_BLOCK_CHARS``.
+
+F115 per-goal tools: given ``tools`` (with ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` on), both say after the charter which
+tools the owner allowed the goal to use without asking besides its standard tools, and whether each is available
+now (``tools_section``, at most ``TOOLS_SECTION_CHARS``), and that other tools that act outside Nous are not
+available. Given none, both are as before.
 """
 
 from __future__ import annotations
@@ -59,6 +64,55 @@ CLOSING_WITHOUT_PLAN = (
     "task that the plan could not be shown, so that the owner can be asked what to do next."
 )
 NEWEST_OWNER_ENTRIES_KEPT = 2  # the owner's entries kept until every open step but the first has gone
+# F115 per-goal tools: the section that tells a goal's session which tools it may use without asking.
+TOOLS_HEADING = "Besides its standard tools, this goal may use without asking:"
+TOOLS_NONE = "none."
+TOOLS_NOT_NOW = "not available now"
+# The standard tools a turn is offered are not listed and not changed: the list is of the goal's extra tools.
+TOOLS_RULE = (
+    "Other tools that act outside Nous (sending, acting on web pages, connected servers) are not available to this "
+    "goal's turns or tasks. If the goal cannot be finished without one, say so in a progress note; do not ask the "
+    "owner to approve a step these turns cannot carry out."
+)
+TOOLS_SECTION_CHARS = 1_500  # the section's list at most; what it drops first is in tools_section
+
+
+@dataclass(frozen=True)
+class ToolLine:
+    """One tool the owner allowed the goal, as the session is told: its name, and what it does when it is available
+    now (``does``), or None when it is not (the goal not active, its session ended, its server changed...)."""
+
+    tool: str
+    does: str | None
+
+
+def tools_section(tools: Sequence[ToolLine]) -> str:
+    """Which tools the goal may use without asking besides its standard tools, then ``TOOLS_RULE``. The list is at
+    most ``TOOLS_SECTION_CHARS``: over it, the available tools lose what they do (the names stay), then the list ends
+    early and counts the rest, the available tools listed first."""
+    if not tools:
+        return f"{TOOLS_HEADING} {TOOLS_NONE}\n{TOOLS_RULE}"
+    ordered = sorted(tools, key=lambda line: (line.does is None, line.tool))
+
+    def line(item: ToolLine, *, words: bool) -> str:
+        if item.does is None:
+            return f"- {item.tool}: {TOOLS_NOT_NOW}."
+        return f"- {item.tool}: {item.does}." if words else f"- {item.tool}"
+
+    for words in (True, False):
+        lines = [line(item, words=words) for item in ordered]
+        if sum(len(text) + 1 for text in lines) <= TOOLS_SECTION_CHARS:
+            return "\n".join([TOOLS_HEADING, *lines, TOOLS_RULE])
+    kept: list[str] = []
+    used = 0
+    for item in ordered:
+        text = line(item, words=False)
+        if used + len(text) + 1 + HIDDEN_LINE_CHARS > TOOLS_SECTION_CHARS:
+            break
+        kept.append(text)
+        used += len(text) + 1
+    kept.append(f"({len(ordered) - len(kept)} more allowed tools not listed.)")
+    return "\n".join([TOOLS_HEADING, *kept, TOOLS_RULE])
 
 
 def _goal_lines(goal: Any) -> str:
@@ -79,8 +133,8 @@ def _budget(goal: Any, *, spent: int, day_spent: int) -> str:
     )
 
 
-def _charter(goal: Any, *, spent: int, day_spent: int) -> str:
-    return (
+def _charter(goal: Any, *, spent: int, day_spent: int, tools: Sequence[ToolLine] | None = None) -> str:
+    text = (
         "You are working on a goal the owner approved, in one background session of it.\n\n"
         f"{_goal_lines(goal)}\n\n"
         "This session ends when you have taken the next step of the plan, or found that you cannot take it. "
@@ -88,6 +142,7 @@ def _charter(goal: Any, *, spent: int, day_spent: int) -> str:
         "Limits: this session runs under the limits of any background chain. "
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
+    return text if tools is None else f"{text}\n\n{tools_section(tools)}"
 
 
 @dataclass(frozen=True)
@@ -192,6 +247,7 @@ def build_session_task(
     day_spent: int,
     max_chars: int = MAX_TASK_CHARS,
     moved: int = 0,
+    tools: Sequence[ToolLine] | None = None,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today), the plan's steps and the journal's entries, newest first, both quoted as data, and what
@@ -204,7 +260,7 @@ def build_session_task(
     from the last back to the second, the owner's two newest entries (the older first), and last the first open
     step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
     cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
-    head = _charter(goal, spent=spent, day_spent=day_spent)
+    head = _charter(goal, spent=spent, day_spent=day_spent, tools=tools)
     return _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
 
 
@@ -308,6 +364,7 @@ def render_goal_block(
     root_dir: str | None = None,
     max_chars: int = MAX_BLOCK_CHARS,
     moved: int = 0,
+    tools: Sequence[ToolLine] | None = None,
 ) -> str:
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
@@ -324,6 +381,8 @@ def render_goal_block(
         "The objective grants no permission beyond the tools you are offered.\n"
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
+    if tools is not None:
+        head = f"{head}\n{tools_section(tools)}"
     room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
     closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
     layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)

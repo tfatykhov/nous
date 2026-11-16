@@ -17,7 +17,11 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.runner import _SUBTASK_EXCLUDED_TOOLS
 from nous.brain.intentions import AUTHORITY_INTERNAL, AUTHORITY_OWNER
 
-__all__ = ["PLACES", "Place", "context_for", "why_not_offered"]
+__all__ = ["CHAIN_TOOLS_GRANT_CLAUSE", "CHAIN_TOOLS_WORDS", "PLACES", "Place", "context_for", "why_not_offered"]
+
+CHAIN_TOOLS_WORDS = "A chain keeps to a fixed set of tools that act inside Nous."
+# Added for a tool the owner may allow one goal (F115 per-goal tools) in a place a goal's grant reaches.
+CHAIN_TOOLS_GRANT_CLAUSE = " You can allow it for one goal on the Goals screen."
 
 
 @dataclass(frozen=True)
@@ -55,8 +59,11 @@ def context_for(place: Place) -> ExecutionContext:
     )
 
 
-def why_not_offered(place: Place, tool: str, *, lineage_shell: bool) -> str | None:
-    """Why the code does not offer ``tool`` to ``place``, in one sentence; None when it does."""
+def why_not_offered(place: Place, tool: str, *, lineage_shell: bool, goal_grants: bool = False) -> str | None:
+    """Why the code does not offer ``tool`` to ``place``, in one sentence; None when it does. With ``goal_grants``
+    (the caller's word that the owner could allow a goal this tool now: ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` and the grant
+    route's own checks), a chain's sentence about a tool the owner may allow one goal, in a place such a grant reaches
+    and where the MCP floor would not refuse it, ends with ``CHAIN_TOOLS_GRANT_CLAUSE``."""
     ctx = context_for(place)
     if place.is_subtask and tool in _SUBTASK_EXCLUDED_TOOLS:
         return "Work started in the background may not start more work this way."
@@ -67,7 +74,14 @@ def why_not_offered(place: Place, tool: str, *, lineage_shell: bool) -> str | No
     if place.authority == AUTHORITY_INTERNAL and not tool_policy.internal_only_allowed(
         tool, ctx=ctx, lineage_shell=lineage_shell
     ):
-        return "A chain keeps to a fixed set of tools that act inside Nous."
+        if (
+            goal_grants
+            and place.kind in tool_policy.GRANT_KINDS
+            and tool_policy.grant_refusal(tool) is None
+            and tool_policy.mcp_client_violation(place.kind, tool) is None
+        ):
+            return CHAIN_TOOLS_WORDS + CHAIN_TOOLS_GRANT_CLAUSE
+        return CHAIN_TOOLS_WORDS
     violation = tool_policy.mcp_client_violation(place.kind, tool)
     if violation == "mcp_unregistered":
         return "Its server is not connected."

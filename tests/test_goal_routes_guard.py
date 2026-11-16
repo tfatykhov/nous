@@ -28,12 +28,16 @@ READS = {
     "/goals": {"enabled": False, "goals": []},
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
+    "/goals/G-0001/tools": {"enabled": False},
 }
 GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("POST", "/goals"),
     ("GET", "/goals/options"),
     ("GET", "/goals/{ref}"),
+    ("GET", "/goals/{ref}/tools"),
+    ("PUT", "/goals/{ref}/tools/{tool}"),
+    ("DELETE", "/goals/{ref}/tools/{tool}"),
     *{
         ("POST", f"/goals/{{ref}}/{name}")
         for name in (

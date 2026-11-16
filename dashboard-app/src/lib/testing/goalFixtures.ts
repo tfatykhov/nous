@@ -1,6 +1,8 @@
 // Test-only: answers of the goal routes (nous/api/goal_routes.py) in their real shape, with made-up values. The
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
-import type { GoalDetail, GoalOptions, GoalRow } from '../goals';
+import type {
+  GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords, NewGoalTools,
+} from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
 export const SPEND_NOTE =
@@ -101,3 +103,104 @@ export const DETAIL_KEYS = [
   'quiet_hours_ok', 'stall_limit', 'mode_until', 'approved_at', 'finished_at', 'created_at', 'plan', 'sessions',
   'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
 ];
+
+// F115 per-goal tools: GET /goals/{ref}/tools in its real shape (nous/api/goal_routes.py `tools_payload`), with the
+// server's own sentences (nous/goals/grants.py) and made-up ids. Refresh it when the route's answer changes.
+export const LEAD =
+  "These tools can be used without asking you, by this goal's own sessions and the work they start (chain decisions, background tasks, and workflow steps that run as tasks). A workflow's check steps are not included. Nothing else gets them.";
+export const NEVER =
+  'The shell and Python cannot be allowed here. Neither can scheduling, starting other work, or changing settings.';
+export const NOTES_SERVER_ID = '00000000-0000-4000-8000-0000000000aa';
+/** A made-up identity token, in the shape the routes send (64 hex characters). */
+export const NOTES_IDENTITY = 'a'.repeat(64);
+
+export function toolWords(tool: string, ref = 'G-0001'): GoalToolWords {
+  const words: Record<string, [string, string]> = {
+    send_email: [
+      "send email, with files this goal's work wrote, to the addresses on your email allowlist",
+      'A sent email cannot be taken back.',
+    ],
+    send_file: ["send files this goal's work wrote to your Telegram chat", 'A sent file cannot be taken back.'],
+    browser_task: [
+      'open web pages on the sites each call names, click and type',
+      'It has no logins, and it stops before a step that looks like signing in, paying, accepting terms, sending a message or deleting something.',
+    ],
+    mcp__notes__search: [
+      'use search on notes (notes.example.com)',
+      'It can do whatever that tool does there, which Nous cannot check: read, change or delete things.',
+    ],
+  };
+  const [does, note] = words[tool];
+  const mcp = tool.startsWith('mcp__');
+  return {
+    label: mcp ? 'search' : tool,
+    group: mcp ? 'other_servers' : 'reaching_outside',
+    classes: mcp ? ['Reaches outside Nous', 'Brings in outside text'] : ['Reaches outside Nous'],
+    does,
+    note,
+    says: `${does[0].toUpperCase()}${does.slice(1)}. ${note}`,
+    confirm: `Allow ${ref} to ${does} without asking you each time? ${note}`,
+    server_name: mcp ? 'notes' : null,
+    server_host: mcp ? 'notes.example.com' : null,
+    server_id: mcp ? NOTES_SERVER_ID : null,
+    identity: mcp ? NOTES_IDENTITY : null,
+    tool,
+  };
+}
+
+export function toolGrant(tool: string, over: Partial<GoalToolGrant> = {}): GoalToolGrant {
+  return { ...toolWords(tool), granted_at: '2026-11-15T10:00:00+00:00', usable: true, not_usable_why: null, ...over };
+}
+
+export function toolOption(tool: string, over: Partial<GoalToolOption> = {}): GoalToolOption {
+  return { ...toolWords(tool), blocked: null, ...over };
+}
+
+export function goalToolsAnswer(over: Partial<GoalTools> = {}): GoalTools {
+  return {
+    enabled: true,
+    grants_enabled: true,
+    can_edit: true,
+    limit: 20,
+    applies_in: LEAD,
+    never: NEVER,
+    grants: [toolGrant('send_email')],
+    available: [
+      toolOption('browser_task'),
+      toolOption('send_file', {
+        blocked: {
+          code: 'not_ready',
+          sentence: 'send_file has no Telegram chat set, so it could send to any chat a call names. Set the chat first.',
+        },
+      }),
+      toolOption('mcp__notes__search'),
+    ],
+    ...over,
+  };
+}
+
+/** GET /goals/options `tools` with the grants on: the rows for "this goal" and the one question before Create. */
+export function newGoalToolsAnswer(): NewGoalTools {
+  const forNew = (tool: string) => {
+    const words = toolWords(tool, 'this goal');
+    return { ...words, blocked: null };
+  };
+  return {
+    applies_in: LEAD,
+    never: NEVER,
+    limit: 20,
+    confirm: 'Allow this goal to use these tools without asking you each time, from its first session after you approve it?',
+    available: [
+      forNew('browser_task'),
+      forNew('send_email'),
+      {
+        ...forNew('send_file'),
+        blocked: {
+          code: 'not_ready',
+          sentence: 'send_file has no Telegram chat set, so it could send to any chat a call names. Set the chat first.',
+        },
+      },
+      forNew('mcp__notes__search'),
+    ],
+  };
+}

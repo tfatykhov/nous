@@ -100,6 +100,9 @@ services:
       - NOUS_TOOL_GUARD_ENABLED=${NOUS_TOOL_GUARD_ENABLED:-false}
       - NOUS_AUTONOMY_CEILINGS=${NOUS_AUTONOMY_CEILINGS:-}
       - NOUS_AUTONOMY_LOCKED_TOOLS=${NOUS_AUTONOMY_LOCKED_TOOLS:-}
+      # F115 per-goal tools: the owner allows one goal's background sessions to use an outward tool without asking.
+      # Lands dark. Needs NOUS_GOALS_ENABLED, NOUS_AUTONOMY_SETTINGS_ENABLED and NOUS_TOOL_GUARD_ENABLED.
+      - NOUS_GOAL_TOOL_GRANTS_ENABLED=${NOUS_GOAL_TOOL_GRANTS_ENABLED:-false}
       # F099 kill switches, both on by default: bash for internal_only turns (lineage_bash_allowed), and in it
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}

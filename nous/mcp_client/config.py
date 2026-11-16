@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -256,6 +257,9 @@ class ServerConfig(BaseModel):
     # unless the owner turns it on: an image can hold what no text check sees.
     images: bool = False
     call_timeout_seconds: int = Field(default=30, ge=1, le=600)
+    # The row's id (None for a server not read from a row): a server deleted and added again under its name has a new
+    # one. A registered tool carries it in its identity (tool_classes.McpIdentity).
+    id: uuid.UUID | None = None
 
     @field_validator("name")
     @classmethod

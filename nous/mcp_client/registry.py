@@ -80,6 +80,7 @@ class McpRegistry:
                     background=server.background,
                     images=server.images,
                     call_timeout_seconds=server.call_timeout_seconds,
+                    id=server.id,
                 )
             except ValidationError:
                 logger.warning("MCP client: server row %r does not validate; skipped", server.name)

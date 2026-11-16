@@ -1,13 +1,16 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { Button } from '../../lib/ui/button';
+  import GoalTools from './GoalTools.svelte';
   import {
     CHANNEL_HINT, DRAFT_NOTE, LIMIT_LABEL, PRESET_LABEL, PRESET_NAMES, createBody, createGoal, createProblems, formatNumber, limitFields,
-    presetLine, refusalText, type CreateForm, type GoalOptions, type NumberLimit,
+    createRefusalText, newGoalTools, presetLine, type CreateForm, type GoalOptions, type NumberLimit,
   } from '../../lib/goals';
 
   // The form that makes a draft (POST /goals). A preset's numbers come from GET /goals/options, never from here;
   // "Customise" starts from the chosen preset. The rules of a custom limit are checked before anything is sent, and
-  // the server's own sentence is shown when it refuses. What was typed stays until the draft is made.
+  // the server's own sentence is shown when it refuses. What was typed stays until the draft is made. With per-goal
+  // tools on, the tools the goal may use without asking can be chosen here too; Create then asks once for the lot.
   let { options, onCreated }: { options: GoalOptions; onCreated: (ref: string) => void } = $props();
 
   const presets = $derived(PRESET_NAMES.filter((name) => options.presets?.[name]));
@@ -22,6 +25,8 @@
     quiet_hours_ok: startLimits()?.quiet_hours_ok ?? false,
     origin_channel: '',
   });
+  let chosen = $state<string[]>([]);
+  let confirmingTools = $state(false);
   let tried = $state(false);
   let sending = $state(false);
   let refused = $state<string | null>(null);
@@ -44,17 +49,33 @@
     form.custom = !form.custom;
   }
 
+  const pick = $derived(options.tools ?? null);
+  const chosenRows = $derived((pick?.available ?? []).filter((o) => chosen.includes(o.tool)));
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     tried = true;
     refused = null;
     if (sending || createProblems(form, options).length) return;
+    if (pick && chosen.length && !confirmingTools) {
+      confirmingTools = true;
+      await tick();
+      document.getElementById('goal-new-tools-q')?.focus();
+      return;
+    }
+    await send();
+  }
+
+  async function send() {
+    if (sending) return;
+    confirmingTools = false;
     sending = true;
     try {
-      const made = await createGoal(createBody(form));
+      const tools = pick && chosen.length ? newGoalTools(chosen, pick.available) : [];
+      const made = await createGoal(tools.length ? { ...createBody(form), tools } : createBody(form));
       onCreated(made.ref);
     } catch (err) {
-      refused = refusalText(err);
+      refused = createRefusalText(err);
     } finally {
       sending = false;
     }
@@ -114,6 +135,10 @@
       {/if}
     </div>
 
+    {#if pick}
+      <GoalTools {pick} bind:chosen disabled={sending} />
+    {/if}
+
     <div class="field">
       <label for="goal-new-channel">Channel{options.has_default_channel ? ' (optional)' : ''}</label>
       <input id="goal-new-channel" bind:value={form.origin_channel} autocomplete="off" spellcheck="false" maxlength={options.bounds?.channel} disabled={sending}
@@ -124,11 +149,23 @@
     {#if problems.length}
       <ul class="problems" role="alert">{#each problems as p (p)}<li>{p}</li>{/each}</ul>
     {/if}
-    <div class="actions">
-      <Button type="submit" id="goal-new-submit" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending}>
-        {sending ? 'Creating…' : 'Create draft'}
-      </Button>
-    </div>
+    {#if confirmingTools && pick}
+      <div class="confirm" role="group" aria-label="Confirm: the tools of the new goal">
+        <p id="goal-new-tools-q" tabindex="-1">{pick.confirm}</p>
+        <ul class="chosen">{#each chosenRows as row (row.tool)}<li><span class="name">{row.label}</span> {row.says}</li>{/each}</ul>
+        <div class="actions">
+          <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending} onclick={() => void send()}>Yes, create</Button>
+          <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending}
+            onclick={() => { confirmingTools = false; }}>No</Button>
+        </div>
+      </div>
+    {:else}
+      <div class="actions">
+        <Button type="submit" id="goal-new-submit" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending}>
+          {sending ? 'Creating…' : 'Create draft'}
+        </Button>
+      </div>
+    {/if}
     {#if refused}<p class="result-err" role="alert">{refused}</p>{/if}
   </form>
 </section>
@@ -167,6 +204,12 @@
   .problems { margin: 0; padding-left: 1.25rem; list-style: disc; font-size: 0.8125rem; color: var(--warn-text); }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .result-err { font-size: 0.8125rem; color: var(--warn-text); margin: 0; overflow-wrap: anywhere; }
+  .confirm { padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
+  .confirm p { margin: 0; overflow-wrap: anywhere; }
+  .confirm p:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+  .confirm .actions { margin-top: 0.5rem; }
+  .chosen { margin: 0.375rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; overflow-wrap: anywhere; }
+  .chosen .name { font-family: var(--font-mono); font-weight: 600; }
   @media (max-width: 768px) {
     .cards, .limits { grid-template-columns: minmax(0, 1fr); }
     .size, .check, .disclose { min-height: 2.75rem; }

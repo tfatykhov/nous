@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -49,6 +49,9 @@ from nous.goals.store import (
 )
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalJournal, GoalSession
+
+if TYPE_CHECKING:
+    from nous.goals.grants import GoalToolGrants
 
 logger = logging.getLogger(__name__)
 
@@ -153,12 +156,22 @@ def _one_line(text: str) -> str:
 
 
 class GoalTools:
-    """The two executors of one session's turn (``make_goal_tools``)."""
+    """The two executors of one session's turn (``make_goal_tools``). ``tool_grants`` is the runner's view of the
+    goals' tool grants (F115 per-goal tools), read again for the goal right after a done claim pauses it."""
 
-    def __init__(self, database: Database, settings: Any, store: GoalStore, ref: GoalSessionRef) -> None:
+    def __init__(
+        self,
+        database: Database,
+        settings: Any,
+        store: GoalStore,
+        ref: GoalSessionRef,
+        *,
+        tool_grants: GoalToolGrants | None = None,
+    ) -> None:
         self._db = database
         self._settings = settings
         self._store = store
+        self._tool_grants = tool_grants
         self._agent_id = store.agent_id
         self._ref = ref
         self._scope = evidence.Scope(
@@ -243,6 +256,9 @@ class GoalTools:
                 await s.flush()  # the claim's seq keys the owner's message: one message per claim
                 waiting, told = await self._wait_for_owner(s, goal, row, claim_seq=claim.seq)
             await s.commit()
+        if waiting and self._tool_grants is not None:
+            # F115: the paused goal's tools stop for the rest of this turn too; a failed read clears the view.
+            await self._tool_grants.refresh_goal(goal.id)
         said = "Noted" + (f" (clipped to {JOURNAL_MAX_CHARS} characters)" if clipped else "") + "."
         if ended:
             said += f" Session {n} has ended; the note is kept under it."
@@ -559,12 +575,17 @@ def _entries(steps: Any) -> list[dict[str, Any]]:
 
 
 def make_goal_tools(
-    database: Database, settings: Any, store: GoalStore, ref: GoalSessionRef
+    database: Database,
+    settings: Any,
+    store: GoalStore,
+    ref: GoalSessionRef,
+    *,
+    tool_grants: GoalToolGrants | None = None,
 ) -> dict[str, tuple[dict[str, Any], Executor]]:
     """The turn's goal tools in the ``extra_tools`` shape: ``{name: (schema, executor)}``. The F108 ``reason`` the
     runner adds to the offered schema is removed before the call; an executor ignores any argument it does not
     know."""
-    tools = GoalTools(database, settings, store, ref)
+    tools = GoalTools(database, settings, store, ref, tool_grants=tool_grants)
     return {
         "goal_note": (GOAL_NOTE_SCHEMA, tools.goal_note),
         "goal_plan": (GOAL_PLAN_SCHEMA, tools.goal_plan),

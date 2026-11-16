@@ -99,6 +99,9 @@ INTERNAL_ONLY_SPAWN_TOOLS: frozenset[str] = frozenset({"spawn_task", "dag_create
 INTERNAL_ONLY_EXTRA_TOOLS: frozenset[str] = frozenset({"resolve_intention", "propose_action", "goal_note", "goal_plan"})
 # Per-call rules (path and lineage), evaluated at dispatch.
 INTERNAL_ONLY_CHECKED_TOOLS: frozenset[str] = frozenset({"write_file", "cancel_task"})
+# Per-goal tool grants: the kinds of turn a goal session's own lineage runs in. A tool the owner allowed for one goal
+# can be lifted only in a turn of these kinds (nous/goals/grants.py decides which turn).
+GRANT_KINDS: frozenset[str] = frozenset({"continuation", "subtask", "dag_node"})
 # Logged with their root when called from a lineage (spec section 9).
 INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search"})
 
@@ -459,16 +462,45 @@ _RUNNER_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]*")
 _RUNNER_JOB_ID = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{8}")
 
 
-def internal_only_allowed(name: str, *, ctx: ExecutionContext, lineage_shell: bool = False) -> bool:
+def grant_refusal(name: str) -> str | None:
+    """None when the owner may allow a goal to use ``name`` without asking; else why not: ``unclassified`` (nobody
+    classified it), ``harness`` (a turn's own decision or report tool), ``never`` (on the internal_only denylist, or a
+    chain's spawn tool), ``spawns`` (it starts other work) or ``not_outward`` (its class does not reach outside Nous,
+    so an internal_only turn may use it already, or never). Exactly the tools whose class is external or
+    irreversible pass: send_file, send_email, browser_task and every MCP client tool."""
+    cls = tool_class(name)
+    if cls is None:
+        return "unclassified"
+    if name in INTERNAL_ONLY_EXTRA_TOOLS or name == "submit_final_report":
+        return "harness"
+    if name in INTERNAL_ONLY_DENYLIST or name in INTERNAL_ONLY_SPAWN_TOOLS:
+        return "never"
+    if cls.spawns:
+        return "spawns"
+    if cls.side_effect not in ("external", "irreversible"):
+        return "not_outward"
+    return None
+
+
+def _lift(name: str, lifted: bool) -> bool:
+    """Whether ``lifted`` applies to ``name``: only to a tool a goal may be given (``grant_refusal``)."""
+    return lifted and grant_refusal(name) is None
+
+
+def internal_only_allowed(
+    name: str, *, ctx: ExecutionContext, lineage_shell: bool = False, lifted: bool = False
+) -> bool:
     """Whether an internal_only context may be OFFERED ``name``.
 
     Fails closed on an unclassified tool: a tool nobody classified is not
     allowed, so a new tool is denied to a lineage until someone adds it on purpose.
     ``lineage_shell`` (``NOUS_F099_LINEAGE_SHELL``) lifts the denylist for ``bash``
-    alone; its calls are then held to ``lineage_bash_allowed``.
+    alone; its calls are then held to ``lineage_bash_allowed``. ``lifted`` (the owner allowed this tool for the
+    turn's goal, ``nous/goals/grants.py``) skips the class rule for a tool ``grant_refusal`` accepts; the other
+    rules still apply.
     """
     cls = tool_class(name)
-    if cls is None or cls.side_effect not in ("none", "write"):
+    if cls is None or (cls.side_effect not in ("none", "write") and not _lift(name, lifted)):
         return False
     if name == "bash" and lineage_shell:
         return True
@@ -1635,6 +1667,98 @@ def lineage_bash_allowed(
         return False
 
 
+def _goal_root_dir(ctx: ExecutionContext, workspace_dir: str) -> Path | None:
+    """The turn's root's own directory, ``<workspace_dir>/intentions/<root_id>``, with the workspace resolved."""
+    if ctx.root_intention_id is None:
+        return None
+    return Path(workspace_dir).resolve() / "intentions" / str(ctx.root_intention_id)
+
+
+def _root_file(root_dir: Path, value: object) -> bool:
+    """``value`` names an existing regular file under ``root_dir`` by its full path, with no ``..`` step and no
+    symbolic link anywhere on the way. send_file and send_email open the path as given (a relative one against the
+    process's working directory), so these are the conditions under which the file checked here is the file read."""
+    if not isinstance(value, str) or not value or "\x00" in value:  # Windows' realpath drops a NUL (gh-106242)
+        return False
+    given = Path(value)
+    if not given.is_absolute() or ".." in given.parts:
+        return False
+    try:
+        spelled = Path(os.path.normpath(value))
+        if spelled == root_dir or not spelled.is_relative_to(root_dir):
+            return False
+        real = spelled.resolve(strict=True)
+        return real == spelled and real.is_file()  # a symbolic link on the way resolves elsewhere
+    except (OSError, ValueError, RuntimeError):  # missing, unresolvable, a link loop
+        return False
+
+
+def _attachment_paths(value: object) -> list[str] | None:
+    """The paths send_email attaches, read the way it reads them (``email_tools._normalize_paths``: one string or a
+    list, each stripped, empty ones skipped), or None for a value it would read some other way."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else value
+    if not isinstance(items, (list, tuple)):
+        return None
+    paths: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        if not isinstance(item, str):
+            return None
+        if item.strip():
+            paths.append(item.strip())
+    return paths
+
+
+def granted_call_violation(
+    ctx: ExecutionContext, name: str, tool_input: Mapping[str, Any], workspace_dir: str
+) -> str | None:
+    """The per-call rules of a call a goal's grant lifted (``internal_only_call_violation`` asks only then): the
+    files send_file sends and send_email attaches are files under the turn's root's own directory.
+
+    ``"grant_cleanup"``: send_file with ``cleanup`` set (it would delete the file). ``"grant_file"``: send_file's
+    ``file_path``, or any of send_email's ``attachments``, is not such a file (``_root_file``). The other tools a goal
+    may be given read no file of the server's: browser_task cannot upload one, and an MCP tool's arguments go to
+    its server."""
+    if name == "send_file":
+        if tool_input.get("cleanup") not in (None, False):
+            return "grant_cleanup"
+        paths: Sequence[object] | None = (tool_input.get("file_path"),)
+    elif name == "send_email":
+        paths = _attachment_paths(tool_input.get("attachments"))
+        if paths == []:
+            return None
+    else:
+        return None
+    root_dir = _goal_root_dir(ctx, workspace_dir)
+    if paths is None or root_dir is None or not all(_root_file(root_dir, path) for path in paths):
+        return "grant_file"
+    return None
+
+
+GRANT_CLEANUP_HINT = "With this goal's grant, send_file may not delete the file it sends: leave cleanup out."
+
+
+def granted_call_hint(ctx: ExecutionContext, name: str, workspace_dir: str, code: str) -> str:
+    """What a granted call may do, appended to its ``grant_file`` or ``grant_cleanup`` refusal."""
+    if code == "grant_cleanup":
+        return GRANT_CLEANUP_HINT
+    root_dir = _goal_root_dir(ctx, workspace_dir)
+    if root_dir is None:
+        return f"With this goal's grant, {name} may send no file in this turn: it has no root intention."
+    if name == "send_email":
+        return (
+            f"With this goal's grant, send_email attaches only regular files under {root_dir}/, each named by its "
+            "full path, with no symbolic link and no '..' in it."
+        )
+    return (
+        f"With this goal's grant, send_file sends only a regular file under {root_dir}/, named by its full path, "
+        "with no symbolic link and no '..' in it."
+    )
+
+
 def internal_only_call_violation(
     ctx: ExecutionContext,
     name: str,
@@ -1644,11 +1768,14 @@ def internal_only_call_violation(
     lineage_shell: bool = False,
     build_commands: bool = False,
     extra_write_dirs: Sequence[str] = (),
+    lifted: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
     ``"external"``: ``classify_side_effect`` rates the call external (or
-    irreversible), such as a URL in run_python; for bash, the command is not on
+    irreversible), such as a URL in run_python; not returned when ``lifted`` applies to the tool (the owner allowed
+    it for the turn's goal, see ``internal_only_allowed``), whose call is held to ``granted_call_violation``
+    instead (``"grant_file"``, ``"grant_cleanup"``); for bash, the command is not on
     the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
     ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
@@ -1667,8 +1794,11 @@ def internal_only_call_violation(
         ):
             return "external"
         return None
-    if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
+    lift = _lift(name, lifted)
+    if not lift and classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
         return "external"
+    if lift and (granted := granted_call_violation(ctx, name, tool_input, workspace_dir)) is not None:
+        return granted
     if name == "write_file" and not _write_path_allowed(
         ctx, tool_input, workspace_dir, lineage_shell=lineage_shell, extra_write_dirs=extra_write_dirs
     ):
@@ -1960,8 +2090,9 @@ def heartbeat_resolve_violation(tool_name: str) -> bool:
 # runs both in `warn`). "always": a chat with the owner, and one call the owner already approved. "never": an inbound
 # MCP caller (another agent, with the owner's authority but nobody watching). "background": every turn nobody
 # watches, and only for a tool whose server the owner marked available to background work. A kind not listed here
-# is refused. The other floors still apply first: a heartbeat_triage turn may not act outward and an internal_only
-# turn may not call an external tool, so neither ever reaches an MCP tool.
+# is refused. The other floors still apply first: a heartbeat_triage turn may not act outward, so it never reaches an
+# MCP tool, and an internal_only turn may not call an external tool unless the owner allowed that tool for the turn's
+# goal (``lifted``); this floor then applies to it as to any background turn.
 MCP_CLIENT_KIND_RULES: Mapping[str, str] = MappingProxyType(
     {
         "interactive": "always",
@@ -2041,13 +2172,15 @@ def evaluate(
     *,
     workspace_dir: str | None = None,
     extra_write_dirs: Sequence[str] = (),
+    lifted: bool = False,
 ) -> str | None:
     """None if ``ctx`` may make this call; otherwise the violation code:
     ``unclassified``, ``undeclared``, ``level:<level>``, ``spawn``, ``reenable``.
 
     With ``workspace_dir``, an internal_only bash call on the lineage allowlist (with ``extra_write_dirs``,
     ``NOUS_F099_LINEAGE_WRITE_DIRS``) is judged at ``write``: the read-only gh calls it permits are ``external``
-    only to the classifier, and a continuation's row is local."""
+    only to the classifier, and a continuation's row is local. ``lifted`` (the owner allowed the tool for the turn's
+    goal, see ``internal_only_allowed``) skips the level rule alone for a tool ``grant_refusal`` accepts."""
     if ctx.kind in FOREGROUND_KINDS:
         return None
     policy = CONTEXT_POLICY[ctx.kind]
@@ -2068,7 +2201,7 @@ def evaluate(
         )
     ):
         level = "write"
-    if level not in policy.levels:
+    if level not in policy.levels and not _lift(tool_name, lifted):
         return f"level:{level}"
     # Phase 2.8: check undoability BEFORE the spawn gate so that a tool that
     # both spawns and lacks a compensator (e.g. dag_create) returns
