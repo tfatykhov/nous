@@ -104,14 +104,6 @@
     return () => clearInterval(reading);
   });
 
-  // A device revoked elsewhere takes its open question with it.
-  $effect(() => {
-    const ids = live.map((d) => d.id);
-    untrack(() => {
-      if (confirming && !ids.includes(confirming)) confirming = null;
-    });
-  });
-
   const byId = (id: string) => document.getElementById(id);
 
   async function pair(e: SubmitEvent) {
