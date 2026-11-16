@@ -552,6 +552,7 @@ class ToolDispatcher:
         outcome: CallOutcome | None = None,
         turn_id: UUID | None = None,
         stream: bool = False,
+        turn_epoch: int | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -574,6 +575,12 @@ class ToolDispatcher:
 
         stream: True when ``stream_chat`` dispatches the call (F111 PR B1:
         ``commit`` stamps a streamed chat turn's row ``chat_stream``).
+
+        turn_epoch: the halt epoch of the turn making the call (Goals PR 0c), passed
+        explicitly as ``turn_number`` is: a ContextVar set inside ``stream_chat`` does
+        not reach the task it dispatches in. None reads ``background_halt.TURN_EPOCH``.
+        The halt is checked with it right before the handler starts, and a handler that
+        awaits before its own action reads it through ``background_halt.call_refused``.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -758,9 +765,17 @@ class ToolDispatcher:
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
+            epoch = turn_epoch if turn_epoch is not None else background_halt.TURN_EPOCH.get()
+            if background_halt.current().refuses(ctx.kind, session_id, epoch):
+                # Goals PR 0c: the last check before the handler starts, with no await between the two. The runner
+                # reads the code on the outcome and closes the call as refused.
+                logger.info("Background halt: refused %s at the dispatcher in a %s turn", name, ctx.kind)
+                if outcome is not None:
+                    outcome.refused_by = background_halt.REFUSAL_CODE
+                return background_halt.HALTED_TOOL_TEXT, True
             token = _outcome_var.set(outcome)
             # Goals PR 0c: the call's scope, for a handler that checks the halt at its own action.
-            scope_token = background_halt.CALL_SCOPE.set((ctx.kind, session_id, background_halt.TURN_EPOCH.get()))
+            scope_token = background_halt.CALL_SCOPE.set((ctx.kind, session_id, epoch))
             try:
                 result = await handler(**args)  # P0-6: **kwargs unpacking
             finally:

@@ -513,8 +513,15 @@ async def test_a_background_turns_inline_run_keeps_its_epoch_after_a_halt_and_a_
     halt = _install()
     env = await runner_env(subtask_hardening_enabled=False)  # no model step: the inline run makes no model call
     epoch = halt.epoch
-    await halt.halt(actor="t", surface="dashboard")
-    assert (await halt.resume(actor="t", via="dashboard")).changed
+    create = env.heart.subtasks.create
+
+    async def create_while_a_halt_and_a_resume_land(*args, **kwargs):  # after the dispatcher's own check
+        row = await create(*args, **kwargs)
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return row
+
+    env.heart.subtasks.create = create_while_a_halt_and_a_resume_land
     background = ExecutionContext(kind="background", session_id="heartbeat-1")
     with background_halt.epoch_scope(epoch):  # the background turn that spawns started before the halt
         text, is_error = await env.dispatcher.dispatch(
@@ -632,6 +639,119 @@ async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_t
     closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
     assert calls["n"] == 1  # and the loop made no further model call
     _assert_recorded_once_as_refused(runner._ledgers["claude-job-4"], runner._tool_call_recorder)
+
+
+# ---- the dispatcher's own check, and the epoch it is handed ------------------------------------------------------
+
+
+def _halt_now(halt: BackgroundHalt) -> None:
+    """Run a halt to its end inside the caller's synchronous code (with no store, nothing in it awaits)."""
+    step = halt.halt(actor="t", surface="dashboard")
+    with pytest.raises(StopIteration):
+        step.send(None)
+
+
+def _real_send_email(ran: list) -> ToolDispatcher:
+    async def send_email(**kwargs):
+        ran.append(kwargs)
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    dispatcher = ToolDispatcher()
+    dispatcher.register("send_email", send_email, {"type": "object", "properties": {"to": {"type": "string"}}})
+    return dispatcher
+
+
+async def test_a_halt_landing_after_the_tool_loops_recheck_is_refused_by_the_dispatcher():
+    """The halt lands after the loop's own check at the dispatch (in the ingress note, the last step before the
+    dispatcher is called): the dispatcher refuses the call before its handler starts, and the loop closes it as
+    refused."""
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    halt = _install()
+    r, _d = _runner(["send_email"])
+    entry_id = uuid.uuid4()
+    r._open_for_call = AsyncMock(return_value=(entry_id, None, None))
+    r._capture_compensation_snapshot = AsyncMock(return_value=False)
+    closed = r._ledger_close = AsyncMock()
+    ran: list = []
+    r._dispatcher.dispatch = _real_send_email(ran).dispatch
+    r._note_ingress = lambda *args: _halt_now(halt)
+    r._call_api = _one_send_then_text
+    r._tool_call_recorder = MagicMock()
+    ledger = ExecutionLedger(session_id="subtask-1")
+    ctx = ExecutionContext(kind="subtask", session_id="subtask-1")
+    text, results, *_ = await _run_loop(r, is_background=True, context=ctx, ledger=ledger)
+    assert halt.halted and ran == []  # the handler never started
+    assert results[0].error == background_halt.HALTED_TOOL_TEXT and text == background_halt.HALT_TURN_TEXT
+    closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
+    _assert_recorded_once_as_refused(ledger, r._tool_call_recorder)
+
+
+async def test_a_halt_landing_after_the_streams_recheck_is_refused_by_the_dispatcher():
+    """The same on the streaming path, where the dispatch runs in a task of its own one loop turn after the check."""
+    halt = _install()
+    runner = _send_stream_runner()
+    entry_id = uuid.uuid4()
+    runner._open_for_call = AsyncMock(return_value=(entry_id, None, None))
+    runner._capture_compensation_snapshot = AsyncMock(return_value=False)
+    closed = runner._ledger_close = AsyncMock()
+    ran: list = []
+    runner._dispatcher.dispatch = _real_send_email(ran).dispatch
+    runner._note_ingress = lambda *args: _halt_now(halt)
+    calls = {"n": 0}
+    runner._call_api_stream = MagicMock(side_effect=_one_streamed_send_then_text(calls))
+    await _pump(runner.stream_chat("claude-job-5", "send it"))
+    assert halt.halted and ran == [] and calls["n"] == 1
+    closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
+    _assert_recorded_once_as_refused(runner._ledgers["claude-job-5"], runner._tool_call_recorder)
+
+
+async def test_a_tool_loop_calls_scope_carries_its_turns_epoch():
+    """The tool loop hands its turn's epoch to the dispatcher too: a handler that awaits while a halt and a resume
+    land reads its call as refused."""
+    halt = _install()
+    seen: list[bool] = []
+
+    async def handler(**kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        await halt.resume(actor="t", via="dashboard")
+        seen.append(background_halt.call_refused())
+        return {"content": [{"type": "text", "text": "found"}]}
+
+    r, _d = _runner(["recall_deep"])
+    dispatcher = ToolDispatcher()
+    dispatcher.register("recall_deep", handler, {"type": "object", "properties": {"q": {"type": "string"}}})
+    r._dispatcher.dispatch = dispatcher.dispatch
+    r._call_api, _calls = _two_calls_then("done")
+    ctx = ExecutionContext(kind="subtask", session_id="subtask-7")
+    await _run_loop(r, is_background=True, context=ctx)
+    assert not halt.halted and seen == [True]  # the second call was refused by the loop
+
+
+async def test_a_streamed_calls_scope_carries_its_turns_epoch():
+    """stream_chat hands its turn's epoch to the dispatcher: a handler that awaits while a halt and a resume land
+    reads its call as refused (as the MCP client and the browser loop do), in a background session; a chat
+    session's call is not."""
+    halt = _install()
+    seen: dict[str, list[bool]] = {}
+
+    for session in ("claude-job-6", "chat-6"):
+
+        async def handler(_session=session, **kwargs):
+            await halt.halt(actor="t", surface="dashboard")
+            await halt.resume(actor="t", via="dashboard")
+            seen.setdefault(_session, []).append(background_halt.call_refused())
+            return {"content": [{"type": "text", "text": "40 cm"}]}
+
+        runner = _stream_runner()
+        dispatcher = ToolDispatcher()
+        dispatcher.register("web_search", handler, {"type": "object", "properties": {"query": {"type": "string"}}})
+        runner._dispatcher.dispatch = dispatcher.dispatch
+        runner._call_api_stream = MagicMock(side_effect=_two_streamed_calls_then_text({"n": 0}))
+        await _pump(runner.stream_chat(session, "go"))
+    assert not halt.halted
+    assert seen["claude-job-6"] == [True]  # its next call was refused by the loop: the turn started before the halt
+    assert seen["chat-6"] == [False, False]
 
 
 @pytest.mark.parametrize("point", AWAIT_POINTS)

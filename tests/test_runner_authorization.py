@@ -44,6 +44,7 @@ class _RecordingDispatcher:
         outcome=None,
         turn_id=None,
         stream=False,
+        turn_epoch=None,
     ):
         if self.store is not None:
             self.store.events.append(("dispatch", name))

@@ -3707,6 +3707,7 @@ class AgentRunner:
                                             context=_ctx,  # harness Phase 1a
                                             outcome=outcome,  # harness Phase 2b
                                             turn_id=_stream_turn_id,  # F111
+                                            turn_epoch=_turn_epoch,  # Goals PR 0c
                                         ):
                                             if isinstance(item, StreamEvent):
                                                 yield item
@@ -3734,35 +3735,52 @@ class AgentRunner:
                                             outcome=outcome,
                                         )
                                         raise
-                                    _status = _close_status(is_error, timed_out or outcome.uncertain)
-                                    await self._ledger_close(
-                                        entry_id,
-                                        _status,
-                                        result_text,
-                                        output_of=tool_name,
-                                        external_ref=outcome.external_ref,
-                                        keyed=send_key is not None,
-                                    )
-                                    _unrevertible_note = await self._after_compensable_call(
-                                        _ctx,
-                                        tool_name,
-                                        entry_id,
-                                        session_id,
-                                        snapshotted=_snapshotted,
-                                        status=_status,
-                                        tool_input=dispatch_input,
-                                        outcome=outcome,
-                                    )
-                                    if _unrevertible_note:
-                                        result_text = f"{_unrevertible_note}\n{result_text}"
-                                    # F026: Record in execution ledger (post-dispatch)
-                                    if ledger:
-                                        ledger.record(
+                                    if outcome.refused_by is not None:
+                                        # Goals PR 0c: the dispatcher's own check, right before the handler, refused it.
+                                        self._note_halt_refusal(_ctx, tool_name, session_id)
+                                        result_text = await self._refuse_halted_dispatch(
+                                            _ctx,
                                             tool_name,
                                             dispatch_input,
-                                            result_text,
-                                            "error" if is_error else "success",
+                                            session_id,
+                                            entry_id,
+                                            send_key,
+                                            _snapshotted,
+                                            outcome,
                                         )
+                                        _halt_refused = outcome.refused_by
+                                        if ledger:
+                                            ledger.record(tool_name, dispatch_input, result_text, "blocked")
+                                    else:
+                                        _status = _close_status(is_error, timed_out or outcome.uncertain)
+                                        await self._ledger_close(
+                                            entry_id,
+                                            _status,
+                                            result_text,
+                                            output_of=tool_name,
+                                            external_ref=outcome.external_ref,
+                                            keyed=send_key is not None,
+                                        )
+                                        _unrevertible_note = await self._after_compensable_call(
+                                            _ctx,
+                                            tool_name,
+                                            entry_id,
+                                            session_id,
+                                            snapshotted=_snapshotted,
+                                            status=_status,
+                                            tool_input=dispatch_input,
+                                            outcome=outcome,
+                                        )
+                                        if _unrevertible_note:
+                                            result_text = f"{_unrevertible_note}\n{result_text}"
+                                        # F026: Record in execution ledger (post-dispatch)
+                                        if ledger:
+                                            ledger.record(
+                                                tool_name,
+                                                dispatch_input,
+                                                result_text,
+                                                "error" if is_error else "success",
+                                            )
                             finally:
                                 if outcome.write_fence is not None and not outcome.write_fence.started:
                                     # The handler never handed the write to its
@@ -4102,6 +4120,7 @@ class AgentRunner:
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
                         turn_id=turn_id,  # F111: commit's idempotency key
+                        turn_epoch=turn_epoch,  # Goals PR 0c (caller-captured, as turn_number)
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4149,27 +4168,35 @@ class AgentRunner:
                     raise
                 finally:
                     await self._stop_activity_heartbeat(_hb)
-                _status2 = _close_status(is_error, outcome.uncertain)
-                await self._ledger_close(
-                    entry_id,
-                    _status2,
-                    result_text,
-                    output_of=tool_name,
-                    external_ref=outcome.external_ref,
-                    keyed=keyed,
-                )
-                _unrevertible_note = await self._after_compensable_call(
-                    ctx,
-                    tool_name,
-                    entry_id,
-                    session_id,
-                    snapshotted=_snapshotted2,
-                    status=_status2,
-                    tool_input=tool_input,
-                    outcome=outcome,
-                )
-                if _unrevertible_note:
-                    result_text = f"{_unrevertible_note}\n{result_text}"
+                if outcome.refused_by is not None:
+                    # Goals PR 0c: the dispatcher's own check, right before the handler, refused it.
+                    self._note_halt_refusal(ctx, tool_name, session_id)
+                    result_text = await self._refuse_halted_dispatch(
+                        ctx, tool_name, tool_input, session_id, entry_id, send_key, _snapshotted2, outcome
+                    )
+                    refused_by = outcome.refused_by
+                else:
+                    _status2 = _close_status(is_error, outcome.uncertain)
+                    await self._ledger_close(
+                        entry_id,
+                        _status2,
+                        result_text,
+                        output_of=tool_name,
+                        external_ref=outcome.external_ref,
+                        keyed=keyed,
+                    )
+                    _unrevertible_note = await self._after_compensable_call(
+                        ctx,
+                        tool_name,
+                        entry_id,
+                        session_id,
+                        snapshotted=_snapshotted2,
+                        status=_status2,
+                        tool_input=tool_input,
+                        outcome=outcome,
+                    )
+                    if _unrevertible_note:
+                        result_text = f"{_unrevertible_note}\n{result_text}"
         finally:
             if outcome.write_fence is not None and not outcome.write_fence.started:
                 # The handler never handed the write to its
@@ -5424,6 +5451,11 @@ Rules:
         epoch = turn_epoch if turn_epoch is not None else background_halt.TURN_EPOCH.get()
         if not background_halt.current().refuses(ctx.kind, session_id, epoch):
             return False
+        self._note_halt_refusal(ctx, tool_name, session_id)
+        return True
+
+    def _note_halt_refusal(self, ctx: ExecutionContext, tool_name: str, session_id: str | None) -> None:
+        """Goals PR 0c: the log line and the F026 record of a call the halt refused at its dispatch."""
         logger.warning(
             "Background halt: refused %r at its dispatch in a %s turn (session=%s)", tool_name, ctx.kind, session_id
         )
@@ -5437,7 +5469,6 @@ Rules:
             },
             session_id=session_id,
         )
-        return True
 
     async def _refuse_halted_dispatch(
         self,
@@ -5872,6 +5903,7 @@ Rules:
         context: ExecutionContext | None = None,  # harness Phase 1a
         outcome: CallOutcome | None = None,  # harness Phase 2b
         turn_id: UUID | None = None,  # F111: commit's idempotency key
+        turn_epoch: int | None = None,  # Goals PR 0c: the turn's halt epoch, caller-captured
     ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -5896,6 +5928,7 @@ Rules:
                     outcome=outcome,  # harness Phase 2b
                     turn_id=turn_id,
                     stream=True,  # F111 PR B1: only stream_chat dispatches through here
+                    turn_epoch=turn_epoch,  # Goals PR 0c
                 ),
                 timeout=timeout,
             )
