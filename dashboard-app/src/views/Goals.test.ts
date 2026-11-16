@@ -90,6 +90,7 @@ function held(): { promise: Promise<Answer>; resolve: (a: Answer) => void } {
 }
 
 beforeEach(() => {
+  sessionStorage.clear(); // the goal last shown is remembered per browser tab
   calls = [];
   handlers = {};
   install();
@@ -750,6 +751,85 @@ describe('Goals: the poll', () => {
   });
 });
 
+describe('Goals: the follow-ups', () => {
+  it('a kept goal that answers 404 is dropped, said once, and the bare address shows the first open goal', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    expect(region).toBeTruthy();
+    delete details['G-0001']; // gone: its read answers 404 and the list no longer has it
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('No goal G-0001 here any more.')).toBeTruthy();
+    expect(await pane('Sort the photos')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Tidy the notes' })).toBeNull();
+    go('#/goals/g/G-0002');
+    await waitFor(() => expect(screen.queryByText('No goal G-0001 here any more.')).toBeNull()); // said once
+  });
+
+  it('a goal opened by its address that answers 404 says so, without its old buttons', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    delete details['G-0001'];
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('There is no goal G-0001 here. Choose one from the list.')).toBeTruthy();
+    expect(document.querySelector('button[data-action]')).toBeNull();
+  });
+
+  it('the bare address shows the goal last shown in this tab, and works when the storage refuses', async () => {
+    sessionStorage.setItem('nous.goals.shown', 'G-0002');
+    render(Goals);
+    expect(await pane('Sort the photos')).toBeTruthy();
+    cleanup();
+    go('#/goals/g/G-0003');
+    render(Goals);
+    await pane('Old report');
+    await waitFor(() => expect(sessionStorage.getItem('nous.goals.shown')).toBe('G-0003'));
+    cleanup();
+    const refused = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    go('#/goals');
+    render(Goals);
+    expect(await pane('Tidy the notes')).toBeTruthy(); // the first open goal
+    expect(refused).toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+});
+
+describe('Goals: a lost answer', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('is replaced by the usual result once a read shows the change landed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['POST /goals/G-0001/pause'] = () => {
+      details['G-0001'] = { ...details['G-0001'], state: 'paused', pause_reason: 'owner', actions: ['resume', 'cancel'] };
+      return [HANG, null]; // the change is made, and its answer never comes
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Pause' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('Paused: no new session starts. A session already running finishes.')).toBeTruthy());
+    expect(within(region).queryByText('No answer came back. Check the goal before trying again.')).toBeNull();
+  });
+
+  it('of a note is replaced once the journal shows the note, and the box is cleared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['POST /goals/G-0001/note'] = (body) => {
+      const text = (body as { text: string }).text;
+      details['G-0001'] = { ...details['G-0001'], journal: [{ seq: 99, session_n: null, kind: 'owner_note', actor: 'owner', text, evidence: [], created_at: A.updated_at }, ...A.journal] };
+      return [HANG, null];
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const box = within(region).getByLabelText('A note for the next session') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Landed after all' } });
+    await fireEvent.click(within(region).getByRole('button', { name: 'Add note' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('Added. The next session reads it.')).toBeTruthy());
+    expect(box.value).toBe('');
+  });
+});
+
 describe('Goals: timeouts and the clock', () => {
   afterEach(() => vi.useRealTimers());
 
@@ -764,14 +844,30 @@ describe('Goals: timeouts and the clock', () => {
     expect((within(region).getByRole('button', { name: 'Pause' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('after a read times out, the goal shown says it is from the last read', async () => {
+  it('after the goal\'s read times out, the goal shown says it could not be read again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(Goals);
+    await pane('Tidy the notes');
+    handlers['GET /goals?state=open'] = () => [HANG, null];
+    handlers['GET /goals/G-0001'] = () => [HANG, null];
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(screen.getByText(/^Could not read G-0001 again: Could not reach the server\. What is shown is from the last read\./)).toBeTruthy());
+  });
+
+  it('when only the list read fails, the pane says the list could not be refreshed, and not after a good read', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(Goals);
     await pane('Tidy the notes');
     handlers['GET /goals?state=open'] = () => [HANG, null];
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await vi.advanceTimersByTimeAsync(16_000);
-    await vi.waitFor(() => expect(screen.getByText(/^Could not read G-0001 again: Could not reach the server\. What is shown is from the last read\./)).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByText('Could not refresh the list. What is shown is from the last read.')).toBeTruthy());
+    expect(screen.queryByText(/^Could not read G-0001 again/)).toBeNull();
+    delete handlers['GET /goals?state=open'];
+    install([A, B, C]);
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.waitFor(() => expect(screen.queryByText('Could not refresh the list. What is shown is from the last read.')).toBeNull());
   });
 
   it('the "updated" badge moves on between polls', async () => {

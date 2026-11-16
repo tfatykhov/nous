@@ -56,6 +56,28 @@
     });
   });
 
+  /** A change whose answer was lost, and the goal as it was before it: once a later read shows the goal's state or
+   * newest journal row changed, the change landed, and its usual result line replaces "No answer came back". */
+  type Lost = { action: Action; state: string; top: number; text?: string };
+  let lost = $state<Lost | null>(null);
+  const newestRow = () => goal.journal[0]?.seq ?? 0;
+  $effect(() => {
+    const was = lost;
+    const state = goal.state;
+    const top = newestRow();
+    if (!was || (state === was.state && top === was.top)) return;
+    untrack(() => {
+      lost = null;
+      if (was.action === 'note') {
+        noteResult = { text: ACTION_TEXT.note.done, ok: true };
+        if (noteText === was.text) noteText = '';
+      } else {
+        result = { text: ACTION_TEXT[was.action].done, ok: true, expect: state };
+      }
+    });
+  });
+  const answerLost = (err: unknown) => (err as { status?: number } | null)?.status === undefined;
+
   function closed(step: PlanStep): boolean {
     return step.closed_session !== undefined || step.status === 'done' || step.status === 'closed';
   }
@@ -101,19 +123,24 @@
     // The goal's ids are read now: after the awaits below, this pane may show another answer or none.
     const ref = goal.ref;
     const opener = `goal-a.${ref}.${action}`;
+    const before = { state: goal.state, top: newestRow() };
     busy = action;
     confirming = null;
     result = null;
+    lost = null;
     let outcome: Note;
+    let unanswered = false;
     try {
       const changed = await goalAction(ref, action, body);
       outcome = { text: ACTION_TEXT[action].done, ok: true, expect: changed.state };
     } catch (err) {
       outcome = { text: refusalText(err), ok: false };
+      unanswered = answerLost(err);
     }
     await onChanged();
     busy = null;
     result = outcome;
+    if (unanswered) lost = { action, ...before };
     await tick();
     (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }
@@ -134,18 +161,24 @@
     if (busy || !noteText.trim()) return;
     busy = 'note';
     noteResult = null;
+    lost = null;
     const ref = goal.ref;
+    const sent = noteText;
+    const before = { state: goal.state, top: newestRow() };
     let outcome: Note;
+    let unanswered = false;
     try {
-      await goalAction(ref, 'note', { text: noteText });
+      await goalAction(ref, 'note', { text: sent });
       noteText = '';
       outcome = { text: ACTION_TEXT.note.done, ok: true };
     } catch (err) {
       outcome = { text: refusalText(err), ok: false };
+      unanswered = answerLost(err);
     }
     await onChanged();
     busy = null;
     noteResult = outcome;
+    if (unanswered) lost = { action: 'note', text: sent, ...before };
   }
 
   const YES: Record<Action, string> = {
