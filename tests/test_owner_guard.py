@@ -14,11 +14,14 @@ from starlette.responses import JSONResponse
 
 from nous.api.owner_guard import (
     CARD_DECISION,
+    COMPANION,
     DEVICE_TOKEN_HEADER,
+    DEVICE_TOKEN_REJECTED,
     GRANTS,
     OWNER,
     OWNER_SECRET_HEADER,
     PROXY_SECRET_HEADER,
+    Caller,
     OwnerGuard,
 )
 
@@ -60,19 +63,24 @@ def _request(method: str = "POST", headers: dict[str, str] | None = None) -> Req
     return Request({"type": "http", "method": method, "path": "/a2ui/action", "headers": raw, "query_string": b""})
 
 
+DEVICE = SimpleNamespace(id="00000000-0000-4000-8000-000000000001", name="Pixel 7", installation_id="inst-1")
+TOKEN = "nd1_" + "A" * 43  # token-shaped
+
+
 class _Devices:
-    """A device store stand-in: ``verify`` answers ``result`` (or raises ``error``) and counts its calls."""
+    """A device store stand-in: ``verify`` answers ``DEVICE`` when ``result`` (else None), or raises ``error``, and
+    counts its calls."""
 
     def __init__(self, result: bool = True, error: Exception | None = None) -> None:
         self.result = result
         self.error = error
         self.calls = 0
 
-    async def verify(self, token: str | None) -> bool:
+    async def verify(self, token: str | None) -> SimpleNamespace | None:
         self.calls += 1
         if self.error is not None:
             raise self.error
-        return self.result
+        return DEVICE if self.result else None
 
 
 @pytest.mark.parametrize(
@@ -237,26 +245,32 @@ def test_the_proxy_header_name_is_the_mcp_routes_name() -> None:
 
 def test_the_grants_table_is_the_rule() -> None:
     assert GRANTS == {
-        "owner": frozenset({OWNER, CARD_DECISION}),
-        "proxy": frozenset({OWNER, CARD_DECISION}),
-        "device": frozenset({CARD_DECISION}),
+        "owner": frozenset({OWNER, CARD_DECISION, COMPANION}),
+        "proxy": frozenset({OWNER, CARD_DECISION, COMPANION}),
+        "device": frozenset({CARD_DECISION, COMPANION}),
     }
-    assert (OWNER, CARD_DECISION, DEVICE_TOKEN_HEADER) == ("owner", "card_decision", "X-Nous-Device-Token")
+    assert (OWNER, CARD_DECISION, COMPANION, DEVICE_TOKEN_HEADER) == (
+        "owner",
+        "card_decision",
+        "companion",
+        "X-Nous-Device-Token",
+    )
 
 
-async def test_a_device_token_grants_the_card_decision_and_nothing_else() -> None:
+async def test_a_device_token_grants_the_card_decision_and_the_companion_and_nothing_else() -> None:
     devices = _Devices(result=True)
     guard = OwnerGuard(_settings(), devices=devices)
-    headers = {DEVICE_TOKEN_HEADER: "a-device-token", "content-type": "application/json"}
+    headers = {DEVICE_TOKEN_HEADER: TOKEN, "content-type": "application/json"}
     assert await guard.grants(_request(headers=headers), CARD_DECISION) is True
-    assert devices.calls == 1
+    assert await guard.grants(_request(headers=headers), COMPANION) is True
+    assert devices.calls == 2
     assert await guard.grants(_request(headers=headers), OWNER) is False
-    assert devices.calls == 1  # the owner capability never looks a device up
+    assert devices.calls == 2  # the owner capability never looks a device up
     handler = _Counter()
-    response = await _post(_app(guard, handler), json={}, headers={DEVICE_TOKEN_HEADER: "a-device-token"})
+    response = await _post(_app(guard, handler), json={}, headers={DEVICE_TOKEN_HEADER: TOKEN})
     assert response.status_code == 403
     assert handler.calls == 0
-    assert devices.calls == 1
+    assert devices.calls == 2
 
 
 async def test_with_no_device_store_a_device_header_grants_nothing() -> None:
@@ -280,7 +294,7 @@ async def test_a_proxy_proof_without_json_grants_no_capability() -> None:
 
 
 async def test_a_store_error_is_a_refusal_and_not_a_rejected_token(caplog: pytest.LogCaptureFixture) -> None:
-    token = "a-device-token-that-must-not-be-logged"
+    token = "nd1_" + "L" * 43  # token-shaped, so the store is asked
     caplog.set_level(logging.DEBUG)
     devices = _Devices(error=RuntimeError(f"boom {token}"))
     guard = OwnerGuard(_settings(), devices=devices)
@@ -295,9 +309,11 @@ async def test_a_store_error_is_a_refusal_and_not_a_rejected_token(caplog: pytes
 
 
 async def test_a_token_no_live_device_has_is_a_rejected_token() -> None:
-    guard = OwnerGuard(_settings(), devices=_Devices(result=False))
-    request = _request(headers={DEVICE_TOKEN_HEADER: "a-device-token", "content-type": "application/json"})
+    devices = _Devices(result=False)
+    guard = OwnerGuard(_settings(), devices=devices)
+    request = _request(headers={DEVICE_TOKEN_HEADER: TOKEN, "content-type": "application/json"})
     assert await guard.decide(request, CARD_DECISION) == (False, "device_token_rejected")
+    assert devices.calls == 1
 
 
 async def test_an_oversize_device_header_is_refused_without_a_lookup() -> None:
@@ -306,3 +322,165 @@ async def test_an_oversize_device_header_is_refused_without_a_lookup() -> None:
     request = _request(headers={DEVICE_TOKEN_HEADER: "x" * 201, "content-type": "application/json"})
     assert await guard.decide(request, CARD_DECISION) == (False, None)
     assert devices.calls == 0
+
+
+# ---- resolve: who the caller is ---------------------------------------------------------------------------------
+
+JSON_TYPE = {"content-type": "application/json"}
+
+
+@pytest.mark.parametrize("capability", [CARD_DECISION, COMPANION])
+async def test_resolve_names_each_caller(capability: str) -> None:
+    devices = _Devices(result=True)
+    guard = OwnerGuard(_settings(), devices=devices)
+    owner = await guard.resolve(_request(headers={OWNER_SECRET_HEADER: OWNER_VALUE}), capability)
+    proxy = await guard.resolve(_request(headers={PROXY_SECRET_HEADER: PROXY_VALUE, **JSON_TYPE}), capability)
+    device = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE}), capability)
+    nobody = await guard.resolve(_request(headers=JSON_TYPE), capability)
+    assert owner == Caller(True, None, "owner", None) and owner.key == "owner"
+    assert proxy == Caller(True, None, "proxy", None) and proxy.key == "proxy"
+    assert device == Caller(True, None, "device", DEVICE) and device.key == f"device:{DEVICE.id}"
+    assert nobody == Caller(False, None, None, None) and nobody.key == "anonymous"
+    assert devices.calls == 1  # only the device call looked one up
+
+
+async def test_resolve_holds_the_owner_capability_back_from_a_device() -> None:
+    devices = _Devices(result=True)
+    guard = OwnerGuard(_settings(), devices=devices)
+    caller = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE}), OWNER)
+    assert caller == Caller(False, None, None, None)
+    assert caller.key == "anonymous"
+    assert devices.calls == 0
+    owner = await guard.resolve(_request(headers={OWNER_SECRET_HEADER: OWNER_VALUE}), OWNER)
+    assert owner.granted is True
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [{OWNER_SECRET_HEADER: "a-wrong-value"}, {PROXY_SECRET_HEADER: "a-wrong-value"}, {OWNER_SECRET_HEADER: ""}],
+    ids=["wrong-owner", "wrong-proxy", "empty-owner"],
+)
+async def test_a_wrong_secret_plus_a_valid_token_is_refused_by_resolve_and_by_decide(
+    wrong: dict[str, str],
+) -> None:
+    """A request that presents a secret and fails it is not rescued by a device token: ``resolve`` and ``decide``
+    refuse it, with no lookup."""
+    devices = _Devices(result=True)
+    guard = OwnerGuard(_settings(), devices=devices)
+    request = _request(headers={**wrong, DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE})
+    caller = await guard.resolve(request, CARD_DECISION)
+    assert caller == Caller(False, None, None, None)
+    assert await guard.decide(request, CARD_DECISION) == (False, None)
+    assert await guard.grants(request, CARD_DECISION) is False
+    assert devices.calls == 0
+
+
+@pytest.mark.parametrize("capability", [OWNER, CARD_DECISION, COMPANION])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {OWNER_SECRET_HEADER: OWNER_VALUE},
+        {PROXY_SECRET_HEADER: PROXY_VALUE, **JSON_TYPE},
+        {PROXY_SECRET_HEADER: PROXY_VALUE, "content-type": "text/plain"},
+        {DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE},
+        {DEVICE_TOKEN_HEADER: "K7QM-2XRD", **JSON_TYPE},
+        {DEVICE_TOKEN_HEADER: "nd1_" + "A" * 197, **JSON_TYPE},
+        {OWNER_SECRET_HEADER: "a-wrong-value", DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE},
+        {PROXY_SECRET_HEADER: "a-wrong-value", DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE},
+    ],
+    ids=[
+        "none",
+        "owner",
+        "proxy",
+        "proxy-text",
+        "device",
+        "code",
+        "oversize",
+        "wrong-owner+device",
+        "wrong-proxy+device",
+    ],
+)
+@pytest.mark.parametrize("live", [True, False], ids=["live", "not-live"])
+async def test_decide_is_resolves_answer_as_a_pair(headers: dict[str, str], capability: str, live: bool) -> None:
+    """One rule: ``decide`` answers ``(granted, refusal)`` exactly as ``resolve`` does, for every proof."""
+    guard = OwnerGuard(_settings(), devices=_Devices(result=live))
+    caller = await guard.resolve(_request(headers=headers), capability)
+    assert await guard.decide(_request(headers=headers), capability) == (caller.granted, caller.refusal)
+
+
+async def test_a_wrong_owner_secret_beside_the_right_proxy_secret_is_the_proxy() -> None:
+    """The rule is about a secret that fails with no secret that matches: ``proof`` still finds the proxy's."""
+    guard = OwnerGuard(_settings(), devices=_Devices(result=True))
+    request = _request(headers={OWNER_SECRET_HEADER: "a-wrong-value", PROXY_SECRET_HEADER: PROXY_VALUE, **JSON_TYPE})
+    assert await guard.resolve(request, CARD_DECISION) == Caller(True, None, "proxy", None)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "a-device-token",
+        "K7QM-2XRD",
+        "K7QM2XRD",
+        "nd2_" + "A" * 43,
+        "nd1_" + "A" * 42,
+        "nd1_" + "A" * 44,
+        "nd1_" + "A" * 42 + "=",
+    ],
+    ids=["free-text", "pairing-code", "pairing-code-bare", "wrong-prefix", "short", "long", "padding"],
+)
+async def test_a_malformed_token_is_rejected_with_no_lookup(token: str) -> None:
+    devices = _Devices(result=True)
+    guard = OwnerGuard(_settings(), devices=devices)
+    caller = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: token, **JSON_TYPE}), CARD_DECISION)
+    assert caller == Caller(False, DEVICE_TOKEN_REJECTED, None, None)
+    assert caller.key == "anonymous"
+    assert devices.calls == 0
+
+
+async def test_an_oversize_or_empty_token_is_a_plain_refusal_with_no_lookup() -> None:
+    devices = _Devices(result=True)
+    guard = OwnerGuard(_settings(), devices=devices)
+    for token in ("nd1_" + "A" * 197, ""):
+        caller = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: token, **JSON_TYPE}), CARD_DECISION)
+        assert caller == Caller(False, None, None, None)
+    assert devices.calls == 0
+
+
+async def test_resolve_a_token_no_live_device_has_is_rejected() -> None:
+    devices = _Devices(result=False)
+    guard = OwnerGuard(_settings(), devices=devices)
+    caller = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE}), COMPANION)
+    assert caller == Caller(False, DEVICE_TOKEN_REJECTED, None, None)
+    assert devices.calls == 1
+
+
+async def test_resolve_a_store_error_is_a_plain_refusal_logged_by_class(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    devices = _Devices(error=RuntimeError(f"boom {TOKEN}"))
+    guard = OwnerGuard(_settings(), devices=devices)
+    caller = await guard.resolve(_request(headers={DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE}), CARD_DECISION)
+    assert caller == Caller(False, None, None, None)
+    assert "RuntimeError" in caplog.text
+    for record in caplog.records:
+        assert TOKEN not in record.getMessage() + repr(record.args)
+        assert record.exc_info is None
+
+
+async def test_resolve_with_no_store_grants_a_device_nothing() -> None:
+    caller = await OwnerGuard(_settings()).resolve(
+        _request(headers={DEVICE_TOKEN_HEADER: TOKEN, **JSON_TYPE}), CARD_DECISION
+    )
+    assert caller == Caller(False, None, None, None)
+
+
+async def test_resolve_holds_a_proxy_call_to_the_json_rule() -> None:
+    guard = OwnerGuard(_settings())
+    proxy = {PROXY_SECRET_HEADER: PROXY_VALUE}
+    smuggled = await guard.resolve(
+        _request(headers={**proxy, "content-type": "text/plain; application/json"}), COMPANION
+    )
+    assert smuggled == Caller(False, None, "proxy", None)
+    assert smuggled.key == "anonymous"  # an unproven caller never has a window of its own
+    read = await guard.resolve(_request("GET", headers=proxy), COMPANION)
+    assert read == Caller(True, None, "proxy", None)
