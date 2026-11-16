@@ -61,6 +61,7 @@ from nous.storage.models import (
 
 if TYPE_CHECKING:
     from nous.goals.grants import GoalToolGrants
+    from nous.goals.modes import ModeSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,7 @@ class GoalDriver:
         runner: Any,
         *,
         tool_grants: GoalToolGrants | None = None,
+        modes: ModeSweeper | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
@@ -298,6 +300,9 @@ class GoalDriver:
         # F115 per-goal tools: the runner's view of the goals' tool grants (main.py, with the flag on), read again at
         # the start, at the end of every tick, after a session starts and after one closes. None: no grants.
         self.tool_grants = tool_grants
+        # The ends of the goals' modes no owner's change makes (main.py): ``at_start`` once in ``start``, and with
+        # NOUS_GOAL_COMMANDS_ENABLED on ``expire`` first in every tick. None: none are swept.
+        self._modes = modes
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
@@ -319,6 +324,7 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
+        await self._sweep_modes(at_start=True)
         await self._read_grants()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
@@ -363,6 +369,8 @@ class GoalDriver:
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
+            if goal_commands.enabled(self._settings):
+                await self._sweep_modes()
             claimed = await self.claim_reports()
             stopped = await self.handle_requests()
             closed = await self.close_finished()
@@ -375,6 +383,19 @@ class GoalDriver:
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
+
+    async def _sweep_modes(self, *, at_start: bool = False) -> None:
+        """The ends of the goals' modes no owner's change makes (``modes``): ``at_start`` once, else ``expire``. A
+        sweep that fails never fails the start or the tick: logged by its class, tried again at the next tick."""
+        if self._modes is None:
+            return
+        try:
+            if at_start:
+                await self._modes.at_start()
+            else:
+                await self._modes.expire()
+        except Exception as exc:
+            logger.warning("The goals' modes were not swept (%s)", type(exc).__name__)
 
     async def _read_grants(self, root_id: UUID | None = None, *, goal_id: UUID | None = None) -> None:
         """F115: read the goals' tool grants into the runner's view again (all of them, one session's root, or one
@@ -734,12 +755,22 @@ class GoalDriver:
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
             moved = len(await moved_steps(s, self._agent_id, goal.id))  # steps the plan moved to the journal
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
         tools = await self._tool_lines(goal) if self.tool_grants is not None else None
+        until = goal_commands.charter_until(goal, now=now, settings=self._settings)
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
             return charter.build_session_task(
-                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved, tools=tools
+                goal,
+                plan,
+                rows,
+                spent=total,
+                day_spent=today,
+                max_chars=max_chars,
+                moved=moved,
+                tools=tools,
+                commands_until=until,
             )
 
         task = build(charter.MAX_TASK_CHARS)

@@ -640,11 +640,14 @@ def _build_goals(
 
     With ``NOUS_GOAL_COMMANDS_ENABLED`` on as well (its validator needs the grants and the owner's entry gate) and
     a ``dispatcher``, the view also reads which goals may run any command, and its ``commands_for`` is bound to the
-    runner and the dispatcher (``_bind_goal_commands``)."""
+    runner and the dispatcher (``_bind_goal_commands``). The driver gets the sweeper of the goals' modes
+    (``nous.goals.modes.ModeSweeper``) either way: with the flag off it only returns every goal to contained when it
+    starts."""
     if not settings.goals_enabled or continuation_runner is None:
         return None
     from nous.goals.chain import GoalChain, report_channel
     from nous.goals.driver import GoalDriver
+    from nous.goals.modes import ModeSweeper
     from nous.goals.store import GoalStore
 
     tool_grants = None
@@ -659,7 +662,15 @@ def _build_goals(
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
     continuation_runner.set_goal_turns(GoalChain(database, settings, store, tool_grants=tool_grants).turn_context)
-    goal_driver = GoalDriver(database, settings, heart, store, continuation_runner, tool_grants=tool_grants)
+    goal_driver = GoalDriver(
+        database,
+        settings,
+        heart,
+        store,
+        continuation_runner,
+        tool_grants=tool_grants,
+        modes=ModeSweeper(database, settings, store),
+    )
     continuation_runner.set_goals(goal_driver)
     return goal_driver
 

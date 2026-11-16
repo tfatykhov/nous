@@ -205,6 +205,16 @@ def decide_commands(view: CommandsView, ctx: ExecutionContext) -> CommandsEntry 
         return None
 
 
+def charter_until(goal: Any, *, now: Any, settings: Any) -> Any:
+    """The end a goal's session task and decision turns are told of (``charter.commands_line``): while the flag is
+    on and the goal is active in the mode with an end after ``now``; else None."""
+    if not enabled(settings) or goal.mode != MODE_COMMANDS or goal.state != "active":
+        return None
+    if goal.mode_until is None or goal.mode_until <= now:
+        return None
+    return goal.mode_until
+
+
 def not_usable(goal: Any, *, now: Any, settings: Any) -> str | None:
     """Why a goal in the mode does not run any command now, in words (``NOT_USABLE``), or None when its tasks do:
     the flag, the goal's state, its end, then the tool guard's hold on bash for each kind of turn the mode reaches

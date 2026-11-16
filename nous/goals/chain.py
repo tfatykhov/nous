@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import Text, and_, cast, select
+from sqlalchemy import Text, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
 from nous.goals import charter, evidence, spend
+from nous.goals import commands as goal_commands
 from nous.goals.store import GoalStore, moved_steps
 from nous.goals.tools import Executor, GoalSessionRef, make_goal_tools
 from nous.storage.database import Database
@@ -105,6 +106,7 @@ class GoalChain:
             )
             refs = await evidence.citeable(s, scope, limit=charter.REFS_SHOWN)
             ended = row.ended_at is not None
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
         tools = None
         if self._tool_grants is not None:
             await self._tool_grants.refresh_root(root_id)
@@ -124,6 +126,7 @@ class GoalChain:
             root_dir=scope.root_dir,
             moved=moved,
             tools=tools,
+            commands_until=goal_commands.charter_until(goal, now=now, settings=self._settings),
         )
         tools_of_turn = make_goal_tools(self._db, self._settings, self._store, ref, tool_grants=self._tool_grants)
         return GoalTurn(block=block, tools=tools_of_turn)
