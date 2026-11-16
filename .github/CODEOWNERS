@@ -47,6 +47,9 @@
 /nous/brain/brain.py @tfatykhov
 /nous/brain/schemas.py @tfatykhov
 
+# The owner's goal actions over REST: what each does and which of them a goal offers
+/nous/api/goal_routes.py @tfatykhov
+
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
 /tests/eval/** @tfatykhov

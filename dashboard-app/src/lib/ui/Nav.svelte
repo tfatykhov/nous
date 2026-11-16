@@ -73,6 +73,10 @@
       label: 'Autonomy',
     },
     {
+      id: 'goals',
+      label: 'Goals',
+    },
+    {
       id: 'consolidation',
       label: 'Consolidation',
     },
@@ -103,7 +107,7 @@
     group('Memory', ['graph', 'browser', 'health', 'retrieval', 'consolidation']),
     group('Execution', ['work', 'model-calls', 'dag', 'subtasks', 'heartbeat']),
     group('Decisions', ['decisions', 'rubric']),
-    group('Autonomy', ['autonomy', 'intentions', 'harness']),
+    group('Autonomy', ['autonomy', 'goals', 'intentions', 'harness']),
     group('System', ['observability', 'identity', 'integrations']),
   ];
   // The sidebar and the mobile drawer each render a Nav: heading ids must differ between them.
