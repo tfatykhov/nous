@@ -127,10 +127,34 @@ describe('the code and its countdown', () => {
   });
 });
 
-describe('a device in words', () => {
-  const NOW = Date.parse('2026-11-15T12:00:00Z');
+describe('a device in words, by the browser\'s local day', () => {
+  /** The browser's offset from UTC in minutes, as getTimezoneOffset gives it (300: UTC-5, -540: UTC+9). */
+  const offset = (minutes: number) => vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(minutes);
+  afterEach(() => vi.restoreAllMocks());
 
-  it('last seen by UTC day: today, yesterday, N days ago; a time ahead of the clock is today', () => {
+  it('in the evening west of UTC, a phone seen an hour ago was seen today, one seen 26 hours ago yesterday', () => {
+    offset(300);
+    const now = Date.parse('2026-11-16T00:30:00Z'); // 19:30 on Nov 15 in UTC-5
+    expect(lastSeenWords('2026-11-15T23:30:00Z', now)).toBe('today'); // an hour ago: the UTC day before, the same local day
+    expect(lastSeenWords('2026-11-14T22:30:00Z', now)).toBe('yesterday'); // 26 hours ago
+    expect(lastSeenWords('2026-11-15T05:00:00Z', now)).toBe('today'); // local midnight
+    expect(lastSeenWords('2026-11-15T04:59:59Z', now)).toBe('yesterday'); // a second before it
+    expect(deviceLine(deviceRow({ created_at: '2026-11-13T02:00:00Z', last_seen_at: '2026-11-15T23:30:00Z' }), now))
+      .toBe('Paired on Nov 12. Last seen today.'); // 21:00 on Nov 12 local
+    expect(revokedLine(deviceRow({ revoked_at: '2026-11-16T00:30:00Z' }))).toBe('Revoked on Nov 15');
+  });
+
+  it('in the morning east of UTC, the local day starts before the UTC one', () => {
+    offset(-540);
+    const now = Date.parse('2026-11-15T01:00:00Z'); // 10:00 on Nov 15 in UTC+9
+    expect(lastSeenWords('2026-11-14T15:00:00Z', now)).toBe('today'); // local midnight, the UTC day before
+    expect(lastSeenWords('2026-11-14T14:59:59Z', now)).toBe('yesterday');
+    expect(deviceLine(deviceRow({ created_at: '2026-11-11T20:00:00Z', last_seen_at: null }), now)).toBe('Paired on Nov 12. Not seen yet.');
+  });
+
+  it('last seen in words: today, yesterday, N days ago; a time ahead of the clock is today; nothing for no time', () => {
+    offset(0);
+    const NOW = Date.parse('2026-11-15T12:00:00Z');
     expect(lastSeenWords('2026-11-15T00:00:00Z', NOW)).toBe('today');
     expect(lastSeenWords('2026-11-15T23:00:00Z', NOW)).toBe('today');
     expect(lastSeenWords('2026-11-14T23:59:59Z', NOW)).toBe('yesterday');
@@ -142,6 +166,8 @@ describe('a device in words', () => {
   });
 
   it('a live device: when it was paired and when it was last seen; a revoked one: when it was revoked', () => {
+    offset(0);
+    const NOW = Date.parse('2026-11-15T12:00:00Z');
     expect(deviceLine(deviceRow({ created_at: '2026-11-12T09:00:00Z', last_seen_at: '2026-11-15T08:00:00Z' }), NOW))
       .toBe('Paired on Nov 12. Last seen today.');
     expect(deviceLine(deviceRow({ created_at: '2026-11-12T09:00:00Z', last_seen_at: '2026-11-14T08:00:00Z' }), NOW))
@@ -150,6 +176,7 @@ describe('a device in words', () => {
       .toBe('Paired on Nov 1. Last seen 10 days ago.');
     expect(deviceLine(deviceRow({ created_at: '2026-11-12T09:00:00Z', last_seen_at: null }), NOW)).toBe('Paired on Nov 12. Not seen yet.');
     expect(revokedLine(deviceRow({ revoked_at: '2026-11-14T10:00:00Z' }))).toBe('Revoked on Nov 14');
+    expect(deviceLine(deviceRow({ created_at: null, last_seen_at: null }), NOW)).toBe('Paired on —. Not seen yet.');
   });
 });
 

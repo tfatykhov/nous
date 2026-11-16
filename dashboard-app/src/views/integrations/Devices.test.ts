@@ -105,6 +105,19 @@ describe('Devices: the states', () => {
     expect(s.queryByText('No device is paired.')).toBeNull();
   });
 
+  it('days are the browser\'s: at 19:30 in UTC-5 a phone seen an hour ago was seen today', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date('2026-11-16T00:30:00Z'));
+    vi.spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(300);
+    listed = deviceList({ devices: [
+      deviceRow({ name: 'Pixel 7', created_at: '2026-11-13T02:00:00Z', last_seen_at: '2026-11-15T23:30:00Z' }),
+      deviceRow({ name: 'Old phone', created_at: '2026-11-01T12:00:00Z', last_seen_at: '2026-11-14T22:30:00Z' }),
+    ] });
+    const s = await shown();
+    expect(await s.findByText('Paired on Nov 12. Last seen today.')).toBeTruthy();
+    expect(s.getByText('Paired on Nov 1. Last seen yesterday.')).toBeTruthy();
+  });
+
   it('only revoked devices: says none is paired, and lists the revoked ones', async () => {
     listed = deviceList({ devices: [deviceRow({ name: 'Lost tablet', revoked_at: '2026-11-14T10:00:00Z' })] });
     const s = await shown();

@@ -4,7 +4,7 @@
 // only. A pairing code is never stored here: the view keeps it in its own state.
 
 import { apiRequest, type ApiAnswerError } from './api';
-import { fmtDay } from './harness';
+import { MONTHS } from './harness';
 import { timed } from './goals';
 
 export interface Device {
@@ -120,16 +120,28 @@ export function pairingLine(pairing: Pairing): { text: string; tone: Tone } | nu
   }
 }
 
+// A device's days are the owner's: "today" and "yesterday" are the browser's local days, so a phone seen an hour ago
+// never reads "yesterday" in the evening west of UTC. A moment is moved by the browser's offset at that moment, and
+// then read with the UTC getters.
 const DAY_MS = 86_400_000;
-/** The UTC day of a moment, as a number: the dashboard's days are UTC days (fmtDay). */
-const utcDay = (ms: number) => Math.floor(ms / DAY_MS);
+const local = (ms: number) => ms - new Date(ms).getTimezoneOffset() * 60_000;
+const localDay = (ms: number) => Math.floor(local(ms) / DAY_MS);
 
-/** "today", "yesterday", "3 days ago", by UTC day; a time ahead of the clock is today. */
+/** A day in the browser's local time, in fmtDay's words: "Nov 12". */
+export function localDayText(iso: string | null): string {
+  if (!iso) return '—';
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return '—';
+  const d = new Date(local(at));
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+/** "today", "yesterday", "3 days ago", by the browser's local day; a time ahead of the clock is today. */
 export function lastSeenWords(iso: string | null, now: number = Date.now()): string {
   if (!iso) return '';
   const at = new Date(iso).getTime();
   if (Number.isNaN(at)) return '';
-  const days = Math.max(0, utcDay(now) - utcDay(at));
+  const days = Math.max(0, localDay(now) - localDay(at));
   if (days === 0) return 'today';
   if (days === 1) return 'yesterday';
   return `${days} days ago`;
@@ -138,10 +150,10 @@ export function lastSeenWords(iso: string | null, now: number = Date.now()): str
 /** A device's line: "Paired on Nov 12. Last seen today." or "Paired on Nov 12. Not seen yet." */
 export function deviceLine(d: Device, now: number = Date.now()): string {
   const seen = lastSeenWords(d.last_seen_at, now);
-  return `Paired on ${fmtDay(d.created_at)}. ${seen ? `Last seen ${seen}.` : 'Not seen yet.'}`;
+  return `Paired on ${localDayText(d.created_at)}. ${seen ? `Last seen ${seen}.` : 'Not seen yet.'}`;
 }
 
-export const revokedLine = (d: Device) => `Revoked on ${fmtDay(d.revoked_at)}`;
+export const revokedLine = (d: Device) => `Revoked on ${localDayText(d.revoked_at)}`;
 
 /** Which request failed: the list, a new code, or a revoke. */
 export type Doing = 'see' | 'pair' | 'revoke';
