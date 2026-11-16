@@ -714,6 +714,13 @@ async def test_the_record_is_this_agents_and_can_be_read_by_kind_and_length(db, 
         assert [c.key for c in await store.changes(kind="tools")] == ["tool_guard:background:web_search"]
         assert [c.new for c in await store.changes(2)] == ["denied", 22]
         assert len(await store.changes(10_000)) == 4
+        async with db.session() as session:
+            for n in range(store_module.LOG_MAX + 5):
+                session.add(
+                    AutonomySettingLog(agent_id=agent_id, key="max_turns", old_value=n, new_value=n + 1, actor="owner")
+                )
+            await session.commit()
+        assert len(await store.changes(10_000)) == store_module.LOG_MAX  # never more than the most a read lists
     finally:
         async with db.session() as session:
             await session.execute(delete(AutonomySettingLog).where(AutonomySettingLog.agent_id == other))
