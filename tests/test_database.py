@@ -62,6 +62,10 @@ async def test_all_tables_exist(db):
         ("nous_system", "a2ui_push_installations"),
         # Companion devices paired by a code, each with its own token stored as a digest (migration 115)
         ("nous_system", "a2ui_devices"),
+        # F115 the owner's autonomy settings, their record of changes and the tool guard (migration 116)
+        ("nous_system", "autonomy_settings"),
+        ("nous_system", "autonomy_settings_log"),
+        ("nous_system", "tool_guard"),
         # Harness Phase 1b: durable execution ledger (migration 074)
         ("nous_system", "execution_ledger"),
         # Fault detector: per-phase process heartbeat (migration 078)

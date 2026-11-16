@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -2673,3 +2674,52 @@ class McpServerSecret(Base):
     header_names: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class AutonomySetting(Base):
+    """Migration 116 (F115): one limit the owner changed on the dashboard; ``key`` is a key of
+    ``nous/autonomy/registry.py`` and ``value`` its JSON value. Written and read by ``nous/autonomy/store.py`` only.
+    Not read by the ``db_query`` reader."""
+
+    __tablename__ = "autonomy_settings"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_by: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class AutonomySettingLog(Base):
+    """Migration 116 (F115): one change of a limit or of a tool's setting: the value before and after (NULL is the
+    host's value or the default), the proof the owner's route accepted (``actor``) and when. Written in the same
+    transaction as the change, by ``nous/autonomy/store.py`` only. Not read by the ``db_query`` reader."""
+
+    __tablename__ = "autonomy_settings_log"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    new_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ToolGuardRow(Base):
+    """Migration 116 (F115): the owner's setting of one tool for one scope (``background``: every turn nobody
+    converses in). The migration holds the CHECKs on ``scope``, ``setting`` and ``destructive_guard``. Written and
+    read by ``nous/autonomy/store.py`` only. Not read by the ``db_query`` reader."""
+
+    __tablename__ = "tool_guard"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    tool: Mapped[str] = mapped_column(Text, primary_key=True)
+    setting: Mapped[str] = mapped_column(Text, nullable=False)
+    destructive_guard: Mapped[str] = mapped_column(Text, nullable=False, server_default="common")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_by: Mapped[str] = mapped_column(Text, nullable=False)

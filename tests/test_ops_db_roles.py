@@ -416,6 +416,9 @@ READER_VERIFY_LABELS = (
     "reader cannot read an embedding",
     "reader cannot read a push token",
     "reader cannot read a device digest",
+    "reader cannot read the autonomy settings",
+    "reader cannot read the autonomy record",
+    "reader cannot read the tool guard",
     "reader cannot INSERT",
     "reader cannot read a server file",
     "reader cannot run a program",
@@ -499,7 +502,12 @@ def test_a_check_waits_only_for_a_migration_after_106_that_exists():
     import json
 
     waits = json.loads(re.search(r"waits jsonb := '(\{.*\})';", VERIFY).group(1))
-    assert waits == {"reader cannot read a device digest": "115"}
+    assert waits == {
+        "reader cannot read a device digest": "115",
+        "reader cannot read the autonomy settings": "116",
+        "reader cannot read the autonomy record": "116",
+        "reader cannot read the tool guard": "116",
+    }
     body = VERIFY.split("FOR c IN", 1)[1].split("AS t(label, run_as", 1)[0]
     migrations = {path.name.split("_", 1)[0] for path in (OPS.parents[1] / "sql" / "migrations").glob("*.sql")}
     for label, version in waits.items():
