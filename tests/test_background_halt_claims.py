@@ -750,6 +750,49 @@ async def test_a_completion_command_spawned_as_a_halt_landed_is_killed(tmp_path,
     assert await asyncio.wait_for(proc.wait(), 5) == -9  # killed, not left running
 
 
+async def test_a_guard_command_of_a_run_from_before_the_halt_is_not_started(monkeypatch):
+    from nous.handlers import schedule_guard
+
+    halt = _install()
+    before = halt.epoch
+    await halt.halt(actor="t", surface="dashboard")
+    await halt.resume(actor="t", via="dashboard")
+    spawned: list = []
+
+    async def spawn(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("spawned")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spawn)
+    spec = schedule_guard.GuardSpec(name="g", command="echo hi", skip_when="quiet", timeout_seconds=5)
+    with background_halt.epoch_scope(before):  # the worker's run, claimed before the halt
+        result = await schedule_guard.run_guard(spec)
+    assert spawned == [] and result.error == schedule_guard.HALTED_ERROR and result.exit_code is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX only")
+async def test_a_guard_command_started_as_a_halt_landed_is_killed(monkeypatch):
+    from nous.handlers import schedule_guard
+
+    halt = _install()
+    real_spawn = asyncio.create_subprocess_shell
+    procs: list = []
+
+    async def spawn_while_the_halt_lands(command, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        proc = await real_spawn("sleep 30", **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spawn_while_the_halt_lands)
+    spec = schedule_guard.GuardSpec(name="g", command="echo hi", skip_when="quiet", timeout_seconds=5)
+    with background_halt.epoch_scope(halt.epoch):
+        result = await schedule_guard.run_guard(spec)
+    (proc,) = procs
+    assert result.error == schedule_guard.HALTED_ERROR
+    assert await asyncio.wait_for(proc.wait(), 5) == -9
+
+
 async def test_a_halted_dag_tick_reads_no_dag_and_advances_none():
     dag = SimpleNamespace(id=uuid.uuid4(), nodes=[])
     orchestrator = _DagTickOrchestrator.build([dag])

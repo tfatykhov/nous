@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nous import background_processes
+from nous import background_halt, background_processes
 from nous.cognitive.execution_ledger import redact_error_text
 from nous.cognitive.ledger_store import durable_key_args
 from nous.utils import kill_process_group
@@ -220,6 +220,9 @@ def _clip(text: str, limit: int = OUTPUT_MAX_BYTES) -> str:
     return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
+HALTED_ERROR = "background work is halted by the owner: the guard command did not run"
+
+
 async def run_guard(spec: GuardSpec) -> GuardResult:
     """Run the guard command with a hard timeout. Never raises, except for cancellation.
 
@@ -227,12 +230,20 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     shell itself has already exited and only a background child of it holds the pipes
     (``even_if_exited``), and the wait for it is bounded (``kill_process_group``), so a child
     that left the group and still holds the pipes cannot keep the worker waiting either.
+
+    Goals PR 0c: the halt is checked right before the command is started and again right
+    after, with the epoch of the run the guard belongs to (the worker and the heartbeat tick set
+    it): a halted guard starts nothing, and one started as the halt landed is killed. Either
+    way the result carries ``HALTED_ERROR``.
     """
     start = time.monotonic()
 
     def elapsed() -> int:
         return int((time.monotonic() - start) * 1000)
 
+    epoch = background_halt.turn_epoch()
+    if background_halt.current().refuses("background", None, epoch):
+        return GuardResult(None, "", "", elapsed(), error=HALTED_ERROR)
     try:
         proc = await asyncio.create_subprocess_shell(
             spec.command,
@@ -244,6 +255,11 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     except Exception as exc:
         return GuardResult(None, "", "", elapsed(), error=f"{type(exc).__name__}: {exc}")
     tracked = background_processes.track(proc)  # Goals PR 0c: a halt signals it
+    if background_halt.current().refuses("background", None, epoch):
+        # Goals PR 0c: a halt landed while the start was awaited.
+        await kill_process_group(proc, even_if_exited=True)
+        background_processes.release(tracked)
+        return GuardResult(None, "", "", elapsed(), error=HALTED_ERROR)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_seconds)
     except TimeoutError:
