@@ -133,6 +133,9 @@
       // With no answer, a new code may have been made and the one on screen replaced: it is not shown as working.
       if ((err as { status?: number } | null)?.status === undefined) shown = null;
     }
+    // A read may have ended the code on screen while this try was in flight: the try's answer speaks now, and the
+    // list's own line says what became of the earlier code.
+    ended = null;
     busy = null;
     void store.refresh();
     await tick();

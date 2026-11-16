@@ -373,6 +373,24 @@ describe('Devices: a pairing code', () => {
     expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
   });
 
+  it('a code that a read ends while a new one is being made is not said once the new one is shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    let answer!: (a: Answer) => void;
+    handlers['POST /a2ui/devices/pairings'] = () => new Promise<Answer>((r) => { answer = r; });
+    await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    listed = { ...listed, pairing: OPEN() };
+    answer([200, { code: 'P2QR-8XYZ', expires_in: 300 }]);
+    expect(await s.findByText('P2QR-8XYZ')).toBeTruthy();
+    await fireEvent.click(s.getByRole('button', { name: 'Done' }));
+    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+  });
+
   it('a new code with no answer is given up after 15 s: it says to check the list, and the button works again', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     handlers['POST /a2ui/devices/pairings'] = () => [HANG, null];
