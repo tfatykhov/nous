@@ -1,7 +1,7 @@
 // Test-only: answers of the goal routes (nous/api/goal_routes.py) in their real shape, with made-up values. The
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
 import type {
-  GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords,
+  GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords, NewGoalTools,
 } from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
@@ -170,5 +170,31 @@ export function goalToolsAnswer(over: Partial<GoalTools> = {}): GoalTools {
       toolOption('mcp__notes__search'),
     ],
     ...over,
+  };
+}
+
+/** GET /goals/options `tools` with the grants on: the rows for "this goal" and the one question before Create. */
+export function newGoalToolsAnswer(): NewGoalTools {
+  const forNew = (tool: string) => {
+    const words = toolWords(tool, 'this goal');
+    return { ...words, blocked: null };
+  };
+  return {
+    applies_in: LEAD,
+    never: NEVER,
+    limit: 20,
+    confirm: 'Allow this goal to use these tools without asking you each time, from its first session after you approve it?',
+    available: [
+      forNew('browser_task'),
+      forNew('send_email'),
+      {
+        ...forNew('send_file'),
+        blocked: {
+          code: 'not_ready',
+          sentence: 'send_file has no Telegram chat set, so it could send to any chat a call names. Set the chat first.',
+        },
+      },
+      forNew('mcp__notes__search'),
+    ],
   };
 }

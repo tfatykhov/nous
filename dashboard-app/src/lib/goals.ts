@@ -113,6 +113,18 @@ export interface GoalOptions {
   bounds?: { title: number; objective: number; done_when: number; channel: number; note: number; deadline_days: number; journal: number };
   driver_running?: boolean;
   spend_note?: string;
+  /** F115 per-goal tools, with that flag on: what a new goal may be allowed when it is created. */
+  tools?: NewGoalTools;
+}
+
+/** What a new goal may be allowed (GET /goals/options `tools`): the same rows as a goal's own, and the one question
+ * asked before the goal is created with any. */
+export interface NewGoalTools {
+  applies_in: string;
+  never: string;
+  limit: number;
+  confirm: string;
+  available: GoalToolOption[];
 }
 
 /** What the screen reads of the background halt (GET /background/state). */
@@ -125,6 +137,19 @@ export interface CreateBody {
   preset: string;
   limits?: Limits;
   origin_channel?: string;
+  /** F115: the tools the new goal may use without asking, each as PUT /goals/{ref}/tools/{tool} takes it. */
+  tools?: NewGoalTool[];
+}
+
+export interface NewGoalTool { tool: string; confirm: true; server_id?: string }
+
+/** The tools chosen for a new goal, in the body POST /goals takes; an MCP tool carries its server as the form showed it. */
+export function newGoalTools(chosen: string[], available: GoalToolOption[]): NewGoalTool[] {
+  return chosen.flatMap((tool) => {
+    const option = available.find((o) => o.tool === tool);
+    if (!option) return [];
+    return [option.server_id ? { tool, confirm: true as const, server_id: option.server_id } : { tool, confirm: true as const }];
+  });
 }
 
 // ── Requests ────────────────────────────────────────────────────────────────
@@ -205,6 +230,8 @@ export const removeTool = (ref: string, tool: string) =>
   timed((signal) => apiRequest<GoalTools>(`${goalPath(ref)}/tools/${encodeURIComponent(tool)}`, 'DELETE', {}, signal));
 
 export const TOOLS_TITLE = 'Tools this goal may use';
+/** On the create form, beside a tool that can be allowed. */
+export const TOOL_CHOOSE_LABEL = 'Allow without asking';
 export const TOOLS_NONE_TEXT = 'None yet.';
 export const TOOLS_ADD_TITLE = 'Tools you can allow';
 export const TOOLS_NOT_USED_TEXT = 'Not used now.';
@@ -219,6 +246,12 @@ export const toolAllowedOnText = (at: string | null) => (at ? `Allowed ${fmtUtc(
 export const toolsReadFailedText = (err: unknown) => `Could not read this goal's tools. ${refusalText(err, 'see')}`;
 /** A refused tool change: the server's sentence exactly as sent (it may start with a tool's name), else as for any
  * refused change. */
+/** A refused create: a refused tool's sentence exactly as sent (the answer names the tool), else as for any change. */
+export function createRefusalText(err: unknown): string {
+  const body = (err as ApiAnswerError | null)?.body as { tool?: unknown } | undefined;
+  return typeof body?.tool === 'string' ? toolRefusalText(err) : refusalText(err);
+}
+
 export function toolRefusalText(err: unknown): string {
   const api = ((err as ApiAnswerError | null)?.body as { error?: unknown } | undefined)?.error;
   return typeof api === 'string' && api.trim() ? api.trim() : refusalText(err);

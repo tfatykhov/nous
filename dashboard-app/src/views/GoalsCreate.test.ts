@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
-import { OPTIONS, goalDetail } from '../lib/testing/goalFixtures';
+import { LEAD, NOTES_SERVER_ID, OPTIONS, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { GoalOptions } from '../lib/goals';
 
 // F114 goals PR 2: the form that makes a draft (`#/goals/new`), over a stubbed POST /goals. Every value is made up.
@@ -159,5 +159,70 @@ describe('Goals: the create form and a lost answer', () => {
     await vi.waitFor(() => expect(within(form).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
     expect((within(form).getByLabelText('Title') as HTMLInputElement).value).toBe('Sort the photos');
     expect((within(form).getByRole('button', { name: 'Create draft' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('Goals: the create form and the tools a new goal may use (F115)', () => {
+  it('with the grants off there is no tools section and the body has no tools', async () => {
+    const form = await openForm();
+    expect(within(form).queryByText('Tools this goal may use')).toBeNull();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect('tools' in (posts()[0].body as object)).toBe(false);
+  });
+
+  it('shows the same section after the size, asks once for the lot, then sends each chosen tool', async () => {
+    options = OPTIONS({ tools: newGoalToolsAnswer() });
+    const form = await openForm();
+    const section = within(form).getByText('Tools this goal may use').closest('[data-section="goal-tools"]') as HTMLElement;
+    expect(form.innerHTML.indexOf('goal-new-preset-small')).toBeLessThan(form.innerHTML.indexOf('data-section="goal-tools"'));
+    expect(within(section).getByText(LEAD)).toBeTruthy();
+    expect(within(section).getByText(/^send_file has no Telegram chat set/)).toBeTruthy();
+    expect(section.querySelector('[id="tool-c.send_file"]')).toBeNull(); // a blocked tool has no box
+    await fireEvent.click(section.querySelector('[id="tool-c.send_email"]') as HTMLElement);
+    await fireEvent.click(section.querySelector('[id="tool-c.mcp__notes__search"]') as HTMLElement);
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    expect(posts()).toEqual([]);
+    const ask = within(form).getByRole('group', { name: 'Confirm: the tools of the new goal' });
+    expect(within(ask).getByText(/^Allow this goal to use these tools without asking you each time/)).toBeTruthy();
+    expect(within(ask).getByText(/Send email to the addresses on your email allowlist/)).toBeTruthy();
+    expect(within(ask).getByText(/Use search on notes \(notes\.example\.com\)/)).toBeTruthy();
+    await fireEvent.click(within(ask).getByRole('button', { name: 'Yes, create' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect((posts()[0].body as { tools: unknown }).tools).toEqual([
+      { tool: 'send_email', confirm: true },
+      { tool: 'mcp__notes__search', confirm: true, server_id: NOTES_SERVER_ID },
+    ]);
+  });
+
+  it('No closes the question and sends nothing; a refusal is the server sentence as sent', async () => {
+    options = OPTIONS({ tools: newGoalToolsAnswer() });
+    const sentence = 'send_email is switched off for background work. Set it to Allowed under Limits and tools first.';
+    created = [409, { error: sentence, tool: 'send_email' }];
+    const form = await openForm();
+    await fireEvent.click(form.querySelector('[id="tool-c.send_email"]') as HTMLElement);
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'No' }));
+    expect(posts()).toEqual([]);
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await fireEvent.click(within(form).getByRole('button', { name: 'Yes, create' }));
+    const line = await within(form).findByRole('alert');
+    expect(line.textContent).toBe(sentence);
+  });
+
+  it('without a chosen tool, Create asks nothing and sends no tools', async () => {
+    options = OPTIONS({ tools: newGoalToolsAnswer() });
+    const form = await openForm();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect('tools' in (posts()[0].body as object)).toBe(false);
   });
 });

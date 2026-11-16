@@ -3,9 +3,10 @@
   import { Button } from '../../lib/ui/button';
   import {
     TOOLS_ADD_TITLE, TOOLS_NONE_TEXT, TOOLS_NOT_USED_TEXT, TOOLS_TITLE, TOOL_ALLOWED_TEXT, TOOL_ALREADY_ALLOWED_TEXT,
+    TOOL_CHOOSE_LABEL,
     TOOL_ALREADY_REMOVED_TEXT, TOOL_RELOAD_TEXT, TOOL_REMOVED_TEXT,
     allowTool, goalTools, removeTool, toolAllowedOnText, toolGroups, toolRefusalText, toolsLimitText, toolsReadFailedText,
-    type GoalToolOption, type GoalTools,
+    type GoalToolOption, type GoalTools, type NewGoalTools,
   } from '../../lib/goals';
 
   // F115 per-goal tools: the tools this goal's own background sessions may use without asking you (GET
@@ -13,7 +14,19 @@
   // it could be allowed, each with what it does, or why it cannot be allowed now. Allow asks once, repeating the
   // server's sentence; Remove asks nothing. Every sentence is the server's; the page lays them out. Read when the goal
   // shown or its state changes, and after every change. With the grants off on the server, nothing is shown.
-  let { goal }: { goal: { ref: string; state: string; updated_at: string | null } } = $props();
+  // On the create form (`pick`: GET /goals/options `tools`), the same rows with a box each instead of a button: the
+  // form asks once for the lot before it creates the goal.
+  let {
+    goal = null,
+    pick = null,
+    chosen = $bindable([]),
+    disabled = false,
+  }: {
+    goal?: { ref: string; state: string; updated_at: string | null } | null;
+    pick?: NewGoalTools | null;
+    chosen?: string[];
+    disabled?: boolean;
+  } = $props();
 
   type Note = { text: string; ok: boolean };
   let answer = $state<GoalTools | null>(null);
@@ -43,6 +56,7 @@
   // The goal shown, its state or its last change: read again (a pause or a resume changes where the tools apply). For
   // another goal, nothing of this one's carries over.
   $effect(() => {
+    if (!goal) return;
     const ref = goal.ref;
     void goal.state;
     void goal.updated_at;
@@ -79,7 +93,7 @@
 
   /** One change; every control of the section waits for it and the read after it. */
   async function change(tool: string, run: () => Promise<GoalTools>, done: [string, string]) {
-    if (busy) return;
+    if (busy || !goal) return;
     const ref = goal.ref;
     busy = tool;
     confirming = null;
@@ -102,9 +116,14 @@
   }
 
   const allow = (option: GoalToolOption) =>
-    change(option.tool, () => allowTool(goal.ref, option), [TOOL_ALLOWED_TEXT, TOOL_ALREADY_ALLOWED_TEXT]);
+    change(option.tool, () => allowTool(goal!.ref, option), [TOOL_ALLOWED_TEXT, TOOL_ALREADY_ALLOWED_TEXT]);
   const remove = (tool: string) =>
-    change(tool, () => removeTool(goal.ref, tool), [TOOL_REMOVED_TEXT, TOOL_ALREADY_REMOVED_TEXT]);
+    change(tool, () => removeTool(goal!.ref, tool), [TOOL_REMOVED_TEXT, TOOL_ALREADY_REMOVED_TEXT]);
+
+  let pickGroups = $derived(toolGroups(pick?.available ?? []));
+  function toggle(tool: string, on: boolean) {
+    chosen = on ? [...chosen.filter((t) => t !== tool), tool] : chosen.filter((t) => t !== tool);
+  }
 </script>
 
 <!-- Escape closes an open confirmation, as No does. -->
@@ -117,7 +136,38 @@
   {/if}
 {/snippet}
 
-{#if on && answer}
+{#if pick}
+  <div class="card picking" data-section="goal-tools">
+    <h3>{TOOLS_TITLE}</h3>
+    <p class="hint">{pick.applies_in}</p>
+    {#each pickGroups as group (group.key)}
+      <section class="group" aria-label={group.words}>
+        <p class="group-words">{group.words}</p>
+        <ul class="tools">
+          {#each group.rows as option (option.tool)}
+            <li class="tool">
+              <div class="about">
+                <span class="name">{option.label}</span>
+                <p class="says">{option.says}</p>
+                {#if option.blocked}<p class="line blocked">{option.blocked.sentence}</p>{/if}
+              </div>
+              {#if !option.blocked}
+                <label class="choose">
+                  <input type="checkbox" id="tool-c.{slug(option.tool)}" checked={chosen.includes(option.tool)}
+                    disabled={disabled || (!chosen.includes(option.tool) && chosen.length >= pick.limit)}
+                    onchange={(e) => toggle(option.tool, e.currentTarget.checked)} />
+                  <span>{TOOL_CHOOSE_LABEL}</span>
+                </label>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/each}
+    <p class="hint">{toolsLimitText(pick.limit)}</p>
+    <p class="hint">{pick.never}</p>
+  </div>
+{:else if on && answer}
   <div class="card" data-section="goal-tools">
     <h3>{TOOLS_TITLE}</h3>
     <p class="hint">{answer.applies_in}</p>
@@ -224,7 +274,11 @@
   .note { font-size: 0.8125rem; color: var(--save-ok); margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .note-err { color: var(--warn-text); }
   .note:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+  .picking { margin-bottom: 0; box-shadow: none; }
+  .choose { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; cursor: pointer; white-space: nowrap; }
+  .choose input { width: 1rem; height: 1rem; }
   @media (max-width: 768px) {
     .tool { grid-template-columns: minmax(0, 1fr); }
+    .choose { min-height: 2.75rem; }
   }
 </style>
