@@ -148,6 +148,15 @@ describe('Devices: the states', () => {
     expect(section().querySelector('img, b')).toBeNull();
   });
 
+  it('a revoked device\'s name with markup is shown as text too', async () => {
+    const hostile = '<img src=x onerror="window.__pwned=1"><b>Old phone</b>';
+    listed = deviceList({ devices: [deviceRow({ name: hostile, revoked_at: `${YEAR}-11-14T10:00:00Z` })] });
+    const s = await shown();
+    const name = await s.findByText(hostile);
+    expect(name.closest('ul')?.getAttribute('aria-label')).toBe('Revoked devices');
+    expect(section().querySelector('img, b')).toBeNull();
+  });
+
   it('403: asks to sign in through the login page, and offers nothing to change', async () => {
     handlers['GET /a2ui/devices'] = () => [403, { error: 'forbidden' }];
     const s = await shown();
