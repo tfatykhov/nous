@@ -73,6 +73,7 @@ LIST_MAX = 200
 SESSIONS_SHOWN = 50
 PAUSE_SENTENCE_CHARS = 300
 # A session's close row as the driver writes it (``nous/goals/driver.py``: "Session <n> ended: <outcome>, ...").
+# When the driver's pause rows carry their evidence ref (``stop:<reason>``), select the pause row by that ref instead.
 CLOSE_ROW_PATTERN = "Session % ended: %"
 # At most this many problems of a body are listed; the rest are counted.
 PROBLEMS_SHOWN = 5
