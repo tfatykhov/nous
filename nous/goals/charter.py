@@ -6,6 +6,10 @@ owner-approved goal. The plan and the journal were written by earlier sessions, 
 sessions read, so each step and each entry is quoted as data (``nous.goals.quote``) under a line saying it is a
 record, not instructions. The whole text is at most ``MAX_TASK_CHARS``; what goes first when it must be cut, and
 what goes last (the owner's words), is in ``build_session_task``. The charter is never cut.
+
+``render_goal_block`` is the same, for the prompt of a decision turn of a goal session's root: the charter, the plan
+and the journal quoted the same way and cut in the same order, then how to record progress and the evidence the turn
+can cite, at most ``MAX_BLOCK_CHARS``.
 """
 
 from __future__ import annotations
