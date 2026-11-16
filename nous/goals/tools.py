@@ -48,7 +48,7 @@ STEP_STATUSES = ("open", "closed", "dropped")
 NOTE_KINDS = ("progress", "done_claim")
 WRITABLE_STATES = ("active", "paused")  # a running session of a paused goal still runs to its end
 _STEP_ID = re.compile(r"s(\d{1,4})")
-# The owner message of a done claim: one per session (its source id).
+# The owner message of a done claim: one per claim (its source id is derived from the claim's journal seq).
 DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
 MESSAGE_TITLE_CHARS = 120  # the goal's title, as the done message quotes it
 
@@ -188,24 +188,35 @@ class GoalTools:
         async with self._db.session() as s:
             row, goal = await self._locked(s)
             n, ended, state, reason = row.n, row.ended_at is not None, goal.state, goal.pause_reason
-            self._store.add_journal_row(s, goal.id, kind, body, actor="chain", session_n=n)
-            waiting = False
-            if kind == "done_claim" and state == "active":
-                waiting = await self._wait_for_owner(s, goal, row)
+            claim = self._store.add_journal_row(s, goal.id, kind, body, actor="chain", session_n=n)
+            waiting = told = False
+            if kind == "done_claim" and state == "active" and not ended:
+                await s.flush()  # the claim's seq keys the owner's message: one message per claim
+                waiting, told = await self._wait_for_owner(s, goal, row, claim_seq=claim.seq)
             await s.commit()
         said = "Noted" + (f" (clipped to {JOURNAL_MAX_CHARS} characters)" if clipped else "") + "."
         if ended:
             said += f" Session {n} has ended; the note is kept under it."
         if kind == "done_claim":
-            if waiting:
-                said += " The goal now waits for the owner, who confirms it done or resumes it."
+            if ended:
+                said += " A claim from an ended session changes nothing: the goal stays as it is; the claim is kept."
+            elif waiting and told:
+                said += " The goal now waits for the owner, who has been told and confirms it done or resumes it."
+            elif waiting:
+                said += (
+                    " The goal now waits for the owner, who confirms it done or resumes it; no message could be sent, "
+                    "so the owner finds it on the Goals screen."
+                )
             else:
                 said += f" The goal is {state} ({reason}), so it stays as it is; the claim is kept for the owner."
         return said
 
-    async def _wait_for_owner(self, s: AsyncSession, goal: Goal, row: GoalSession) -> bool:
-        """A done claim on an active goal: paused for the owner (``waiting_for_owner``), its next wake cleared, a
-        harness ``state`` row in fixed words, and one message to the owner (per session). The goal is locked."""
+    async def _wait_for_owner(
+        self, s: AsyncSession, goal: Goal, row: GoalSession, *, claim_seq: int
+    ) -> tuple[bool, bool]:
+        """A done claim of an open session on an active goal: paused for the owner (``waiting_for_owner``), its next
+        wake cleared, a harness ``state`` row in fixed words, and one message to the owner for this claim (keyed by
+        the claim's journal seq). The goal is locked. ``(paused, told)``: told only when the message was written."""
         result = await s.execute(
             update(Goal)
             .where(Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active")
@@ -213,28 +224,28 @@ class GoalTools:
             .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:
-            return False
+            return False, False
         note = f"Waiting for the owner: session {row.n} claimed that the goal is done. Only the owner can finish it."
         self._store.add_journal_row(s, goal.id, "state", note, actor="harness", session_n=row.n)
-        await self._tell_owner(s, goal, row)
-        return True
+        return True, await self._tell_owner(s, goal, claim_seq)
 
-    async def _tell_owner(self, s: AsyncSession, goal: Goal, row: GoalSession) -> None:
+    async def _tell_owner(self, s: AsyncSession, goal: Goal, claim_seq: int) -> bool:
         """The done claim's message to the owner: one fixed sentence naming the goal by its ref and its title (the
         owner-approved charter's, on one line, quoted and bounded), and what only the owner can do. No text the chain
-        wrote and no command line (a claimed message reaches the next chat turn)."""
+        wrote and no command line (a claimed message reaches the next chat turn). It is the goal's message, not the
+        chain's: it carries no intention, so a cancel of the session's root never withdraws it. True when written."""
         channel = continuation.owner_channel(self._settings, goal.origin_channel)
         if channel is None:
             logger.warning("F114: goal %s waits for the owner, who has no channel to be told on", goal.id)
-            return
+            return False
         label = format_short_id(goal.short_id)
         title = clip(neutralize(_one_line(goal.title)).replace('"', "'"), MESSAGE_TITLE_CHARS)
         body = (
             f'Goal {label} "{title}" says it is done; only you can finish it: on the Goals screen, confirm it done or '
             "resume it."
         )
-        source_id = uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{row.n}")
-        await continuation.insert_inbox_row(
+        source_id = uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{claim_seq}")
+        written = await continuation.insert_inbox_row(
             s,
             self._agent_id,
             source_kind=continuation.SOURCE_INTENTION_REPORT,
@@ -244,11 +255,11 @@ class GoalTools:
             body=body,
             channel=channel,
             correlation_id=str(source_id),
-            intention_id=self._ref.root_id,
             push_after=await continuation.owner_push_after(
                 s, self._agent_id, self._settings, channel=channel, root_id=self._ref.root_id
             ),
         )
+        return written is not None
 
     # ---- goal_plan ---------------------------------------------------------------------------------------------
 

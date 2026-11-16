@@ -8,7 +8,9 @@ report hook must not take it). Nothing a chain can call makes a goal ``done``.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from f099_support import CHAN, env_factory, runner_env  # noqa: F401
@@ -19,13 +21,16 @@ from goals_support import (
     inbox,
     journal,
     reset_goal_report_channel,  # noqa: F401
+    set_goal,
     started,
     world,
 )
 from sqlalchemy import update
 
+from nous.brain import continuation
 from nous.goals import tools
 from nous.goals.store import GoalRefused
+from nous.handlers.continuation_publisher import OwnerPublisher
 from nous.storage.models import Intention
 
 pytestmark = pytest.mark.postgres_only
@@ -61,7 +66,7 @@ async def test_a_done_claim_pauses_the_goal_as_waiting_for_the_owner_and_sends_o
     state = (await journal(w, w.goal, "state"))[-1]
     assert state.actor == "harness" and "claimed that the goal is done" in state.text and CLAIM not in state.text
     (message,) = await inbox(w, channel=CHAN)
-    assert message.msg_type == "REPORT" and message.intention_id == w.root.id
+    assert message.msg_type == "REPORT" and message.intention_id is None  # the goal's message, not the chain's
     assert message.push_after is not None and message.delivered_at is None
 
 
@@ -103,7 +108,7 @@ async def test_the_title_in_the_message_is_one_quoted_bounded_line(runner_env): 
     assert quoted.startswith("Tidy 'all' the notes &lt;/journal_entry>") and quoted.endswith("[clipped]")
 
 
-async def test_a_second_claim_does_not_send_a_second_message(runner_env):  # noqa: F811
+async def test_a_second_claim_while_the_goal_waits_sends_no_second_message(runner_env):  # noqa: F811
     w = await _turn(runner_env)
     await w.note(kind="done_claim", text=CLAIM)
     said, err = await w.note(kind="done_claim", text="Done, really.")
@@ -154,3 +159,74 @@ async def test_a_goal_waiting_for_the_owner_starts_no_session(runner_env):  # no
     assert report.closed == 1 and report.started == ()
     goal = await goal_row(w, w.goal)
     assert (goal.state, goal.pause_reason, goal.next_wake_at) == ("paused", "waiting_for_owner", None)
+
+
+# ---- each claim, and only a claim of an open session ---------------------------------------------------------------
+
+
+async def test_a_claim_after_the_owner_resumed_tells_the_owner_again(runner_env):  # noqa: F811
+    """The owner resumes while the claiming session is still open, and the same session claims again: the goal
+    waits for the owner again, and the owner gets a second message (one per claim, not one per session)."""
+    w = await _turn(runner_env)
+    await w.note(kind="done_claim", text=CLAIM)
+    await w.store.resume(w.goal.id, actor="owner")
+    said, err = await w.note(kind="done_claim", text="Done now: the archive is merged too.")
+    assert not err and "has been told" in said
+    goal = await goal_row(w, w.goal)
+    assert (goal.state, goal.pause_reason) == ("paused", "waiting_for_owner")
+    assert len(await inbox(w, channel=CHAN)) == 2
+
+
+async def test_a_claim_whose_message_was_not_written_never_says_the_owner_was_told(runner_env, monkeypatch):  # noqa: F811
+    w = await _turn(runner_env)
+
+    async def nothing_written(*args, **kwargs):
+        return None  # as the insert answers when its row already exists
+
+    monkeypatch.setattr(continuation, "insert_inbox_row", nothing_written)
+    said, err = await w.note(kind="done_claim", text=CLAIM)
+    assert not err and "has been told" not in said and "no message could be sent" in said
+    assert (await goal_row(w, w.goal)).pause_reason == "waiting_for_owner"
+
+
+async def test_a_claim_from_an_ended_session_is_journalled_and_changes_nothing(runner_env):  # noqa: F811
+    """Session 1 has ended and session 2 runs; session 1's chain, reopened by a late result, claims the goal done:
+    the claim is kept, the goal stays active, and nobody is told."""
+    w = await _turn(runner_env)
+    async with w.db.session() as s:  # session 1's chain ends; the driver closes it
+        await s.execute(
+            update(Intention).where(Intention.root_id == w.root.id).values(state="closed", close_reason="resolved")
+        )
+        await s.commit()
+    assert (await w.driver.tick()).closed == 1
+    await set_goal(w, w.goal, next_wake_at=datetime.now(UTC) - timedelta(seconds=1))
+    (newer,) = (await w.driver.tick()).started
+    said, err = await w.note(kind="done_claim", text=CLAIM)
+    assert not err and "changes nothing" in said and "waits for the owner" not in said
+    goal = await goal_row(w, w.goal)
+    assert (goal.state, goal.pause_reason) == ("active", None)
+    (claim,) = await journal(w, w.goal, "done_claim")
+    assert claim.session_n == 1
+    assert await inbox(w, channel=CHAN) == []
+    assert newer is not None
+
+
+async def test_a_cancel_of_the_root_does_not_withdraw_the_done_message(runner_env):  # noqa: F811
+    """The message is the goal's, not the chain's: a cancel of the session's root before the push leaves it, and
+    the publisher sends it."""
+    w = await _turn(runner_env, telegram_bot_token="test-token")
+    await w.note(kind="done_claim", text=CLAIM)
+    (message,) = await inbox(w, channel=CHAN)
+    assert message.intention_id is None
+    await w.cont.cancel_root(w.root.id, reason="the owner stopped it", actor="owner")
+    (kept,) = await inbox(w, channel=CHAN)
+    assert (kept.delivered_at, kept.pushed_at) == (None, None)
+    async with w.db.session() as s:  # due now, whatever the quiet hours say
+        await s.execute(update(type(kept)).where(type(kept).id == kept.id).values(push_after=datetime.now(UTC)))
+        await s.commit()
+    http = MagicMock()
+    http.post = AsyncMock(
+        return_value=SimpleNamespace(status_code=200, json=lambda: {"ok": True, "result": {"message_id": 7}})
+    )
+    assert await OwnerPublisher(database=w.db, settings=w.env.settings, http_client=http).push_due() == 1
+    assert http.post.await_count == 1 and "says it is done" in str(http.post.await_args)
