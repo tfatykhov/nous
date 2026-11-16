@@ -297,6 +297,18 @@ describe('Goals: the actions', () => {
     expect(await within(region).findByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
   });
 
+  it('a budget change sends only the field that changed', async () => {
+    acting('G-0001', 'budget', { day_budget: 1_000_000 });
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    await fireEvent.input(within(region).getByLabelText('Day budget (tokens)'), { target: { value: '1000000' } });
+    expect(within(region).getByText('This lowers the day budget from 2,000,000 to 1,000,000 tokens.')).toBeTruthy();
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, change the budget' }));
+    await within(region).findByText('Budget changed.');
+    expect(posts().map((c) => [c.url, c.body])).toEqual([['/goals/G-0001/budget', { day: 1_000_000 }]]);
+  });
+
   it('raise budget and extend deadline send their bodies, and the sentence says raise or lower', async () => {
     acting('G-0001', 'budget', { total_budget: 20_000_000 });
     acting('G-0001', 'deadline', {});
