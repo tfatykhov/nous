@@ -123,13 +123,15 @@ def _cancelled_by(why: str) -> dict[str, str] | None:
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
 # it belongs to: the session whose root is the row's intention's root, else the one whose first subtask is that
-# root's source (its root id not written yet), else the goal's newest session. No age bound and no row limit.
+# root's source (its root id not written yet), else the goal's newest session. No age bound and no row limit. A row
+# a cancel of its root stamped (``continuation.SILENT_SESSION_ID``) was written before the cancel: it is claimed too.
 _CLAIM_SQL = text(
     """
     WITH claimed AS (
         UPDATE heart.result_inbox
            SET delivered_at = clock_timestamp(), delivered_session_id = :channel
-         WHERE agent_id = :agent AND channel = :channel AND delivered_at IS NULL
+         WHERE agent_id = :agent AND channel = :channel
+           AND (delivered_at IS NULL OR delivered_session_id = :cancelled)
         RETURNING id, body, intention_id, created_at
     )
     SELECT c.id, c.body,
@@ -887,14 +889,15 @@ class GoalDriver:
     # ---- the goal channel ----------------------------------------------------------------------------------
 
     async def claim_reports(self) -> int:
-        """Journal every undelivered row on each goal's channel (``goal:<id>``) as a ``report`` row. One
+        """Journal every undelivered row on each goal's channel (``goal:<id>``), and every row there a cancel of its
+        root stamped (``continuation.SILENT_SESSION_ID``: it was written before the cancel), as a ``report`` row. One
         transaction per goal stamps the rows and writes their journal rows, so a failure between the two loses
         nothing: the rows stay undelivered for the next tick. Returns the rows journalled."""
         channel_of_goal = func.concat("goal:", cast(Goal.id, Text))
         waiting = exists().where(
             ResultInbox.agent_id == self._agent_id,
             ResultInbox.channel == channel_of_goal,
-            ResultInbox.delivered_at.is_(None),
+            or_(ResultInbox.delivered_at.is_(None), ResultInbox.delivered_session_id == continuation.SILENT_SESSION_ID),
         )
         async with self._db.session() as s:
             goal_ids = list(
@@ -911,7 +914,8 @@ class GoalDriver:
     async def _claim_channel(self, goal_id: UUID) -> int:
         channel = f"goal:{goal_id}"
         async with self._db.session() as s:
-            rows = (await s.execute(_CLAIM_SQL, {"agent": self._agent_id, "channel": channel, "goal": goal_id})).all()
+            params = {"agent": self._agent_id, "channel": channel, "goal": goal_id}
+            rows = (await s.execute(_CLAIM_SQL, {**params, "cancelled": continuation.SILENT_SESSION_ID})).all()
             for row in rows:
                 self._journal(
                     s, goal_id, "report", row.body, actor="chain", session_n=row.session_n, evidence=[f"row:{row.id}"]

@@ -26,7 +26,7 @@ from sqlalchemy import event, update
 
 from nous.brain import continuation
 from nous.goals.chain import report_channel
-from nous.storage.models import GoalSession
+from nous.storage.models import GoalSession, ResultInbox
 
 pytestmark = pytest.mark.postgres_only
 
@@ -164,3 +164,24 @@ async def test_an_expiry_report_of_a_goal_chain_goes_to_the_journal(runner_env):
     (journalled,) = await journal(w, goal, "report")
     assert journalled.session_n == session.n and journalled.text.startswith("I closed this because")
     assert await inbox(w, channel=CHAN) == []
+
+
+async def test_a_goal_report_a_cancel_stamped_is_still_journalled(runner_env):  # noqa: F811
+    """A report on the goal channel written before a cancel of its root, and stamped by the cancel before the driver
+    claimed it, still reaches the goal's journal, once."""
+    w = await _world(runner_env, [REPORT])
+    goal = await active(w)
+    root, session = await started(w, goal)
+    await first_result(w, root)
+    assert await w.cont.run_arrival(root.id) is not None
+    async with w.db.session() as s:  # a cancel's stamp, as continuation.cancel_root writes it
+        await s.execute(
+            update(ResultInbox)
+            .where(ResultInbox.agent_id == w.agent, ResultInbox.channel == f"goal:{goal.id}")
+            .values(delivered_at=datetime.now(UTC), delivered_session_id=continuation.SILENT_SESSION_ID)
+        )
+        await s.commit()
+    assert (await w.driver.tick()).claimed == 1
+    (row,) = await journal(w, goal, "report")
+    assert (row.text, row.session_n) == (DONE, session.n)
+    assert (await w.driver.tick()).claimed == 0  # claimed once
