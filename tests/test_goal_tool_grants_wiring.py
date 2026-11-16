@@ -1,9 +1,10 @@
 """Per-goal tool grants, the refresh points: the driver reads the view at its start, at the end of every tick (after
-the stop conditions), after a session starts and after one closes; a goal session's decision turn reads its root
-again. A refresh that fails fails neither the tick nor the turn."""
+the stop conditions), in a session's publish and after it, and after one closes; a goal session's decision turn reads
+its root again. A refresh that fails fails neither the tick nor the turn."""
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import pytest
@@ -34,6 +35,11 @@ class Recorder:
     async def refresh_goal(self, goal_id) -> bool:
         self.calls.append(("goal", goal_id))
         return not self.fail
+
+    @contextlib.asynccontextmanager
+    async def publishing(self, session, root_id):
+        self.calls.append(("publish", root_id))
+        yield
 
 
 class Broken:
@@ -76,7 +82,7 @@ async def test_a_started_session_and_a_closed_one_have_their_root_read(env_facto
     goal = await _active(w)
     w.driver.tool_grants = recorder = Recorder()
     root, _session = await _started(w, goal)
-    assert recorder.calls == [("root", root.id)]
+    assert recorder.calls == [("publish", root.id), ("root", root.id)]
     recorder.calls.clear()
     await _finish(w, root)
     report = await w.driver.tick()

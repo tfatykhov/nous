@@ -680,7 +680,8 @@ class GoalDriver:
         recovery of a session whose first subtask never appeared takes the same lock, so the two cannot both win:
         either recovery closed the session first and nothing is published (None; the start counts no failure), or
         the work and the root id are committed together and recovery then finds the root. The root's id, or None.
-        A failure raises with nothing published."""
+        A failure raises with nothing published. With the F115 view set, the root's grants enter it in this
+        transaction, before the commit (``GoalToolGrants.publishing``)."""
         async with self._db.session() as s:
             still_open = (
                 await s.execute(
@@ -712,7 +713,12 @@ class GoalDriver:
             if not await self._set_root(s, session_id, root_id):
                 await s.rollback()
                 return None
-            await s.commit()
+            if self.tool_grants is None:
+                await s.commit()
+            else:
+                # F115: the root's grants are in the runner's view before this commit makes the first task claimable.
+                async with self.tool_grants.publishing(s, root_id):
+                    await s.commit()
             return root_id
 
     async def _gated_task(self, goal: Goal) -> tuple[str | None, str]:

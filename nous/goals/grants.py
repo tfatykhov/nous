@@ -22,8 +22,9 @@ ActionGate. ``decide`` never raises: an error is ``Decision(False, "error")``, l
 
 ``GoalToolGrants`` is the view: dict lookups for the runner, and refreshes that each hold one lock around their whole
 read and apply, so a refresh that read before a revoke committed can never be applied after the revoke's own refresh.
-A refresh that fails clears the whole view. The first use of a granted tool in a session writes one harness journal row
-(``note_use``).
+A refresh that fails clears the whole view. A new session's root is added by ``publishing``, inside the transaction
+that gives the session its root, before its commit lets a worker claim the session's first task. The first use of a
+granted tool in a session writes one harness journal row (``note_use``).
 
 The screen's words come from the tables here (``GRANT_PLACES``, ``NEVER_SENTENCE``, ``GRANT_FACTS``), which the
 routes read and tests tie to the code's own tables.
@@ -32,17 +33,19 @@ routes read and tests tie to the code's own tables.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
@@ -320,14 +323,40 @@ class GoalToolGrants:
         """Read the grants of the goal's open session again."""
         return await self._refresh(goal_id=goal_id)
 
+    @contextlib.asynccontextmanager
+    async def publishing(self, session: AsyncSession, root_id: UUID) -> AsyncIterator[None]:
+        """Around the commit of ``session``, the transaction that gives a new goal session its root ``root_id``
+        (``GoalDriver._publish``): the root's grants, read in that transaction, are in the view before the commit
+        lets a worker claim the session's first task, and the lock is held until the commit is done, so no refresh
+        can read the session as it was before the commit and drop them. The read runs under a savepoint: a failed
+        one clears the view (logged by its class) and the transaction goes on. When the body raises (the commit
+        failed), the root's entry is taken out again. Never raises on entry."""
+        async with self._lock:
+            try:
+                async with session.begin_nested():
+                    found = await self._read(root_id=root_id, goal_id=None, session=session)
+            except Exception as exc:
+                self._failed(exc)
+            else:
+                self._by_root = {**{root: tools for root, tools in self._by_root.items() if root != root_id}, **found}
+            try:
+                yield
+            except BaseException:
+                self._by_root.pop(root_id, None)
+                raise
+
+    def _failed(self, exc: BaseException) -> None:
+        """A read failed: the whole view is cleared and stale until a full read succeeds."""
+        self._by_root = {}
+        self._loaded_at = None
+        logger.warning("F115: the goals' tool grants could not be read; none apply (%s)", type(exc).__name__)
+
     async def _refresh(self, *, root_id: UUID | None = None, goal_id: UUID | None = None) -> bool:
         async with self._lock:  # around the whole read and apply
             try:
                 found = await self._read(root_id=root_id, goal_id=goal_id)
             except Exception as exc:
-                self._by_root = {}
-                self._loaded_at = None
-                logger.warning("F115: the goals' tool grants could not be read; none apply (%s)", type(exc).__name__)
+                self._failed(exc)
                 return False
             if root_id is None and goal_id is None:
                 self._by_root = found
@@ -342,7 +371,11 @@ class GoalToolGrants:
             self._by_root = {**kept, **found}
             return True
 
-    async def _read(self, *, root_id: UUID | None, goal_id: UUID | None) -> dict[UUID, dict[str, Grant]]:
+    async def _read(
+        self, *, root_id: UUID | None, goal_id: UUID | None, session: AsyncSession | None = None
+    ) -> dict[UUID, dict[str, Grant]]:
+        """The grants of the open sessions of active goals (of one root, or one goal), read in ``session`` when
+        given, else in a transaction of its own."""
         query = (
             select(GoalSession.root_id, GoalSession.n, GoalToolGrant)
             .join(
@@ -364,10 +397,14 @@ class GoalToolGrants:
             query = query.where(GoalSession.root_id == root_id)
         if goal_id is not None:
             query = query.where(GoalToolGrant.goal_id == goal_id)
+        if session is not None:
+            rows = (await session.execute(query)).all()
+        else:
+            async with self._db.session() as s:
+                rows = (await s.execute(query)).all()
         found: dict[UUID, dict[str, Grant]] = {}
-        async with self._db.session() as s:
-            for root, n, row in (await s.execute(query)).all():
-                found.setdefault(root, {})[row.tool] = Grant(row.goal_id, n, row.tool, grant_identity(row))
+        for root, n, row in rows:
+            found.setdefault(root, {})[row.tool] = Grant(row.goal_id, n, row.tool, grant_identity(row))
         return found
 
 

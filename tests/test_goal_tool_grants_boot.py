@@ -1,8 +1,9 @@
 """Per-goal tool grants end to end: the real app's lifespan builds the view, reads it before the driver starts, binds it
 to the runner and hands it and the dispatcher to the goal routes; a session the real driver starts has its first task
-offered the goal's granted tool through the context the worker derives from the stored subtask row, and so has its
-decision turn; a real turn of each kind a grant reaches calls the tool and records it in the durable ledger; and the
-first-use journal row leaves the chain's own note limit as it was."""
+offered the goal's granted tool through the context the worker derives from the stored subtask row, even by a
+worker that claims it the moment the start commits, and so has its decision turn; a real turn of each kind a grant
+reaches calls the tool and records it in the durable ledger; and the first-use journal row leaves the chain's own
+note limit as it was."""
 
 from __future__ import annotations
 
@@ -276,7 +277,7 @@ async def test_a_real_turn_of_each_kind_calls_the_granted_tool_and_the_ledger_re
     await asyncio.gather(*view._tasks)
 
 
-async def test_a_start_whose_grant_read_raises_still_starts_and_its_first_task_has_no_lift(env_factory, caplog):  # noqa: F811
+async def test_a_start_whose_grant_reads_raise_still_starts_and_its_first_task_has_no_lift(env_factory, caplog):  # noqa: F811
     w = await _world(env_factory, **GRANTS)
     goal = await _active(w)
     await w.store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
@@ -284,15 +285,16 @@ async def test_a_start_whose_grant_read_raises_still_starts_and_its_first_task_h
     view = GoalToolGrants(w.db, w.env.settings)
     assert await view.refresh()
 
-    async def raising(root_id):
+    async def raising(**_kw):
         raise RuntimeError("the read blew up")
 
-    view.refresh_root = raising
+    view._read = raising  # the read in the publish and the read after it
     w.driver.tool_grants = view
     runner = _runner_over(("send_email", "web_search"))
     runner.set_goal_lift(view.lifts, view.note_used)
     root, session = await _started(w, goal)  # started, not failed and not delayed
-    assert session.ended_at is None and w.driver._runner.wakes == 1
+    assert session.ended_at is None and session.root_id == root.id and w.driver._runner.wakes == 1
+    assert not view.fresh()  # a failed read clears the view
     assert "RuntimeError" in caplog.text and "blew up" not in caplog.text
     async with w.db.session() as s:
         subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
@@ -324,3 +326,101 @@ async def test_the_first_task_of_a_goal_created_with_a_grant_is_offered_it(env_f
     first_task = ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
     assert first_task.root_intention_id == root.id
     assert "send_email" in _offered(runner, first_task) and "send_file" not in _offered(runner, first_task)
+
+
+# ---- the first task sees the grant before it can be claimed -----------------------------------------------------
+
+
+async def _granted_world(env_factory):  # noqa: F811
+    w = await _world(env_factory, **GRANTS)
+    goal = await _active(w)
+    await w.store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(w.db, w.env.settings)
+    assert await view.refresh()
+
+    async def no_read(root_id):  # the read after the start: only the publish can have shown the grant
+        return True
+
+    view.refresh_root = no_read
+    w.driver.tool_grants = view
+    runner = _runner_over(("send_email", "web_search"))
+    runner.set_goal_lift(view.lifts, view.note_used)
+    return w, goal, view, runner
+
+
+def _around_the_publish_commit(w, monkeypatch, before=None, after=None):
+    """Wrap the commit of the start's publish transaction (the one ``_set_root`` runs in)."""
+    real_set_root = w.driver._set_root
+
+    async def set_root(s, session_id, root_id):
+        done = await real_set_root(s, session_id, root_id)
+        real_commit = s.commit
+
+        async def commit():
+            if before is not None:
+                await before()
+            await real_commit()
+            if after is not None:
+                await after()
+
+        s.commit = commit
+        return done
+
+    monkeypatch.setattr(w.driver, "_set_root", set_root)
+
+
+async def test_a_worker_that_claims_the_first_task_at_once_is_offered_the_grant(env_factory, monkeypatch):  # noqa: F811
+    w, goal, _view, runner = await _granted_world(env_factory)
+    seen: list[tuple] = []
+
+    async def claim_at_once():
+        # The moment the commit lands, before the start goes on: a worker claims the task and builds its turn.
+        subtask = await w.env.heart.subtasks.dequeue("eager-worker")
+        ctx = ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
+        seen.append((subtask.id, _offered(runner, ctx)))
+
+    _around_the_publish_commit(w, monkeypatch, after=claim_at_once)
+    _root, session = await _started(w, goal)
+    assert len(seen) == 1
+    claimed, offered = seen[0]
+    assert claimed == session.first_subtask_id and "send_email" in offered
+
+
+async def test_a_full_read_waits_for_the_publish_commit_and_keeps_the_new_root(env_factory, monkeypatch):  # noqa: F811
+    w, goal, view, runner = await _granted_world(env_factory)
+    reads: list[asyncio.Task] = []
+
+    async def read_all_before_the_commit():
+        reads.append(asyncio.create_task(view.refresh()))
+        await asyncio.wait(reads, timeout=1.0)  # time enough for a read that did not wait to finish
+        assert not reads[0].done()  # it waits for the commit
+
+    _around_the_publish_commit(w, monkeypatch, before=read_all_before_the_commit)
+    root, session = await _started(w, goal)
+    assert await reads[0] is True  # it read the session as committed
+    async with w.db.session() as s:
+        subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
+    assert "send_email" in _offered(runner, ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}"))
+    assert view.grant(root.id, "send_email") is not None
+
+
+async def test_a_publish_whose_commit_fails_leaves_no_grant_for_its_root(env_factory, monkeypatch):  # noqa: F811
+    w, goal, view, _runner = await _granted_world(env_factory)
+    roots: list = []
+    real_set_root = w.driver._set_root
+
+    async def set_root(s, session_id, root_id):
+        roots.append(root_id)
+        await real_set_root(s, session_id, root_id)
+
+        async def failing_commit():
+            assert view.grant(root_id, "send_email") is not None  # in the view while the commit runs
+            raise ConnectionError("the commit was lost")
+
+        s.commit = failing_commit
+        return True
+
+    monkeypatch.setattr(w.driver, "_set_root", set_root)
+    assert await w.driver.start_session(goal.id, trigger="timer") is None  # a failed start
+    assert len(roots) == 1 and view.grant(roots[0], "send_email") is None
