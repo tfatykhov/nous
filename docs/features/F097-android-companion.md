@@ -314,7 +314,7 @@ Each gets a `docker-compose.yml` line with a real default, plus a read-only volu
 - **Where the token goes.** `X-Nous-Device-Token` on every call to the paired origin (scheme, host, port) and nowhere else: a network interceptor adds it only to a call's own request (never a redirect's follow-up), and no client follows redirects. Only over https, except `http://10.0.2.2` and `http://localhost` on a debuggable build (the emulator). A changed server address is not paired until it is paired itself.
 - **Refusals.** `DEVICE_TOKEN_REJECTED` on any call forgets the token ("This device is no longer paired. Pair it again in Settings."). A hydration read refused with `OWNER_PROOF_REQUIRED` or `DEVICE_TOKEN_REJECTED` stops the sync loop and the inbox offers Settings; a refused tap shows "Pair this device to use this button." with a way to Settings, and the loop goes on. The push token worker stops on an answer a retry cannot change (a 3xx, or a 4xx other than 404, 408 and 429), and Settings shows why.
 - **Unpair** (and Disconnect): delete this installation's push registration while the token still works, then `POST /a2ui/devices/unpair`, then forget the token, each step bounded to 5 s.
-- **Web links** ("Open web companion", "Open in web") use the pairing's `public_base_url` and are hidden without one.
+- **Web links** ("Open web companion", "Open in web") open the configured address's companion page while the phone is not paired, as before; once paired, the pairing's `public_base_url` when the server gave one, else the configured address. They are never hidden.
 
 ## 8. Rendering parity
 

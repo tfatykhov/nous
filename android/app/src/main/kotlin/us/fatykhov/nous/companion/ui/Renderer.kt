@@ -48,7 +48,7 @@ fun Render(componentId: String, scope: Scope?, depth: Int, ancestors: List<Strin
     }
 }
 
-/** Spec §8.2: never blank, never a throw — a card that names the component and, when the pairing gave a web address, opens the web. */
+/** Spec §8.2: never blank, never a throw — a card that names the component and opens the web. */
 @Composable
 fun FallbackCard(component: String) {
     val t = LocalNousTheme.current
@@ -60,10 +60,8 @@ fun FallbackCard(component: String) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(buildString { append(component); append(" isn't supported in the Android beta yet.") }, color = t.text, fontSize = 14.sp)
-        host.graph.webBaseUrl()?.let { web ->
-            TextButton(onClick = { UrlOpener.open(host.graph.appContext, web + "/companion/a/" + java.net.URLEncoder.encode(host.surfaceId, "UTF-8")) }) {
-                Text("Open in web", color = t.accent, fontWeight = FontWeight.SemiBold)
-            }
+        TextButton(onClick = { UrlOpener.open(host.graph.appContext, host.graph.webBaseUrl() + "/companion/a/" + java.net.URLEncoder.encode(host.surfaceId, "UTF-8")) }) {
+            Text("Open in web", color = t.accent, fontWeight = FontWeight.SemiBold)
         }
     }
 }

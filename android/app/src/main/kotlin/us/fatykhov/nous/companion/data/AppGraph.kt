@@ -29,8 +29,12 @@ class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
     fun tokenSent(): Boolean =
         credential.pairedFor(settings.baseUrl) != null && TokenPolicy.mayCarry(settings.baseUrl, debuggable)
 
-    /** The web companion's address from the pairing, or null: the app then shows no web link. */
-    fun webBaseUrl(): String? = credential.pairedFor(settings.baseUrl)?.publicBaseUrl
+    /**
+     * Where the web links open: the public base URL the pairing returned, when this
+     * phone is paired with the configured address and the server gave one; else the
+     * configured address, as before pairing existed.
+     */
+    fun webBaseUrl(): String = credential.pairedFor(settings.baseUrl)?.publicBaseUrl ?: settings.baseUrl
     // The device zone, not the :core default of UTC: the web formatter uses LOCAL
     // date getters, so an offset-bearing timestamp shows the user's wall clock.
     val functions = Functions(fmt = AndroidFormatter, opener = { url -> UrlOpener.open(appContext, url) }, zone = java.time.ZoneId.systemDefault())

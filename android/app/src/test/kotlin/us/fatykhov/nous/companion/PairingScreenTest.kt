@@ -1,13 +1,16 @@
 package us.fatykhov.nous.companion
 
+import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.serialization.json.Json
@@ -26,9 +29,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.GraphicsMode
 import us.fatykhov.nous.companion.core.Connection
 import us.fatykhov.nous.companion.core.DeviceToken
+import us.fatykhov.nous.companion.core.Paired
 import us.fatykhov.nous.companion.core.PairingWords
 import us.fatykhov.nous.companion.data.AppGraph
 import us.fatykhov.nous.companion.push.PushManager
@@ -88,7 +93,7 @@ class PairingScreenTest {
         val g = graph()
         rule.setContent { NousThemed(Themes.nousDefault) { SettingsScreen(g) { } } }
         rule.onNodeWithText("Not paired").assertExists()
-        assertTrue(rule.onAllNodes(hasText("Open web companion")).fetchSemanticsNodes().isEmpty())
+        rule.onNodeWithText("Open web companion").assertExists()
 
         rule.onNode(hasSetTextAction()).performTextInput("k7qm-2xrd")
         rule.onNodeWithText("Pair this device").performClick()
@@ -159,6 +164,45 @@ class PairingScreenTest {
         assertTrue(rule.onAllNodes(hasText("This card is no longer live")).fetchSemanticsNodes().isEmpty())
         rule.onNodeWithText("Open Settings").assertExists()
         assertEquals(1, org.robolectric.Shadows.shadowOf(nm).size())
+    }
+
+    // ------------------------------------------------------------- web links
+
+    /** Taps "Open web companion" in Settings, then "Open in web" on a card the app cannot render; the URLs they opened. */
+    private fun webLinksOpen(g: AppGraph): List<String> {
+        val card = """{"version":"v1.0","createSurface":{"surfaceId":"s1","catalogId":"c","metadata":{"extensions":{"com_nous_nonce":"n1"}},"components":[{"id":"root","component":"NoSuchComponent"}]}}"""
+        g.store.apply(null, Json.parseToJsonElement(card).jsonObject)
+        val onCard = mutableStateOf(false)
+        rule.setContent {
+            NousThemed(Themes.nousDefault) {
+                if (!onCard.value) SettingsScreen(g) { }
+                else CompositionLocalProvider(LocalSurfaceHost provides SurfaceHost(g, "s1")) { Render("root", null, 0, emptyList()) }
+            }
+        }
+        val app = shadowOf(ctx as Application)
+        rule.onNodeWithText("Open web companion").performScrollTo().performClick()
+        rule.waitForIdle()
+        val fromSettings = app.nextStartedActivity?.dataString
+        rule.runOnIdle { onCard.value = true }
+        rule.onNodeWithText("Open in web").performClick()
+        rule.waitForIdle()
+        return listOf(fromSettings, app.nextStartedActivity?.dataString).map { it ?: "nothing opened" }
+    }
+
+    @Test fun web_links_open_the_configured_address_while_not_paired() {
+        assertEquals(listOf("$base/companion", "$base/companion/a/s1"), webLinksOpen(graph()))
+    }
+
+    @Test fun web_links_open_the_public_base_url_once_paired() {
+        val g = graph()
+        assertTrue(g.credential.save(Paired(SAMPLE_TOKEN, "d-1", "Pixel", "https://web.nous.example"), base))
+        assertEquals(listOf("https://web.nous.example/companion", "https://web.nous.example/companion/a/s1"), webLinksOpen(g))
+    }
+
+    @Test fun web_links_open_the_configured_address_when_the_pairing_gave_no_public_base_url() {
+        val g = graph()
+        assertTrue(g.credential.save(Paired(SAMPLE_TOKEN, "d-1", "Pixel", null), base))
+        assertEquals(listOf("$base/companion", "$base/companion/a/s1"), webLinksOpen(g))
     }
 
     @Test fun a_refused_tap_says_pair_and_offers_settings() {

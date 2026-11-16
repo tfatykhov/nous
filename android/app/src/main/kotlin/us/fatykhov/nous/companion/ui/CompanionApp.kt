@@ -373,10 +373,10 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
             KV("last seq", graph.store.lastSeq.toString()); KV("reconnects", graph.engine.reconnects.toString()); KV("last error", graph.engine.lastError ?: "none")
             KV("installation", graph.settings.installationId.take(8))
         }
-        // The web companion's address comes from the pairing (the server's public base URL); none, no link.
+        // The pairing's public base URL when it gave one, else the configured address.
         val credVersion by rememberCredentialVersion(graph.credential)
         val web = remember(credVersion) { graph.webBaseUrl() }
-        if (web != null) TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, "$web/companion") }) { Text("Open web companion", color = t.accent) }
+        TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, "$web/companion") }) { Text("Open web companion", color = t.accent) }
         TextButton(onClick = { scope.launch {
             graph.engine.stop()
             // Deregister FIRST, while the installation id still exists and the device
