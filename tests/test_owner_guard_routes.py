@@ -175,12 +175,33 @@ OWNER_ROUTES = {
             ),
         )
     },
+    # F115: the autonomy changes, with the autonomy settings off (the default)
+    **{
+        (method, path): (b"{}", 503, {"error": "autonomy settings are off", "enabled": False})
+        for method in ("PUT", "DELETE")
+        for path in ("/autonomy/limits/max_turns", "/autonomy/tools/web_search")
+    },
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
     "/goals": {"enabled": False, "goals": []},
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
+}
+# F115: the autonomy reads require a secret too.
+AUTONOMY_READS = {
+    "/autonomy/limits": {"enabled": False},
+    "/autonomy/log": {"enabled": False},
+    "/autonomy/tools": {"enabled": False},
+}
+AUTONOMY_ROUTE_SET = {
+    ("GET", "/autonomy/limits"),
+    ("PUT", "/autonomy/limits/{key}"),
+    ("DELETE", "/autonomy/limits/{key}"),
+    ("GET", "/autonomy/log"),
+    ("GET", "/autonomy/tools"),
+    ("PUT", "/autonomy/tools/{tool}"),
+    ("DELETE", "/autonomy/tools/{tool}"),
 }
 GOAL_ROUTE_SET = {
     ("GET", "/goals"),
@@ -293,11 +314,12 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         if getattr(route, "methods", None) and getattr(route.endpoint, "owner_guarded", False)
         for method in route.methods - {"HEAD"}
     }
-    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET
+    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
     assert len(GOAL_ROUTE_SET) == 14
+    assert len(AUTONOMY_ROUTE_SET) == 7
 
 
-@pytest.mark.parametrize("path", list(GOAL_READS))
+@pytest.mark.parametrize("path", [*GOAL_READS, *AUTONOMY_READS])
 @pytest.mark.parametrize(
     ("headers", "allowed"),
     [({}, False), (OWNER, True), (PROXY, True), ({**PROXY, "content-type": "text/plain"}, True)],
@@ -305,7 +327,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
 )
 async def test_each_goal_read_against_each_proof(tmp_path, path: str, headers: dict[str, str], allowed: bool) -> None:
     response = await _send(_rest_app(tmp_path), "GET", path, headers=headers)
-    expected = (200, GOAL_READS[path]) if allowed else (403, FORBIDDEN)
+    expected = (200, {**GOAL_READS, **AUTONOMY_READS}[path]) if allowed else (403, FORBIDDEN)
     assert (response.status_code, response.json()) == expected
 
 
