@@ -146,11 +146,7 @@
         <ul class="tools">
           {#each group.rows as option (option.tool)}
             <li class="tool">
-              <div class="about">
-                <span class="name">{option.label}</span>
-                <p class="says">{option.says}</p>
-                {#if option.blocked}<p class="line blocked">{option.blocked.sentence}</p>{/if}
-              </div>
+              <span class="name">{option.label}</span>
               {#if !option.blocked}
                 <label class="choose">
                   <input type="checkbox" id="tool-c.{slug(option.tool)}" checked={chosen.includes(option.tool)}
@@ -159,6 +155,10 @@
                   <span>{TOOL_CHOOSE_LABEL}</span>
                 </label>
               {/if}
+              <div class="about">
+                <p class="says">{option.says}</p>
+                {#if option.blocked}<p class="line blocked">{option.blocked.sentence}</p>{/if}
+              </div>
             </li>
           {/each}
         </ul>
@@ -177,19 +177,18 @@
       <ul class="tools" aria-label={TOOLS_TITLE}>
         {#each grants as grant (grant.tool)}
           <li class="tool">
-            <div class="about">
-              <span class="name">{grant.label}</span>
-              <p class="says">{grant.says}</p>
-              <p class="line">{toolAllowedOnText(grant.granted_at)}</p>
-              {#if !grant.usable}<p class="line not-used">{TOOLS_NOT_USED_TEXT} {grant.not_usable_why ?? ''}</p>{/if}
-            </div>
+            <span class="name">{grant.label}</span>
             {#if canEdit}
               <div class="buttons">
                 <Button id="tool-r.{slug(grant.tool)}" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
                   disabled={busy !== null} onclick={() => void remove(grant.tool)}>{busy === grant.tool ? 'Working' : 'Remove'}</Button>
               </div>
             {/if}
-            <div class="more">{@render said(grant.tool)}</div>
+            <div class="about">
+              <p class="says">{grant.says} <span class="when">{toolAllowedOnText(grant.granted_at)}</span></p>
+              {#if !grant.usable}<p class="line not-used">{TOOLS_NOT_USED_TEXT} {grant.not_usable_why ?? ''}</p>{/if}
+              {@render said(grant.tool)}
+            </div>
           </li>
         {/each}
       </ul>
@@ -203,11 +202,7 @@
           <ul class="tools">
             {#each group.rows as option (option.tool)}
               <li class="tool">
-                <div class="about">
-                  <span class="name">{option.label}</span>
-                  <p class="says">{option.says}</p>
-                  {#if option.blocked}<p class="line blocked">{option.blocked.sentence}</p>{/if}
-                </div>
+                <span class="name">{option.label}</span>
                 {#if !option.blocked}
                   <div class="buttons">
                     <Button id="tool-a.{slug(option.tool)}" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
@@ -215,16 +210,16 @@
                       onclick={() => void ask(option)}>{busy === option.tool ? 'Working' : 'Allow'}</Button>
                   </div>
                 {/if}
-                <div class="more">
+                <div class="about">
+                  <p class="says">{option.says}</p>
+                  {#if option.blocked}<p class="line blocked">{option.blocked.sentence}</p>{/if}
                   {#if confirming === option.tool}
                     <div class="confirm" role="group" aria-label="Confirm: allow {option.label}">
                       <p id="tool-q.{slug(option.tool)}" tabindex="-1">{option.confirm}</p>
-                      <div class="actions">
-                        <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
-                          onclick={() => void allow(option)}>Yes, allow</Button>
-                        <Button size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
-                          onclick={() => void no(option.tool)}>No</Button>
-                      </div>
+                      <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
+                        onclick={() => void allow(option)}>Yes, allow</Button>
+                      <Button size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
+                        onclick={() => void no(option.tool)}>No</Button>
                     </div>
                   {/if}
                   {@render said(option.tool)}
@@ -257,21 +252,23 @@
   .group { margin-top: 0.5rem; }
   .group-words { font-size: 0.75rem; font-weight: 600; color: var(--muted); margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .tools { list-style: none; margin: 0.25rem 0 0; padding: 0; }
-  /* A tool: what it does at the left, its button at the right, the confirmation and the result under both. */
-  .tool { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 0.25rem 1rem;
-    padding: 0.625rem 0; border-top: 1px solid var(--border); min-width: 0; }
+  /* A tool: its name and its button (or box) on one line; what it does, the question and the result beneath, in
+     smaller text. */
+  .tool { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 0.75rem;
+    padding: 0.375rem 0; border-top: 1px solid var(--border); min-width: 0; }
   .tool:first-child { border-top: 0; }
-  .about { min-width: 0; }
-  .name { font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 600; overflow-wrap: anywhere; }
-  .says { font-size: 0.8125rem; margin: 0.125rem 0 0; overflow-wrap: anywhere; }
-  .line { font-size: 0.75rem; color: var(--muted); margin: 0.125rem 0 0; overflow-wrap: anywhere; }
+  .about { grid-column: 1 / -1; min-width: 0; }
+  .name { font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+  .says { font-size: 0.75rem; line-height: 1.4; margin: 0.125rem 0 0; overflow-wrap: anywhere; }
+  .when { color: var(--muted); }
+  .line { font-size: 0.75rem; line-height: 1.4; color: var(--muted); margin: 0.125rem 0 0; overflow-wrap: anywhere; }
   .not-used, .blocked { color: var(--warn-text); }
-  .more { grid-column: 1 / -1; min-width: 0; }
-  .confirm { margin-top: 0.25rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
-  .confirm p { margin: 0; overflow-wrap: anywhere; }
+  /* The question and its two buttons, on one line where they fit. */
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem 0.5rem; margin-top: 0.375rem;
+    padding: 0.5rem 0.625rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.75rem; }
+  .confirm p { flex: 1 1 18rem; margin: 0; overflow-wrap: anywhere; }
   .confirm p:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
-  .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
-  .note { font-size: 0.8125rem; color: var(--save-ok); margin: 0.25rem 0 0; overflow-wrap: anywhere; }
+  .note { font-size: 0.75rem; color: var(--save-ok); margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .note-err { color: var(--warn-text); }
   .note:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
   /* On the create form the form's own card frames it. */
@@ -279,7 +276,6 @@
   .choose { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; cursor: pointer; white-space: nowrap; }
   .choose input { width: 1rem; height: 1rem; }
   @media (max-width: 768px) {
-    .tool { grid-template-columns: minmax(0, 1fr); }
     .choose { min-height: 2.75rem; }
   }
 </style>

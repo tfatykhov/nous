@@ -149,6 +149,16 @@ describe('the tools a goal may use without asking', () => {
     expect(await screen.findByText('Removed.')).toBeTruthy();
   });
 
+  it("the question sits in the tool's own row, under what the tool does, with its two buttons", async () => {
+    render(GoalTools, { goal: GOAL });
+    const browser = await waitFor(() => rowOf('browser_task'));
+    await fireEvent.click(within(browser).getByRole('button', { name: 'Allow' }));
+    const question = within(browser).getByRole('group', { name: 'Confirm: allow browser_task' });
+    const says = within(browser).getByText(/^Open web pages on the sites each call names/);
+    expect(says.compareDocumentPosition(question) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(question).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['Yes, allow', 'No']);
+  });
+
   it("a refusal shows the server's sentence as it is", async () => {
     const sentence = 'send_email is switched off for background work. Set it to Allowed under Limits and tools first.';
     current = goalToolsAnswer({ grants: [], available: [toolOption('send_email')] });
