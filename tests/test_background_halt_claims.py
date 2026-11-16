@@ -503,6 +503,28 @@ async def test_a_continuation_turn_whose_root_the_sweep_cancelled_first_still_bo
     assert row.failed_tokens == 110  # booked on the cancelled row, with no fence left to pass
 
 
+@pytest.mark.postgres_only
+async def test_a_claim_lost_to_a_newer_claim_books_nothing_on_release(env_factory):  # noqa: F811
+    """A stale claim released by the lease sweep, then a new claim on the same root: releasing the old claim with
+    tokens charges nothing (only a cancelled root takes a lost claim's spend)."""
+    from f099_support import CONT, claim, intention_of
+    from test_f099_phase2c_failure import _claimed, _stale, _sweep
+
+    from nous.brain import continuation
+
+    env = await env_factory(**CONT)
+    root, old = await _claimed(env)
+    await _stale(env, root.id)
+    assert await _sweep(env) == [root.id]
+    new = await claim(env, root.id)
+    assert new is not None and new.claim_token != old.claim_token
+    async with env.db.session() as s:
+        assert await continuation.release_claim(s, env.agent, old, tokens=(100, 10)) == 0
+        await s.commit()
+    row = await intention_of(env, "subtask", root.source_id)
+    assert (row.state, row.claim_token, row.failed_tokens) == ("deciding", new.claim_token, 0)
+
+
 async def test_a_dag_summary_the_halt_cut_short_is_not_used():
     from nous.dag.delivery import DAGResultDelivery
 
