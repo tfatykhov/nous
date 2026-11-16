@@ -567,37 +567,29 @@ async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_t
     r, d = _runner(["send_email"])
     entry_id = uuid.uuid4()
     closed = _halt_lands_at(r, halt, point, entry_id)
-
-    async def one_send_then_text(system_prompt, messages, tools=None, **_):
-        if len(messages) == 1:
-            return ApiResponse(
-                content=[{"type": "tool_use", "id": "s", "name": "send_email", "input": {"to": "a@b.c"}}],
-                stop_reason="tool_use",
-            )
-        return ApiResponse(content=[{"type": "text", "text": "late"}], stop_reason="end_turn")
-
-    r._call_api = one_send_then_text
+    r._call_api = _one_send_then_text
+    r._tool_call_recorder = MagicMock()
     ledger = ExecutionLedger(session_id="subtask-1")
     ctx = ExecutionContext(kind="subtask", session_id="subtask-1")
     text, results, *_ = await _run_loop(r, is_background=True, context=ctx, ledger=ledger)
     assert d.calls == []  # the handler never ran
     assert results[0].error == background_halt.HALTED_TOOL_TEXT and text == background_halt.HALT_TURN_TEXT
     closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
-    assert "blocked" in [action.status for action in ledger.actions]  # as a refused snapshot records it
+    _assert_recorded_once_as_refused(ledger, r._tool_call_recorder)
 
 
-@pytest.mark.parametrize("point", AWAIT_POINTS)
-async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_the_stream(point):
-    halt = _install()
+def _send_stream_runner():
     runner = _stream_runner()
     runner._dispatcher.available_tools.return_value = [
         {"name": "send_email", "description": "Send", "input_schema": {}}
     ]
-    entry_id = uuid.uuid4()
-    closed = _halt_lands_at(runner, halt, point, entry_id)
-    calls = {"n": 0}
+    runner._settings.tool_input_max_chars = 500
+    runner._tool_call_recorder = MagicMock()
+    return runner
 
-    async def one_send_then_text(*args, **kwargs):
+
+def _one_streamed_send_then_text(calls: dict):
+    async def stream(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             yield StreamEvent(type="tool_start", tool_name="send_email", tool_id="s1", block_index=1)
@@ -608,11 +600,38 @@ async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_t
             yield StreamEvent(type="text_delta", text="late")
             yield StreamEvent(type="done", stop_reason="end_turn")
 
-    runner._call_api_stream = MagicMock(side_effect=one_send_then_text)
+    return stream
+
+
+async def _one_send_then_text(system_prompt, messages, tools=None, **_):
+    if len(messages) == 1:
+        return ApiResponse(
+            content=[{"type": "tool_use", "id": "s", "name": "send_email", "input": {"to": "a@b.c"}}],
+            stop_reason="tool_use",
+        )
+    return ApiResponse(content=[{"type": "text", "text": "late"}], stop_reason="end_turn")
+
+
+def _assert_recorded_once_as_refused(ledger, recorder: MagicMock) -> None:
+    """The session ledger and the tool-call record each hold the call once, as refused by the halt."""
+    assert [action.status for action in ledger.actions] == ["blocked"]
+    ((record,),) = [c.args for c in recorder.record.call_args_list]
+    assert (record.outcome, record.refused_by, record.is_error) == ("refused", "background_halt", True)
+
+
+@pytest.mark.parametrize("point", AWAIT_POINTS)
+async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_the_stream(point):
+    halt = _install()
+    runner = _send_stream_runner()
+    entry_id = uuid.uuid4()
+    closed = _halt_lands_at(runner, halt, point, entry_id)
+    calls = {"n": 0}
+    runner._call_api_stream = MagicMock(side_effect=_one_streamed_send_then_text(calls))
     await _pump(runner.stream_chat("claude-job-4", "send it"))
     runner._dispatcher.dispatch.assert_not_called()
     closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
     assert calls["n"] == 1  # and the loop made no further model call
+    _assert_recorded_once_as_refused(runner._ledgers["claude-job-4"], runner._tool_call_recorder)
 
 
 @pytest.mark.parametrize("point", AWAIT_POINTS)

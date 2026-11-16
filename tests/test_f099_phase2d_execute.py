@@ -167,7 +167,10 @@ def test_the_loop_reaches_the_bracket_only_through_the_shared_helper():
     helper = inspect.getsource(AgentRunner._dispatch_with_ledger)
     assert "_open_for_call(" in helper and "_ledger_close(" in helper and "_after_compensable_call(" in helper
     # ``images``: an MCP tool result's image blocks ride beside the text (F112); they are no part of the ledger.
-    assert {"text", "is_error", "suppressed", "send_key", "ledger_entry_id", "images"} == set(Dispatched._fields)
+    # ``refused_by``: the halt's code when it refused the call at its dispatch (Goals PR 0c).
+    assert {"text", "is_error", "suppressed", "send_key", "ledger_entry_id", "images", "refused_by"} == set(
+        Dispatched._fields
+    )
 
 
 # ---- lead addendum 1 (2d-1 review m5): the handler's own required parameters ----------------------------------

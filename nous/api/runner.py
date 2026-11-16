@@ -234,6 +234,7 @@ class Dispatched(NamedTuple):
     send_key: str | None
     ledger_entry_id: UUID | None
     images: list[dict] | None = None  # the image blocks of the call's result (``CallOutcome.images``)
+    refused_by: str | None = None  # Goals PR 0c: ``background_halt`` when the halt refused the call at its dispatch
 
 
 class SingleCall(NamedTuple):
@@ -3612,6 +3613,7 @@ class AgentRunner:
                                 else:
                                     logger.debug("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
 
+                        _halt_refused: str | None = None  # Goals PR 0c: refused at its dispatch
                         if not gated:
                             start_time = time.monotonic()
                             result_text, is_error = "", False
@@ -3687,11 +3689,12 @@ class AgentRunner:
                                         session_id,
                                         entry_id,
                                         send_key,
-                                        ledger,
                                         _snapshotted,
                                         outcome,
                                     )
-                                    is_error = True
+                                    is_error, _halt_refused = True, background_halt.REFUSAL_CODE
+                                    if ledger:
+                                        ledger.record(tool_name, dispatch_input, result_text, "blocked")
                                     duration_ms = int((time.monotonic() - start_time) * 1000)
                                 else:
                                     timed_out = False
@@ -3812,6 +3815,8 @@ class AgentRunner:
                                 outcome=(
                                     "gated"
                                     if gated
+                                    else "refused"
+                                    if _halt_refused
                                     else "suppressed"
                                     if suppressed is not None
                                     else "error"
@@ -3820,7 +3825,7 @@ class AgentRunner:
                                 ),
                                 result_text=result_text,
                                 is_error=is_error,
-                                refused_by="action_gate" if gated else None,
+                                refused_by="action_gate" if gated else _halt_refused,
                                 duration_ms=duration_ms,
                                 ledger_entry_id=None if gated else entry_id,
                                 session_id=session_id,
@@ -4035,6 +4040,7 @@ class AgentRunner:
         # refuses the call as a snapshot that cannot be captured
         # does, and nothing before dispatch can raise out of the loop.
         _write_lock2 = None
+        refused_by: str | None = None
         try:
             # Phase 2.8: capture pre-dispatch snapshot for compensable
             # calls in background contexts. Fail-open except in undoable
@@ -4076,9 +4082,9 @@ class AgentRunner:
             elif self._halt_refuses_dispatch(ctx, tool_name, session_id, turn_epoch):
                 # Goals PR 0c: the halt is checked again at the dispatch, after every await of the work above.
                 result_text = await self._refuse_halted_dispatch(
-                    ctx, tool_name, tool_input, session_id, entry_id, send_key, ledger, _snapshotted2, outcome
+                    ctx, tool_name, tool_input, session_id, entry_id, send_key, _snapshotted2, outcome
                 )
-                is_error = True
+                is_error, refused_by = True, background_halt.REFUSAL_CODE
             else:
                 keyed = send_key is not None
                 self._note_ingress(session_id, tool_name, tool_input)
@@ -4172,7 +4178,9 @@ class AgentRunner:
             if _write_lock2 is not None:
                 # Held until an orphaned worker thread finishes.
                 release_write_path_lock_after(_write_lock2, outcome.write_worker)
-        return Dispatched(result_text, is_error, suppressed, send_key, entry_id, None if is_error else outcome.images)
+        return Dispatched(
+            result_text, is_error, suppressed, send_key, entry_id, None if is_error else outcome.images, refused_by
+        )
 
     async def execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall:
         """Run ONE call the owner approved (F099 2d), with no model in between.
@@ -4733,6 +4741,7 @@ class AgentRunner:
                         start_time = time.monotonic()
                         suppressed: Suppressed | None = None  # harness 2b: set by _open_for_call
                         ledger_entry_id: UUID | None = None  # F108: an extra tool opens no ledger row
+                        halt_refused: str | None = None  # Goals PR 0c: refused at its dispatch
                         # F061: per-call dispatch override for extra_tools.
                         # Routes submit_final_report (and any other per-run
                         # tool) to the executor passed by the subtask harness
@@ -4766,18 +4775,22 @@ class AgentRunner:
                             call_images = dispatched.images
                             suppressed = dispatched.suppressed
                             ledger_entry_id = dispatched.ledger_entry_id
+                            halt_refused = dispatched.refused_by
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A
                         # suppressed repeat that was ALREADY SENT records success
                         # (a 2c claim about the first send stays grounded); a
-                        # refused one records blocked.
+                        # refused one records blocked, as does one the halt
+                        # refused at its dispatch.
                         if ledger:
                             ledger.record(
                                 tool_name,
                                 tool_input,
                                 result_text,
-                                ("blocked" if suppressed is not None else "error") if is_error else "success",
+                                ("blocked" if suppressed is not None or halt_refused else "error")
+                                if is_error
+                                else "success",
                             )
                     else:
                         duration_ms = 0
@@ -4855,6 +4868,8 @@ class AgentRunner:
                             outcome=(
                                 "gated"
                                 if gated
+                                else "refused"
+                                if halt_refused
                                 else "suppressed"
                                 if suppressed is not None
                                 else "error"
@@ -4863,7 +4878,7 @@ class AgentRunner:
                             ),
                             result_text=result_text,
                             is_error=is_error,
-                            refused_by="action_gate" if gated else None,
+                            refused_by="action_gate" if gated else halt_refused,
                             duration_ms=duration_ms,
                             ledger_entry_id=None if gated else ledger_entry_id,
                             session_id=session_id,
@@ -5432,19 +5447,16 @@ Rules:
         session_id: str | None,
         entry_id: Any,
         send_key: str | None,
-        ledger: ExecutionLedger | None,
         snapshotted: bool,
         outcome: CallOutcome,
     ) -> str:
         """A call the halt refused at its dispatch: its durable row is closed as a refused call's is (``blocked``,
-        ``refused by background_halt``: never dispatched, its key freed), the session ledger records it blocked, and
-        a snapshot taken for it is released. Returns the refusal text."""
+        ``refused by background_halt``: never dispatched, its key freed), and a snapshot taken for it is released.
+        Returns the refusal text; the caller records the call once, as refused."""
         text = background_halt.HALTED_TOOL_TEXT
         await self._ledger_close(
             entry_id, "blocked", f"refused by {background_halt.REFUSAL_CODE}", keyed=send_key is not None
         )
-        if ledger:
-            ledger.record(tool_name, tool_input, text, "blocked")
         if snapshotted:
             await self._after_compensable_call(
                 ctx,
