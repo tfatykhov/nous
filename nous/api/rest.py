@@ -1,5 +1,9 @@
 """REST API for Nous agent.
 
+Routes that change state or start work require a secret: the owner's or the proxy's for most, and the route's own row
+in the REST reference (docs/reference/rest-api.md) says which. Chat checks as ``NOUS_OWNER_ENTRY_MODE`` says; the
+companion routes under ``/a2ui`` apply their own checks.
+
 Endpoints:
   POST /chat              - Send message, get response
   DELETE /chat/{session}  - End conversation
