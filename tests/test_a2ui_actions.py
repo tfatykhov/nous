@@ -1114,7 +1114,8 @@ def test_a_verb_registered_without_saying_fails(router: ActionRouter) -> None:
 
 
 def test_every_verb_says_whether_it_needs_the_owners_proof(router: ActionRouter) -> None:
-    expected = dict.fromkeys(GATED, True) | dict.fromkeys(
+    # app.act needs the proof too. GATED is the set an approval card offers, so it is listed here on its own.
+    expected = dict.fromkeys([*GATED, "app.act"], True) | dict.fromkeys(
         [
             "approval.defer",
             "review.acknowledge",
@@ -1131,7 +1132,6 @@ def test_every_verb_says_whether_it_needs_the_owners_proof(router: ActionRouter)
             AUDIT_VERDICT_ACTION,
             ACK_ACTION,
             "app.close",
-            "app.act",
         ],
         False,
     )

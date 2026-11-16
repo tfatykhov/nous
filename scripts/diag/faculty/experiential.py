@@ -52,6 +52,7 @@ os.environ.update({
     "NOUS_GRAPH_ADJACENCY_BOOST_ENABLED": "true",
 })
 
+from scripts._nous_auth import owner_headers  # noqa: E402
 from scripts.diag.faculty.corpus import EXPERIENTIAL  # noqa: E402
 
 AGENT = "nous-faculty-eval"
@@ -87,11 +88,12 @@ def ingest_full_cycle() -> None:
         prompt = ("Remember this note about my life for later. Reply only 'noted'. "
                   "Do not use any tools.\n\n" + note)
         try:
-            httpx.post(f"{BASE}/chat", json={"message": prompt, "session_id": sid}, timeout=280)
+            httpx.post(f"{BASE}/chat", headers=owner_headers(),
+                       json={"message": prompt, "session_id": sid}, timeout=280)
         except Exception as ex:
             out(f"  (chat err: {ex})")
     try:
-        httpx.delete(f"{BASE}/chat/{sid}", timeout=40)
+        httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=40)
     except Exception:
         pass
     t0 = time.monotonic()
@@ -140,13 +142,14 @@ def agentic_lens() -> None:
     out("\n--- Phase 3: AGENTIC lens ---")
     sid = f"exp-q-{int(time.time()*1000)}"
     try:
-        r = httpx.post(f"{BASE}/chat", json={"message": PROMPT.format(q=ITEM["query"]), "session_id": sid}, timeout=280)
+        r = httpx.post(f"{BASE}/chat", headers=owner_headers(),
+                       json={"message": PROMPT.format(q=ITEM["query"]), "session_id": sid}, timeout=280)
         data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
     except Exception as ex:
         out(f"  (chat err: {ex})"); return
     finally:
         try:
-            httpx.delete(f"{BASE}/chat/{sid}", timeout=20)
+            httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=20)
         except Exception:
             pass
     text = ""

@@ -38,6 +38,8 @@ import httpx
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 sys.path.insert(0, str(REPO))
+from scripts._nous_auth import owner_headers  # noqa: E402
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
@@ -145,14 +147,14 @@ def ask(query: str) -> tuple[str, int]:
     sid = f"cq-{int(time.time()*1000)}"
     data: dict = {}
     try:
-        r = httpx.post(f"{BASE}/chat", json={"message": query, "session_id": sid}, timeout=280)
+        r = httpx.post(f"{BASE}/chat", headers=owner_headers(), json={"message": query, "session_id": sid}, timeout=280)
         if r.headers.get("content-type", "").startswith("application/json"):
             data = r.json()
     except Exception as ex:
         return f"(error {ex})", -1
     finally:
         try:
-            httpx.delete(f"{BASE}/chat/{sid}", timeout=20)
+            httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=20)
         except Exception:
             pass
     txt = ""

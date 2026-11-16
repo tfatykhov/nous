@@ -55,6 +55,7 @@ from starlette.types import Scope
 from nous import undo_journal
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
+from nous.api.entry_gate import EntryGate
 from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
@@ -119,6 +120,10 @@ def create_app(
             "Neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_MCP_CLIENT_UI_SECRET_SHA256 is set to a SHA-256 digest, "
             "so the owner routes refuse every call"
         )
+    # The chat routes and the MCP server require the owner's or the proxy's secret under NOUS_OWNER_ENTRY_MODE
+    # (nous/api/entry_gate.py). main.py wraps the /mcp mount with the same gate, from app.state.
+    entry_gate = EntryGate(settings, owner_guard)
+    entry_gate.startup_report()
 
     def _context_view() -> Any | None:
         """F108: what the context endpoints read: the view main.py built (the model-call table while
@@ -159,6 +164,7 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        entry_gate.note_session(request, body.get("session_id") if isinstance(body, dict) else None)
 
         message = body.get("message")
         attachments = _parse_attachments(body) if settings.attachments_enabled else []
@@ -221,6 +227,7 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        entry_gate.note_session(request, body.get("session_id") if isinstance(body, dict) else None)
 
         message = body.get("message")
         attachments = _parse_attachments(body) if settings.attachments_enabled else []
@@ -314,6 +321,7 @@ def create_app(
     async def end_chat(request: Request) -> JSONResponse:
         """DELETE /chat/{session_id} - End a conversation."""
         session_id = request.path_params["session_id"]
+        entry_gate.note_session(request, session_id)
         try:
             await runner.end_conversation(session_id)
             return JSONResponse({"status": "ended", "session_id": session_id})
@@ -3898,9 +3906,9 @@ def create_app(
         return JSONResponse(catalog)
 
     routes = [
-        Route("/chat", chat, methods=["POST"]),
-        Route("/chat/stream", chat_stream, methods=["POST"]),
-        Route("/chat/{session_id}", end_chat, methods=["DELETE"]),
+        entry_gate.route("/chat", chat, methods=["POST"]),
+        entry_gate.route("/chat/stream", chat_stream, methods=["POST"]),
+        entry_gate.route("/chat/{session_id}", end_chat, methods=["DELETE"]),
         Route("/status", status),
         Route("/decisions", list_decisions),
         Route("/decisions/unreviewed", list_unreviewed),
@@ -3928,7 +3936,7 @@ def create_app(
         Route("/subtasks/{id}", get_subtask),
         Route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
         Route("/schedules", list_schedules),
-        Route("/schedules", create_schedule, methods=["POST"]),
+        owner_guard.route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/schedules/{id}/run", run_schedule, methods=["POST"]),
         Route("/health", health),
@@ -4155,4 +4163,6 @@ def create_app(
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:
         kwargs["lifespan"] = lifespan
-    return Starlette(**kwargs)
+    app = Starlette(**kwargs)
+    app.state.entry_gate = entry_gate
+    return app

@@ -26,6 +26,7 @@ Notes:
 """
 
 import json
+import os
 import time
 import argparse
 import requests
@@ -83,6 +84,13 @@ def compute_rouge_l(prediction: str, reference: str) -> float:
 # Nous API Client
 # ---------------------------------------------------------------------------
 
+def _owner_headers() -> dict[str, str]:
+    """The owner's secret from NOUS_OWNER_ROUTE_SECRET (chat requires it when the API runs with
+    NOUS_OWNER_ENTRY_MODE=enforce); none when it is not set. A copy of scripts/_nous_auth.py."""
+    secret = os.environ.get("NOUS_OWNER_ROUTE_SECRET", "")
+    return {"X-Nous-Owner-Secret": secret} if secret else {}
+
+
 class NousClient:
     """Thin wrapper around Nous REST API — only uses /chat."""
 
@@ -94,6 +102,7 @@ class NousClient:
         resp = requests.post(
             f"{self.base_url}/chat",
             json={"message": message, "session_id": session_id},
+            headers=_owner_headers(),
             timeout=self.timeout,
         )
         resp.raise_for_status()

@@ -52,6 +52,7 @@ os.environ.update({
     "DB_USER": "nous", "DB_PASSWORD": "nous_eval", "NOUS_AGENT_ID": "nous-baseline-eval",
 })
 
+from scripts._nous_auth import owner_headers  # noqa: E402
 from scripts.diag.faculty.baseline_corpus import NO_HANDLE_PAIRS  # noqa: E402
 
 AGENT = "nous-baseline-eval"
@@ -115,7 +116,8 @@ def ask(query: str) -> tuple[str, int]:
     sid = f"fm-{int(time.time()*1000)}"
     data: dict = {}
     try:
-        r = httpx.post(f"{BASE}/chat", json={"message": "Search your memory with the recall tool first. " + query,
+        r = httpx.post(f"{BASE}/chat", headers=owner_headers(),
+                       json={"message": "Search your memory with the recall tool first. " + query,
                        "session_id": sid, "debug": True}, timeout=280)
         if r.headers.get("content-type", "").startswith("application/json"):
             data = r.json()
@@ -123,7 +125,7 @@ def ask(query: str) -> tuple[str, int]:
         return f"(err {ex})", -1
     finally:
         try:
-            httpx.delete(f"{BASE}/chat/{sid}", timeout=20)
+            httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=20)
         except Exception:
             pass
     txt = ""

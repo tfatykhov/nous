@@ -85,13 +85,17 @@ docker logs nous-agent
 # Single message
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" \
   -d '{"message": "Hello, who are you?"}'
 
 # Streaming (SSE)
 curl -X POST http://localhost:8000/chat/stream \
   -H "Content-Type: application/json" \
+  -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" \
   -d '{"message": "What can you do?"}'
 ```
+
+The secret header is required when `NOUS_OWNER_ENTRY_MODE=enforce` (see [environment variables](reference/environment-variables.md)).
 
 ---
 

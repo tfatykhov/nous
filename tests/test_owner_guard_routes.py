@@ -173,6 +173,7 @@ REST_ROUTE_SET = {
     ("PUT", "/heartbeat/escalation-policy"),
     ("POST", "/admin/search-weights"),
     ("POST", "/undo/snapshots/{id}/restore"),
+    ("POST", "/schedules"),
 }
 
 

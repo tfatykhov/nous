@@ -10,6 +10,8 @@ These adapters don't reach into Nous's internals. They:
 2. Ask questions through `POST /chat` (Nous recalls what it needs)
 3. Compare answers to gold labels
 
+Each call to `POST /chat` sends `X-Nous-Owner-Secret` from `NOUS_OWNER_ROUTE_SECRET` when it is set in the shell that runs the adapter. It is required when the API runs with `NOUS_OWNER_ENTRY_MODE=enforce`.
+
 This tests the **full cognitive pipeline** — not individual components.
 
 ---

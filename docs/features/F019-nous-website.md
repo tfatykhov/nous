@@ -223,6 +223,7 @@ docker compose up
 # Talk to your agent
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" \
   -d '{"message": "Hello — what do you remember about me?"}'
 ```
 

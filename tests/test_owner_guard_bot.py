@@ -114,7 +114,7 @@ async def test_the_list_carries_no_secret() -> None:
     assert headers is None
 
 
-async def test_chat_carries_no_secret() -> None:
+async def test_an_ordinary_message_reaches_no_owner_route() -> None:
     bot = _bot()
     await bot._handle_update(_message("Hello there"))
     assert bot._http.calls == []  # an ordinary message reaches no owner route

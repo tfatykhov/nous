@@ -14,7 +14,8 @@ nous/
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
 │   ├── undo_journal.py         # Passive before-state snapshots (files, schedules, heartbeat checks, heartbeat config) + owner-run restore (NOUS_UNDO_JOURNAL_ENABLED)
-│   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)
+│   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to); sends the owner's secret on owner actions and chat
+│   ├── ping.py                 # python -m nous.ping SESSION_ID MESSAGE: one message to /chat with the owner's secret, run in the bot's container
 │   ├── owner_actions.py        # F099 Phase 2d: callback-data codec and refusal vocabulary shared by the publisher, the REST routes and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
@@ -188,6 +189,7 @@ nous/
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
 │       ├── owner_guard.py # Owner routes require the owner's or the proxy's secret: the check and the route wrapper (OwnerGuard), and which proof grants which capability
+│       ├── entry_gate.py # The chat routes and the inbound MCP server require the owner's or the proxy's secret (on /mcp, the owner's secret or the MCP key) under NOUS_OWNER_ENTRY_MODE (off, warn, enforce): the route and mount wrappers, the count by session class and the daily notice
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
