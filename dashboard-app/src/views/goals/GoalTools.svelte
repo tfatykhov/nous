@@ -274,7 +274,8 @@
   .note { font-size: 0.8125rem; color: var(--save-ok); margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .note-err { color: var(--warn-text); }
   .note:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
-  .picking { margin-bottom: 0; box-shadow: none; }
+  /* On the create form the form's own card frames it. */
+  .picking { margin: 0; padding: 0; border: 0; box-shadow: none; background: none; }
   .choose { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8125rem; cursor: pointer; white-space: nowrap; }
   .choose input { width: 1rem; height: 1rem; }
   @media (max-width: 768px) {
