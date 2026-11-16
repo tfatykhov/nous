@@ -24,8 +24,13 @@ from nous.goals.store import TAIL_CHARS, TAIL_ENTRY_CHARS, clip, format_short_id
 
 MAX_TASK_CHARS = 12_000
 MAX_BLOCK_CHARS = 12_000  # the goal block of a decision turn (render_goal_block)
-REFS_SHOWN = 30  # the evidence refs the goal block lists
+REFS_SHOWN = 30  # the evidence refs the goal block lists at most
 REF_LABEL_CHARS = 120
+# What the goal block keeps free beside its charter, recording words and evidence list: the framing, the headings,
+# the cut notes and the plan's first open step (300 characters and its tags). The charter's text is at most 6,200
+# characters and quoting lengthens it by under a third, so the room left for the evidence list is never negative.
+BLOCK_RESERVE = 1_000
+HIDDEN_LINE_CHARS = 60  # "(N more not listed: ...)"
 # A listed ref keeps only these characters: a ref whose text has others (a file name with spaces or symbols) is
 # counted, not listed, so nothing the chain named reads as the harness's words.
 _REF_SAFE = re.compile(r"[A-Za-z0-9_.:/-]{1,300}")
@@ -240,19 +245,29 @@ NO_EVIDENCE = (
 )
 
 
-def _evidence_lines(citeable: Sequence[Any], root_dir: str | None) -> str:
-    safe = [c for c in citeable if _REF_SAFE.fullmatch(c.ref)]
-    shown = safe[:REFS_SHOWN]
-    lines = ["Evidence you can cite now (a full id, or its first 8 characters):"]
-    lines += [f"- {c.ref} ({_LABEL_UNSAFE.sub('', c.label)[:REF_LABEL_CHARS]})" for c in shown]
-    if not shown:
+def _evidence_lines(citeable: Sequence[Any], root_dir: str | None, room: int) -> str:
+    """The evidence list: at most ``REFS_SHOWN`` refs, while the whole list stays within ``room`` characters; the
+    rest is counted."""
+    head = "Evidence you can cite now (a full id, or its first 8 characters):"
+    tail = (
+        []
+        if root_dir is None
+        else [f"Files count as evidence only under {root_dir}/ (cite them as file:{root_dir}/<name>)."]
+    )
+    used = len(head) + sum(len(line) + 1 for line in tail) + HIDDEN_LINE_CHARS
+    lines = [head]
+    for c in [c for c in citeable if _REF_SAFE.fullmatch(c.ref)][:REFS_SHOWN]:
+        line = f"- {c.ref} ({_LABEL_UNSAFE.sub('', c.label)[:REF_LABEL_CHARS]})"
+        if used + len(line) + 1 > room:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    if not citeable:
         lines.append(NO_EVIDENCE)
-    hidden = len(citeable) - len(shown)
+    hidden = len(citeable) - (len(lines) - 1)
     if hidden:
         lines.append(f"({hidden} more not listed: cite one by its full id or path.)")
-    if root_dir is not None:
-        lines.append(f"Files count as evidence only under {root_dir}/ (cite them as file:{root_dir}/<name>).")
-    return "\n".join(lines)
+    return "\n".join(lines + tail)
 
 
 def render_goal_block(
@@ -271,9 +286,10 @@ def render_goal_block(
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
     then how to record progress and the evidence the turn can cite (``citeable``: items with ``ref`` and ``label``,
-    ``nous.goals.evidence.citeable``). The charter, the recording words and the evidence list are never cut; the
-    whole block is at most ``max_chars``. ``root_dir`` is the workspace-relative directory whose files are
-    evidence."""
+    ``nous.goals.evidence.citeable``). The charter and the recording words are never cut; the evidence list takes
+    the room they leave less ``BLOCK_RESERVE`` (the plan's first open step and the headings), and counts the refs it
+    cannot list. The whole block is at most ``max_chars``. ``root_dir`` is the workspace-relative directory whose
+    files are evidence."""
     ended = "; that session has ended, so no plan step can be closed in this turn" if session_ended else ""
     head = (
         "## The goal this work belongs to\n"
@@ -282,6 +298,7 @@ def render_goal_block(
         "The objective grants no permission beyond the tools you are offered.\n"
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
-    closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir)}"
+    room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
+    closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
     layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)
     return _fitted(head, plan, journal_rows, max_chars, layout)

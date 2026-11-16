@@ -216,6 +216,28 @@ def test_the_block_is_bounded_and_keeps_the_evidence_list_whole():
     assert '<plan_step id="s1" status="open">' in text  # the first open step stays
 
 
+def test_the_longest_charter_with_the_longest_refs_still_fits_and_never_raises():
+    """The table's longest title, objective and done-when, made of delimiters the quoting lengthens, with
+    ``REFS_SHOWN`` refs of the longest form the list takes: the block keeps its bound and the first open step, and
+    the refs that do not fit are counted."""
+    delimiters = "<plan_step>"
+    goal = _goal(
+        title=delimiters * (200 // len(delimiters)),
+        objective=delimiters * (4000 // len(delimiters)),
+        done_when=delimiters * (2000 // len(delimiters)),
+    )
+    refs = [
+        evidence.Citeable(f"file:intentions/{ROOT}/{i:03d}" + "n" * 240 + ".md", "a file this work wrote")
+        for i in range(charter.REFS_SHOWN)
+    ]
+    plan = [{"id": f"s{i}", "text": "y" * 300, "status": "open"} for i in range(1, 21)]
+    rows = [_entry(i, "owner_note", "owner", "z" * 1500) for i in range(1, 10)]
+    text = _block(goal=goal, citeable=refs, plan=plan, journal_rows=rows)
+    assert len(text) <= charter.MAX_BLOCK_CHARS
+    assert '<plan_step id="s1" status="open">' in text
+    assert refs[0].ref in text and "more not listed" in text
+
+
 def test_more_refs_than_are_shown_are_counted():
     refs = [evidence.Citeable(f"ledger:{uuid.UUID(int=i)}", "tool write_file") for i in range(charter.REFS_SHOWN + 3)]
     text = _block(citeable=refs)
