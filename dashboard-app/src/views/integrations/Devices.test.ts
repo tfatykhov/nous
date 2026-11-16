@@ -391,6 +391,28 @@ describe('Devices: a pairing code', () => {
     expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
   });
 
+  it('a new code with no answer takes the code on screen away: a new one may have replaced it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    handlers['POST /a2ui/devices/pairings'] = () => [HANG, null];
+    await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(s.getByRole('alert').textContent).toBe('No answer came back. Check the list before trying again.'));
+    expect(s.queryByText(CODE)).toBeNull();
+  });
+
+  it('a refused new code leaves the code on screen as it was', async () => {
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    handlers['POST /a2ui/devices/pairings'] = () => [409, { error: 'revoke a device first' }];
+    await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
+    expect((await s.findByRole('alert')).textContent).toBe('Revoke a device first.');
+    expect(s.getByText(CODE)).toBeTruthy();
+  });
+
   it('a new code with no answer is given up after 15 s: it says to check the list, and the button works again', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     handlers['POST /a2ui/devices/pairings'] = () => [HANG, null];
@@ -447,6 +469,19 @@ describe('Devices: Revoke', () => {
     expect(s.getByText('Revoked on Nov 15')).toBeTruthy();
     expect(s.queryByRole('button', { name: 'Revoke Pixel 7' })).toBeNull();
     expect(s.getByText('No device is paired.')).toBeTruthy();
+    // Its Revoke is gone: the focus goes to the section's title.
+    await vi.waitFor(() => expect(document.activeElement).toBe(s.getByRole('heading', { name: 'Devices' })));
+  });
+
+  it('a question about a device that a read no longer lists as live is closed', async () => {
+    const { component } = render(Devices);
+    const s = within(await screen.findByRole('region', { name: 'Devices' }));
+    await fireEvent.click(await s.findByRole('button', { name: 'Revoke Pixel 7' }));
+    s.getByRole('group', { name: 'Confirm revoking Pixel 7' });
+    listed = deviceList({ devices: [{ ...PIXEL(), revoked_at: '2026-11-15T10:00:00Z' }] });
+    await component.refresh();
+    await vi.waitFor(() => expect(s.queryByRole('group', { name: 'Confirm revoking Pixel 7' })).toBeNull());
+    expect(changes()).toEqual([]);
   });
 
   it('a revoke with no answer is given up after 15 s and says to check the list', async () => {
@@ -470,6 +505,17 @@ describe('Devices: Revoke', () => {
 });
 
 describe('Devices on the Integrations screen', () => {
+  it('is shown below the MCP servers when they are listed', async () => {
+    location.hash = '#/integrations';
+    initRouter();
+    handlers['GET /integrations/mcp/servers'] = () =>
+      [200, { ceilings: { pinned_servers: false, background_servers: false }, secrets_available: true, oauth_available: false, servers: [] }];
+    listed = deviceList({ devices: [PIXEL()] });
+    render(Integrations);
+    expect(await screen.findByRole('navigation', { name: 'MCP servers' })).toBeTruthy();
+    expect(await within(section()).findByText('Pixel 7')).toBeTruthy();
+  });
+
   it('is shown while the MCP servers are not available, and the page Refresh reads it again', async () => {
     location.hash = '#/integrations';
     initRouter();
