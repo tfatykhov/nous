@@ -12,8 +12,9 @@ and the journal quoted the same way and cut in the same order, then how to recor
 can cite, at most ``MAX_BLOCK_CHARS``.
 
 F115 per-goal tools: given ``tools`` (with ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` on), both say after the charter which
-tools the owner allowed the goal to use without asking and whether each is available now (``tools_section``, at most
-``TOOLS_SECTION_CHARS``), and that a tool not listed is not available. Given none, both are as before.
+tools the owner allowed the goal to use without asking besides its standard tools, and whether each is available
+now (``tools_section``, at most ``TOOLS_SECTION_CHARS``), and that other tools that act outside Nous are not
+available. Given none, both are as before.
 """
 
 from __future__ import annotations
@@ -64,12 +65,14 @@ CLOSING_WITHOUT_PLAN = (
 )
 NEWEST_OWNER_ENTRIES_KEPT = 2  # the owner's entries kept until every open step but the first has gone
 # F115 per-goal tools: the section that tells a goal's session which tools it may use without asking.
-TOOLS_HEADING = "Tools this goal may use without asking:"
-TOOLS_NONE = "None beyond the standard set."
+TOOLS_HEADING = "Besides its standard tools, this goal may use without asking:"
+TOOLS_NONE = "none."
 TOOLS_NOT_NOW = "not available now"
+# The standard tools a turn is offered are not listed and not changed: the list is of the goal's extra tools.
 TOOLS_RULE = (
-    "A tool not listed here is not available to this goal's turns or tasks. If the goal cannot be finished without "
-    "one, say so in a progress note and do not ask the owner to approve a step these turns cannot carry out."
+    "Other tools that act outside Nous (sending, acting on web pages, connected servers) are not available to this "
+    "goal's turns or tasks. If the goal cannot be finished without one, say so in a progress note; do not ask the "
+    "owner to approve a step these turns cannot carry out."
 )
 TOOLS_SECTION_CHARS = 1_500  # the section's list at most; what it drops first is in tools_section
 
@@ -84,9 +87,9 @@ class ToolLine:
 
 
 def tools_section(tools: Sequence[ToolLine]) -> str:
-    """Which tools the goal may use without asking, then ``TOOLS_RULE``. The list is at most ``TOOLS_SECTION_CHARS``:
-    over it, the available tools lose what they do (the names stay), then the list ends early and counts the rest,
-    the available tools listed first."""
+    """Which tools the goal may use without asking besides its standard tools, then ``TOOLS_RULE``. The list is at
+    most ``TOOLS_SECTION_CHARS``: over it, the available tools lose what they do (the names stay), then the list ends
+    early and counts the rest, the available tools listed first."""
     if not tools:
         return f"{TOOLS_HEADING} {TOOLS_NONE}\n{TOOLS_RULE}"
     ordered = sorted(tools, key=lambda line: (line.does is None, line.tool))

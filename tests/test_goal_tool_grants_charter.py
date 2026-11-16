@@ -58,12 +58,16 @@ def _block(**over):
 # ---- the section ------------------------------------------------------------------------------------------------
 
 
-def test_no_grant_says_none_beyond_the_standard_set():
-    assert tools_section([]) == f"{TOOLS_HEADING} None beyond the standard set.\n{TOOLS_RULE}"
+def test_no_grant_says_none_besides_the_standard_tools():
+    assert tools_section([]) == f"{TOOLS_HEADING} none.\n{TOOLS_RULE}"
+    assert TOOLS_HEADING == "Besides its standard tools, this goal may use without asking:"
     assert TOOLS_RULE == (
-        "A tool not listed here is not available to this goal's turns or tasks. If the goal cannot be finished without "
-        "one, say so in a progress note and do not ask the owner to approve a step these turns cannot carry out."
+        "Other tools that act outside Nous (sending, acting on web pages, connected servers) are not available to "
+        "this goal's turns or tasks. If the goal cannot be finished without one, say so in a progress note; do not "
+        "ask the owner to approve a step these turns cannot carry out."
     )
+    # The section never says the standard tools are unavailable, nor that a goal with no grant has no tools.
+    assert "not listed" not in tools_section([]) and "standard tools" in tools_section([])
 
 
 def test_two_grants_are_listed_with_what_they_do_and_the_rule():
@@ -73,7 +77,7 @@ def test_two_grants_are_listed_with_what_they_do_and_the_rule():
     ]
     assert tools_section(lines) == "\n".join(
         [
-            "Tools this goal may use without asking:",
+            "Besides its standard tools, this goal may use without asking:",
             f"- {ON}: a tool of the MCP server notes.",
             f"- send_email: {EMAIL_WORDS}.",
             TOOLS_RULE,
@@ -162,7 +166,7 @@ async def test_a_session_with_two_grants_is_told_both_in_its_first_task_and_its_
     async with w.db.session() as s:
         subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
     for text in (subtask.task, (await chain.turn_context(root.id)).block):
-        assert "Tools this goal may use without asking:\n" in text
+        assert "Besides its standard tools, this goal may use without asking:\n" in text
         assert f"- {ON}: a tool of the MCP server notes." in text
         assert f"- send_email: {EMAIL_WORDS}." in text
         assert TOOLS_RULE in text
@@ -204,7 +208,7 @@ async def test_a_removed_grant_is_not_listed_and_a_goal_without_grants_is_told_s
     await w.store.revoke_tool(goal.id, "send_email", actor="owner", proof="owner")
     block = (await chain.turn_context(root.id)).block
     section = block[block.index(TOOLS_HEADING) : block.index(TOOLS_RULE)]
-    assert section == f"{TOOLS_HEADING} None beyond the standard set.\n"
+    assert section == f"{TOOLS_HEADING} none.\n"
 
 
 @pytest.mark.postgres_only
