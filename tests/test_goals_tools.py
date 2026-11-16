@@ -8,11 +8,13 @@ seen by the other or refused, never lost and never counted for the wrong session
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import uuid
 from types import SimpleNamespace
 
 import pytest
-from f099_support import env_factory, make_child, runner_env  # noqa: F401
+from f099_support import env_factory, make_child, make_dag, runner_env  # noqa: F401
 from goals_support import (
     active,
     goal_row,
@@ -30,7 +32,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.runner import TERMINAL_EXTRA_TOOLS
 from nous.api.tool_classes import tool_class
 from nous.goals import evidence, tools
-from nous.storage.models import Goal, GoalSession, Intention
+from nous.storage.models import ExecutionLedgerEntry, Goal, GoalSession, Intention
 
 pytestmark = pytest.mark.postgres_only
 
@@ -401,3 +403,119 @@ async def test_an_empty_note_is_refused(runner_env):  # noqa: F811
     for value in ("", "   ", "\x00\u200b", 42, None):
         said, err = await w.note(kind="progress", text=value)
         assert err and "text is required" in said
+
+
+# ---- what closes a step ------------------------------------------------------------------------------------------
+
+
+async def _ledger(w: SimpleNamespace) -> uuid.UUID:
+    """A successful recorded write of the session's continuation thread."""
+    async with w.db.session() as s:
+        row = ExecutionLedgerEntry(
+            agent_id=w.agent,
+            session_id=f"intent-{w.root.id}",
+            context_kind="continuation",
+            tool_name="write_file",
+            side_effect_type="write",
+            key_args={},
+            status="success",
+        )
+        s.add(row)
+        await s.commit()
+        return row.id
+
+
+async def test_a_step_closes_only_with_a_completed_subtask_or_dag_among_its_refs(runner_env, tmp_path):  # noqa: F811
+    w = await _turn(runner_env, tmp_path)
+    directory = tmp_path / "intentions" / str(w.root.id)
+    directory.mkdir(parents=True)
+    (directory / "merged.md").write_text("", encoding="utf-8")
+    file_ref, ledger_ref = f"file:intentions/{w.root.id}/merged.md", f"ledger:{await _ledger(w)}"
+    await w.plan(steps=[{"text": "List the notes"}, {"text": "Merge the duplicates"}, {"text": "Check"}])
+    for refs in ([file_ref], [ledger_ref], [file_ref, ledger_ref]):
+        said, err = await w.plan(steps=[{"id": "s1", "status": "closed", "evidence": refs}])
+        assert err and "a step is closed by citing a completed subtask or workflow" in said, refs
+    assert [step["status"] for step in await _plan(w)] == ["open", "open", "open"]
+    said, err = await w.plan(steps=[{"id": "s1", "status": "closed", "evidence": [file_ref, f"subtask:{w.first}"]}])
+    assert not err, said
+    dag, _store = await make_dag(w.env, parent=w.root)
+    said, err = await w.plan(steps=[{"id": "s2", "status": "closed", "evidence": [f"dag:{dag.id}"]}])
+    assert not err, said
+    s1, s2, _s3 = await _plan(w)
+    assert s1["evidence"] == [file_ref, f"subtask:{w.first}"] and s2["evidence"] == [f"dag:{dag.id}"]
+
+
+async def test_at_most_three_steps_close_in_one_call(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    await w.plan(steps=[{"text": f"step {i}"} for i in range(1, 5)])
+    children = [await _completed_child(w) for _ in range(3)]
+    refs = [w.first, *children]
+    four = [{"id": f"s{i}", "status": "closed", "evidence": [f"subtask:{refs[i - 1]}"]} for i in range(1, 5)]
+    said, err = await w.plan(steps=four)
+    assert err and "close at most 3 steps in one call" in said
+    assert all(step["status"] == "open" for step in await _plan(w))
+    said, err = await w.plan(steps=four[:3])
+    assert not err, said
+    assert [step["status"] for step in await _plan(w)] == ["closed", "closed", "closed", "open"]
+
+
+async def test_two_spellings_of_one_file_support_one_step_only(runner_env, tmp_path):  # noqa: F811
+    w = await _turn(runner_env, tmp_path)
+    directory = tmp_path / "intentions" / str(w.root.id)
+    (directory / "sub").mkdir(parents=True)
+    (directory / "a.md").write_text("x", encoding="utf-8")
+    first_file = f"file:intentions/{w.root.id}/a.md"
+    child = await _completed_child(w)
+    await w.plan(steps=[{"text": "one"}, {"text": "two"}])
+    said, err = await w.plan(steps=[{"id": "s1", "status": "closed", "evidence": [f"subtask:{w.first}", first_file]}])
+    assert not err, said
+    other = f"file:intentions/{w.root.id}/sub/../a.md"
+    said, err = await w.plan(steps=[{"id": "s2", "status": "closed", "evidence": [f"subtask:{child}", other]}])
+    assert err and "already closes step s1" in said
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a file's identity is its device and inode on POSIX only")
+async def test_a_hard_link_of_a_cited_file_supports_no_second_step(runner_env, tmp_path):  # noqa: F811
+    w = await _turn(runner_env, tmp_path)
+    directory = tmp_path / "intentions" / str(w.root.id)
+    directory.mkdir(parents=True)
+    (directory / "a.md").write_text("x", encoding="utf-8")
+    first_file = f"file:intentions/{w.root.id}/a.md"
+    os.link(directory / "a.md", directory / "b.md")
+    child = await _completed_child(w)
+    await w.plan(steps=[{"text": "one"}, {"text": "two"}])
+    await w.plan(steps=[{"id": "s1", "status": "closed", "evidence": [f"subtask:{w.first}", first_file]}])
+    said, err = await w.plan(
+        steps=[{"id": "s2", "status": "closed", "evidence": [f"subtask:{child}", f"file:intentions/{w.root.id}/b.md"]}]
+    )
+    assert err and "already closes step s1" in said
+
+
+# ---- per-session limits --------------------------------------------------------------------------------------------
+
+
+async def _chain_rows(w: SimpleNamespace, kind: str, count: int) -> None:
+    for i in range(count):
+        await w.store.append_journal(w.goal.id, kind, f"{kind} {i}", actor="chain", session_n=w.row.n)
+
+
+async def test_a_session_writes_at_most_twenty_notes_and_may_still_claim_done(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    await _chain_rows(w, "progress", tools.NOTES_PER_SESSION - 1)
+    said, err = await w.note(kind="progress", text="the twentieth")
+    assert not err, said
+    said, err = await w.note(kind="progress", text="one more")
+    assert err and "this session has written 20 notes, the most one session may" in said
+    assert len(await journal(w, w.goal, "progress")) == tools.NOTES_PER_SESSION
+    said, err = await w.note(kind="done_claim", text="The duplicates are merged.")
+    assert not err, said
+
+
+async def test_a_session_changes_the_plan_at_most_thirty_times(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    await _chain_rows(w, "plan", tools.PLAN_CHANGES_PER_SESSION - 1)
+    said, err = await w.plan(steps=[{"text": "the thirtieth change"}])
+    assert not err, said
+    said, err = await w.plan(steps=[{"text": "one more"}])
+    assert err and "this session has changed the plan 30 times, the most one session may" in said
+    assert [step["text"] for step in await _plan(w)] == ["the thirtieth change"]

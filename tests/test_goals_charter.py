@@ -67,9 +67,10 @@ def test_the_task_says_how_progress_is_recorded_and_what_its_result_must_name():
     checks, so the result names the files it wrote."""
     text = _task(plan=[{"id": "s1", "text": "List the notes", "status": "open"}])
     closing = text[text.index("## This session") :]
-    assert "closes a plan step only with evidence the harness can check" in closing
-    assert "this task, once it completes" in closing and "intentions/<root id>/" in closing
-    assert "name the files you wrote, by their paths" in closing
+    assert "a plan step is closed by citing a completed subtask or workflow of this session's work" in closing
+    assert "such as this task, once it completes" in closing
+    assert "files written under this work's own intentions/<root id>/ directory and recorded calls" in closing
+    assert "may be added as support" in closing and "name the files you wrote, by their paths" in closing
 
 
 def test_the_task_says_the_objective_grants_no_permission():

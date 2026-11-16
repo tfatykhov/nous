@@ -184,6 +184,11 @@ def test_the_block_names_the_goal_the_session_and_the_tools():
     assert "1999000 of 2000000 tokens left in all, 499800 of 500000 today" in text
     assert "cache reads, launched jobs" in text
     assert "goal_plan" in text and "goal_note" in text and "resolve_intention" in text
+    recording = text[text.index("### Recording progress") :]
+    assert "A step is closed by citing a completed subtask or workflow of this session's work" in recording
+    assert "files and recorded calls may be added as support" in recording
+    assert "at most 3 steps closed in one call" in recording
+    assert "at most 20 notes" in recording and "at most 30 times" in recording
     assert f"subtask:{SUB}" in text
 
 
@@ -326,13 +331,14 @@ def test_the_runner_has_no_goal_hook_by_default():
 @pytest.mark.postgres_only
 @pytest.mark.parametrize("kind", ["subtask", "file"])
 async def test_a_decision_turn_closes_a_step_with_evidence_its_lineage_produced(runner_env, tmp_path, kind):  # noqa: F811
-    """A step the chain spawned completed (or the work wrote a file under the root's own directory): the decision
-    turn finds it in its goal block and closes the plan step with it, counted for its session."""
+    """A step the chain spawned completed (or the session's first subtask did, and the work wrote a file under the
+    root's own directory as support): the decision turn finds the refs in its goal block and closes the plan step with
+    them, counted for its session."""
     cited: dict = {}
 
     async def close_the_step(call):
-        assert cited["ref"] in _prompt_of(call)  # the goal block lists it
-        return [use("goal_plan", steps=[{"id": "s1", "status": "closed", "evidence": [cited["ref"]]}])]
+        assert all(ref in _prompt_of(call) for ref in cited["refs"])  # the goal block lists them
+        return [use("goal_plan", steps=[{"id": "s1", "status": "closed", "evidence": cited["refs"]}])]
 
     w = await world(runner_env, close_the_step, [REPORT], workspace_dir=str(tmp_path))
     goal = await active(w)
@@ -341,16 +347,16 @@ async def test_a_decision_turn_closes_a_step_with_evidence_its_lineage_produced(
     if kind == "subtask":
         child = await make_child(w.env, root)  # a step the chain spawned under this root
         await w.env.heart.subtasks.complete(uuid.UUID(child.source_id), "merged", final_outcome="completed")
-        cited["ref"] = f"subtask:{child.source_id}"
+        cited["refs"] = [f"subtask:{child.source_id}"]
     else:
         directory = tmp_path / "intentions" / str(root.id)
         directory.mkdir(parents=True)
         (directory / "merged.md").write_text("the merged notes", encoding="utf-8")
-        cited["ref"] = f"file:intentions/{root.id}/merged.md"
+        cited["refs"] = [f"subtask:{root.source_id}", f"file:intentions/{root.id}/merged.md"]
     await first_result(w, root)
     assert await w.cont.run_arrival(root.id) is not None
     (step,) = (await goal_row(w, goal)).plan
-    assert (step["status"], step["evidence"], step["closed_session"]) == ("closed", [cited["ref"]], session.n)
+    assert (step["status"], step["evidence"], step["closed_session"]) == ("closed", cited["refs"], session.n)
 
 
 # ---- names the work chose ------------------------------------------------------------------------------------------

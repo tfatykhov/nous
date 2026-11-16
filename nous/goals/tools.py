@@ -15,7 +15,9 @@ seen, or waits for the call to commit:
   the session has ended (its outcome is written), and the refusal says so;
 - a goal that is no longer active or paused (done, failed or cancelled) takes no write;
 - the evidence of a closed step is checked against the session's lineage as of the call (``nous.goals.evidence``),
-  and no ref closes two steps of the goal.
+  a step closes only with a completed subtask or workflow (DAG) of that lineage among its refs (files and recorded
+  calls only support one), at most three steps close in one call, and no ref closes two steps of the goal;
+- one session writes at most 20 progress notes and changes the plan at most 30 times.
 
 The executors never raise: a bad call, or a failure, is a text the model reads, and nothing is written.
 """
@@ -39,7 +41,7 @@ from nous.goals import evidence
 from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible, neutralize
 from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore, clip, format_short_id
 from nous.storage.database import Database
-from nous.storage.models import Goal, GoalSession
+from nous.storage.models import Goal, GoalJournal, GoalSession
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,15 @@ _STEP_ID = re.compile(r"s(\d{1,4})")
 # The owner message of a done claim: one per claim (its source id is derived from the claim's journal seq).
 DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
 MESSAGE_TITLE_CHARS = 120  # the goal's title, as the done message quotes it
+CLOSES_PER_CALL = 3  # plan steps one goal_plan call may close
+NOTES_PER_SESSION = 20  # progress notes one session may write (a done claim is not counted)
+PLAN_CHANGES_PER_SESSION = 30  # goal_plan calls that change the plan, per session
+# The kinds of ref that close a step: work of the session that completed. Files and recorded calls only support one.
+CLOSING_KINDS = ("subtask:", "dag:")
+CLOSE_RULE = (
+    "a step is closed by citing a completed subtask or workflow of this session's work (subtask:<id> or dag:<id>); "
+    "files and recorded calls may only be added beside one"
+)
 
 GOAL_NOTE_SCHEMA: dict[str, Any] = {
     "name": "goal_note",
@@ -74,9 +85,10 @@ GOAL_PLAN_SCHEMA: dict[str, Any] = {
     "description": (
         "Change the plan of the goal this work belongs to. Send only the steps you change: a step without an id is "
         "new, a step with an id changes that step, and steps you leave out stay as they are. Close a step with "
-        "status 'closed' and 1 to 3 evidence refs from the goal block's list (a ref closes one step only); "
-        "'dropped' needs none. A closed step cannot change. If any step is refused, nothing is written. Does not "
-        "end the turn."
+        "status 'closed' and 1 to 3 evidence refs from the goal block's list: at least one a completed subtask or "
+        "workflow of this session's work (subtask:<id> or dag:<id>); files and recorded calls may be added as "
+        "support. A ref closes one step only, and at most 3 steps close in one call. 'dropped' needs no evidence. A "
+        "closed step cannot change. If any step is refused, nothing is written. Does not end the turn."
     ),
     "input_schema": {
         "type": "object",
@@ -166,6 +178,18 @@ class GoalTools:
             raise _Refused(f"the goal is {goal.state}, so nothing more is recorded for it; nothing was written")
         return row, goal
 
+    async def _written(self, s: AsyncSession, goal: Goal, row: GoalSession, kind: str) -> int:
+        """How many journal rows of ``kind`` the chain wrote in this session (read under the session's lock, so two
+        calls cannot both pass a limit)."""
+        query = select(func.count()).where(
+            GoalJournal.agent_id == self._agent_id,
+            GoalJournal.goal_id == goal.id,
+            GoalJournal.session_n == row.n,
+            GoalJournal.kind == kind,
+            GoalJournal.actor == "chain",
+        )
+        return int(await s.scalar(query) or 0)
+
     # ---- goal_note ---------------------------------------------------------------------------------------------
 
     async def goal_note(self, **kwargs: Any) -> tuple[str, bool]:
@@ -188,6 +212,11 @@ class GoalTools:
         async with self._db.session() as s:
             row, goal = await self._locked(s)
             n, ended, state, reason = row.n, row.ended_at is not None, goal.state, goal.pause_reason
+            if kind == "progress" and await self._written(s, goal, row, "progress") >= NOTES_PER_SESSION:
+                raise _Refused(
+                    f"this session has written {NOTES_PER_SESSION} notes, the most one session may; put what is left "
+                    "in resolve_intention's note"
+                )
             claim = self._store.add_journal_row(s, goal.id, kind, body, actor="chain", session_n=n)
             waiting = told = False
             if kind == "done_claim" and state == "active" and not ended:
@@ -276,6 +305,11 @@ class GoalTools:
         entries = _entries(kwargs.get("steps"))
         async with self._db.session() as s:
             row, goal = await self._locked(s)
+            if await self._written(s, goal, row, "plan") >= PLAN_CHANGES_PER_SESSION:
+                raise _Refused(
+                    f"this session has changed the plan {PLAN_CHANGES_PER_SESSION} times, the most one session may; "
+                    "nothing was written"
+                )
             plan = [dict(step) for step in goal.plan or [] if isinstance(step, dict)]
             changes, cited, problems = await self._apply(s, plan, entries, ended=row.ended_at is not None)
             if not problems and len(plan) > MAX_STEPS:
@@ -303,16 +337,21 @@ class GoalTools:
     async def _apply(
         self, s: AsyncSession, plan: list[dict[str, Any]], entries: list[dict[str, Any]], *, ended: bool
     ) -> tuple[list[str], list[str], list[str]]:
-        """Apply ``entries`` to ``plan`` in place: ``(changes, cited refs, problems)``. Each ref of a step being
-        closed is checked against the lineage and against every ref already closing a step of the goal."""
+        """Apply ``entries`` to ``plan`` in place: ``(changes, cited refs, problems)``. A step closes only with a
+        completed subtask or DAG of the lineage among its refs (``CLOSING_KINDS``), at most ``CLOSES_PER_CALL`` a
+        call. Each ref is checked against the lineage, and against every ref already closing a step of the goal by
+        its canonical form and by what it names (``evidence.identity``: a file however it is named)."""
         by_id = {step.get("id"): step for step in plan if isinstance(step.get("id"), str)}
-        used = {
-            ref: step.get("id")
-            for step in plan
-            if step.get("status") == "closed"
-            for ref in step.get("evidence") or []
-            if isinstance(ref, str)
-        }
+        used: dict[str, Any] = {}
+        for step in plan:
+            if step.get("status") == "closed":
+                for ref in step.get("evidence") or []:
+                    if isinstance(ref, str):
+                        used[ref] = used[evidence.identity(self._scope, ref)] = step.get("id")
+        already_closed = {key for key, step in by_id.items() if step.get("status") == "closed"}
+        closing = [e for e in entries if e.get("status") == "closed" and e.get("id") not in already_closed]
+        if len(closing) > CLOSES_PER_CALL:
+            return [], [], [f"close at most {CLOSES_PER_CALL} steps in one call; this call closes {len(closing)}"]
         changes: list[str] = []
         cited: list[str] = []
         problems: list[str] = []
@@ -350,12 +389,16 @@ class GoalTools:
                     checked = await evidence.check(s, self._scope, raw)
                     if checked.refusal is not None:
                         problems.append(f"{label}: {checked.refusal}")
-                    elif checked.ref in used:
-                        problems.append(f"{label}: {checked.ref} already closes step {used[checked.ref]}")
+                    elif checked.ref in used or checked.identity in used:
+                        other = used.get(checked.ref, used.get(checked.identity))
+                        problems.append(f"{label}: {checked.ref} already closes step {other}")
                     else:
-                        used[checked.ref] = step_id or "new"
+                        used[checked.ref] = used[checked.identity] = step_id or "a new step of this call"
                         refs.append(checked.ref)
                 if len(refs) != len(raw_refs):
+                    continue
+                if not any(ref.startswith(CLOSING_KINDS) for ref in refs):
+                    problems.append(f"{label}: {CLOSE_RULE}")
                     continue
             if step is None:
                 step = {"id": _next_id(by_id), "text": entry["text"], "status": "open", "evidence": []}
