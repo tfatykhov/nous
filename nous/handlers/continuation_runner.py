@@ -30,7 +30,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
 from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
-from nous.brain.intentions import AUTHORITY_INTERNAL
+from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG
 from nous.cancellation import cancel_requested
 from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, runner_path, unverified_note
 from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
@@ -756,7 +756,8 @@ class ContinuationRunner:
         """Every sweep: take in the roots cancelled since the last one (a cancel through another surface, or by a
         second process), then cancel the DAGs that are still running under a cancelled root (a cancel whose
         orchestrator call failed, or whose process stopped after the commit), recording the owner unless the bound goal
-        driver gives the record of a chain it ended itself (``_goal_cancel_record``). Returns the DAGs it cancelled."""
+        driver gives the record of a chain it ended itself (``_goal_cancel_record``). With no goal driver bound, or no
+        stray DAG, nothing more is read than before goals. Returns the DAGs it cancelled."""
         since = (
             self._view_checked_at - timedelta(seconds=CANCEL_VIEW_MARGIN_SECONDS)
             if self._view_checked_at is not None
@@ -768,21 +769,40 @@ class ContinuationRunner:
         async with self._db.session() as session:
             strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
         swept = cancel_provenance.record("owner", "root cancelled earlier, finished by the sweep")
+        if self._goals is None or not strays:
+            return await self._cancel_dags(strays, swept)
+        roots = await self._stray_roots(strays)
         done = 0
-        for dag_id, root_id in strays:
-            done += await self._cancel_dags([dag_id], await self._goal_cancel_record(root_id) or swept)
+        for dag_id in strays:
+            record = await self._goal_cancel_record(roots[dag_id]) if dag_id in roots else None
+            done += await self._cancel_dags([dag_id], record or swept)
         return done
+
+    async def _stray_roots(self, dag_ids: Sequence[UUID]) -> dict[UUID, UUID]:
+        """F114, only with a goal driver bound: each stray DAG's root (the root of the DAG's own intention), in one
+        read for the whole batch. A read that fails is logged by its class and gives none: the sweep records the
+        owner."""
+        try:
+            async with self._db.session() as session:
+                rows = await session.execute(
+                    select(Intention.source_id, Intention.root_id).where(
+                        Intention.agent_id == self._agent_id,
+                        Intention.source_kind == SOURCE_DAG,
+                        Intention.source_id.in_([str(dag_id) for dag_id in dag_ids]),
+                    )
+                )
+                return {UUID(source_id): root_id for source_id, root_id in rows.all() if root_id is not None}
+        except Exception as exc:
+            logger.warning("F114: the stray DAGs' roots could not be read (%s)", type(exc).__name__)
+            return {}
 
     async def _goal_cancel_record(self, root_id: UUID) -> dict[str, str] | None:
         """F114: the ``cancel_provenance`` record the bound goal driver gives a stray DAG of ``root_id``, when the
         driver itself ended that root's chain (``GoalDriver.cancel_record_for``); else None, and the sweep records the
-        owner as before: no driver bound, a root it did not end, an answer that is not a record, or a lookup that
-        failed (logged by its class)."""
-        goals = self._goals
-        if goals is None:
-            return None
+        owner as before: a root it did not end, an answer that is not a record, or a lookup that failed (logged by its
+        class)."""
         try:
-            found = await goals.cancel_record_for(root_id)
+            found = await self._goals.cancel_record_for(root_id)
         except Exception as exc:
             logger.warning("F114: the goal driver's cancel record for root %s failed (%s)", root_id, type(exc).__name__)
             return None

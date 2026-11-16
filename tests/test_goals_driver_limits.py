@@ -788,6 +788,36 @@ async def test_the_sweep_records_the_owner_when_the_driver_cannot_say(env_factor
         assert "cancel record for root" in caplog.text and "ConnectionError" in caplog.text
 
 
+@pytest.mark.parametrize("case", ["no driver bound, a stray DAG", "a driver bound, no stray DAG"])
+async def test_the_sweep_reads_no_root_without_a_goal_driver_or_a_stray_dag(env_factory, monkeypatch, case):  # noqa: F811
+    """With goals off nothing binds a driver: the sweep cancels its stray DAGs as it did before goals, and reads no
+    root for them. With a driver bound and no stray DAG, it reads none either."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    looked_up = []
+
+    async def stray_roots(dag_ids):
+        looked_up.append(list(dag_ids))
+        return {}
+
+    monkeypatch.setattr(w.runner, "_stray_roots", stray_roots)
+    if case == "no driver bound, a stray DAG":
+        dag_id, store, _orchestrator = await _stray_lineage_dag(w, root)
+        await w.runner.cancel_root(root.id, reason="not now", actor="rest")
+        await w.runner.run_once()
+        assert (await store.get_dag(dag_id)).status == "cancelled"
+    else:
+
+        async def cancel_dag(dag_id, reason="cancelled", cancelled_by=None):
+            raise AssertionError("no stray DAG to cancel")
+
+        w.runner.set_cancel_dag(cancel_dag)
+        w.runner.set_goals(w.driver)
+        await w.runner.run_once()
+    assert looked_up == []
+
+
 async def test_a_running_subtask_inside_its_timeout_is_left_alone(env_factory):  # noqa: F811
     w = await _cont_world(env_factory)
     goal = await _active(w)

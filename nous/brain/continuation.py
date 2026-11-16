@@ -4290,15 +4290,14 @@ async def cancelled_root_ids(
     return list(rows.scalars().all())
 
 
-async def stray_dag_ids(session: AsyncSession, agent_id: str, *, limit: int = 10) -> list[tuple[UUID, UUID]]:
-    """The DAGs that are still running under a cancelled root, oldest first, each as ``(DAG id, root id)``.
-    ``cancel_root`` reports its lineage's DAGs and the runner cancels them after the commit, so a process that stopped
-    in between, or an orchestrator that raised, leaves one running: the runner's sweep cancels it from here (the root
-    tells it who cancelled). A stray DAG cannot act (the root is cancelled, so every tool call of its nodes is
-    refused), it can only keep its nodes busy."""
+async def stray_dag_ids(session: AsyncSession, agent_id: str, *, limit: int = 10) -> list[UUID]:
+    """The DAGs that are still running under a cancelled root, oldest first. ``cancel_root`` reports its lineage's
+    DAGs and the runner cancels them after the commit, so a process that stopped in between, or an orchestrator that
+    raised, leaves one running: the runner's sweep cancels it from here. A stray DAG cannot act (the root is
+    cancelled, so every tool call of its nodes is refused), it can only keep its nodes busy."""
     root = aliased(Intention)
     rows = await session.execute(
-        select(ExecutionDAG.id, root.id)
+        select(ExecutionDAG.id)
         .join(
             Intention,
             and_(
@@ -4316,7 +4315,7 @@ async def stray_dag_ids(session: AsyncSession, agent_id: str, *, limit: int = 10
         .order_by(ExecutionDAG.created_at, ExecutionDAG.id)
         .limit(limit)
     )
-    return [(dag_id, root_id) for dag_id, root_id in rows.all()]
+    return list(rows.scalars().all())
 
 
 async def find_root_id(session: AsyncSession, agent_id: str, prefix: str) -> UUID | None:
