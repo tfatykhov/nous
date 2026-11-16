@@ -267,20 +267,22 @@ private fun SurfaceRow(graph: AppGraph, s: SurfaceState, onOpen: () -> Unit) {
     }
 }
 
+/** The server refused the reads for the device proof: retrying cannot help, pairing can. */
+@Composable
+private fun NotPaired(refused: Refusal, openSettings: () -> Unit) {
+    val t = LocalNousTheme.current
+    Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Spacer(Modifier.height(32.dp))
+        Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.INBOX_UNPAIRED_TITLE else PairingWords.INBOX_NOT_PAIRED_TITLE, color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.TOKEN_REJECTED else PairingWords.INBOX_NOT_PAIRED, color = t.soft, fontSize = 15.sp)
+        NousButton(onClick = openSettings, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Open Settings", color = t.onAccent, fontWeight = FontWeight.SemiBold) }
+    }
+}
+
 @Composable
 private fun NotConnected(graph: AppGraph, openSettings: () -> Unit) {
     val t = LocalNousTheme.current
-    val refused = graph.engine.refused
-    if (refused != null) {
-        // The server refused the reads for the device proof: retrying cannot help, pairing can.
-        Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Spacer(Modifier.height(32.dp))
-            Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.INBOX_UNPAIRED_TITLE else PairingWords.INBOX_NOT_PAIRED_TITLE, color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.TOKEN_REJECTED else PairingWords.INBOX_NOT_PAIRED, color = t.soft, fontSize = 15.sp)
-            NousButton(onClick = openSettings, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Open Settings", color = t.onAccent, fontWeight = FontWeight.SemiBold) }
-        }
-        return
-    }
+    graph.engine.refused?.let { NotPaired(it, openSettings); return }
     Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Spacer(Modifier.height(32.dp))
         Text("Can't reach Nous", color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -307,7 +309,12 @@ fun SurfaceScreen(graph: AppGraph, version: Int, id: String, onBack: () -> Unit)
                 Text(s?.let { Shell.chipLabel(it, graph.functions) } ?: "", color = t.muted, fontSize = 13.sp)
                 Spacer(Modifier.width(12.dp))
             }
-            if (s == null || graph.store.connection == Connection.RESYNCING) {
+            val refused = graph.engine.refused
+            if (refused != null) {
+                // Refused for the device proof: no stale card, and not "no longer live" either
+                // (that branch would also clear the card's notification).
+                NotPaired(refused, LocalOpenSettings.current)
+            } else if (s == null || graph.store.connection == Connection.RESYNCING) {
                 // R16/R17: absent after hydration → not-found; resyncing → nothing presented as current.
                 Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Spacer(Modifier.height(48.dp))

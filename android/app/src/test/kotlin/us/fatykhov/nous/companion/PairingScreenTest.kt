@@ -31,6 +31,7 @@ import us.fatykhov.nous.companion.core.Connection
 import us.fatykhov.nous.companion.core.DeviceToken
 import us.fatykhov.nous.companion.core.PairingWords
 import us.fatykhov.nous.companion.data.AppGraph
+import us.fatykhov.nous.companion.push.PushManager
 import us.fatykhov.nous.companion.ui.CompanionApp
 import us.fatykhov.nous.companion.ui.LocalOpenSettings
 import us.fatykhov.nous.companion.ui.LocalSurfaceHost
@@ -145,6 +146,19 @@ class PairingScreenTest {
         assertEquals(Route.Settings, route)
         rule.waitForIdle()
         assertEquals("the loop stopped instead of retrying", reads, seen.size)
+    }
+
+    @Test fun a_card_opened_from_a_notification_while_not_paired_says_so_and_keeps_the_notification() {
+        answers = { json(403, notPaired) }
+        val g = graph()
+        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        nm.notify("s1", PushManager.NOTIF_ID, android.app.Notification.Builder(ctx, PushManager.CHANNEL_UPDATES).setContentTitle("t").build())
+        rule.setContent { CompanionApp(g, Route.Surface("s1")) { } }
+        rule.runOnIdle { g.engine.connect() }
+        waitForText(PairingWords.INBOX_NOT_PAIRED_TITLE)
+        assertTrue(rule.onAllNodes(hasText("This card is no longer live")).fetchSemanticsNodes().isEmpty())
+        rule.onNodeWithText("Open Settings").assertExists()
+        assertEquals(1, org.robolectric.Shadows.shadowOf(nm).size())
     }
 
     @Test fun a_refused_tap_says_pair_and_offers_settings() {
