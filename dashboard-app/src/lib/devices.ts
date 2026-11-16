@@ -48,12 +48,14 @@ export const openPairing = (name: string) =>
 export const revokeDevice = (id: string) =>
   timed((signal) => apiRequest<{ revoked: boolean }>(devicePath(id), 'DELETE', undefined, signal));
 
-/** A read of the list and how many codes had been made when it STARTED. A read that started before the code on screen
- * was made says nothing about that code, even when it answers after it. */
-export interface StampedList { list: DeviceList; made: number }
+/** A read of the list with what was true when it STARTED: how many codes had been made (a read that started before the
+ * code on screen was made says nothing about that code, even when it answers after it) and the time it was asked (the
+ * server's time left is as of then, at the latest, so a slow answer never makes a code look newer). */
+export interface StampedList { list: DeviceList; made: number; askedAt: number }
 export function readStamped(made: () => number, signal?: AbortSignal): Promise<StampedList> {
   const asked = made();
-  return listDevices(signal).then((list) => ({ list, made: asked }));
+  const askedAt = Date.now();
+  return listDevices(signal).then((list) => ({ list, made: asked, askedAt }));
 }
 
 // ── Words ───────────────────────────────────────────────────────────────────
@@ -77,21 +79,28 @@ export const REVOKE_TEXT = 'This device will stop working with Nous until it is 
 export const PAIRING_TRIES = 5;
 
 export type Tone = 'ok' | 'warn' | 'neutral';
-export type CodeEnd = 'used' | 'closed_tries' | 'expired' | 'gone';
+export type CodeEnd = 'used' | 'closed_tries' | 'expired' | 'gone' | 'replaced';
 
-/** How a code that was on screen ended. */
+/** How a code that was on screen ended. The server's state names no code: "used" says a code was used, not which. */
 export const END_TEXT: Record<CodeEnd, { text: string; tone: Tone }> = {
-  used: { text: 'This code was used. The device is paired.', tone: 'ok' },
+  used: { text: 'A code was used. The new device is in the list below.', tone: 'ok' },
   closed_tries: { text: 'This code was closed after too many wrong tries. Make a new one.', tone: 'warn' },
   expired: { text: 'This code has expired. Make a new one.', tone: 'neutral' },
   gone: { text: 'This code no longer works. Make a new one.', tone: 'warn' },
+  replaced: { text: 'A newer code was made. This one no longer works.', tone: 'warn' },
 };
 
+/** How much longer than the code on screen the server's open code must have left before it is taken for a newer one
+ * (made in another tab or by someone else): room for the server's rounding and the two clocks. */
+export const REPLACED_MARGIN_MS = 10_000;
+
 /** What a read of the list says about the code on screen: null while it is open, else how it ended. A server
- * restarted since the code was made holds no pairing at all. */
-export function codeEnd(pairing: Pairing): CodeEnd | null {
+ * restarted since the code was made holds no pairing at all. `leftMs` is the time the code on screen had left when the
+ * read was asked: an open code with clearly more time left than that is a newer one, made elsewhere. */
+export function codeEnd(pairing: Pairing, leftMs?: number): CodeEnd | null {
   if (pairing === null) return 'gone';
-  return pairing.state === 'open' ? null : pairing.state;
+  if (pairing.state !== 'open') return pairing.state;
+  return leftMs !== undefined && pairing.expires_in * 1000 > leftMs + REPLACED_MARGIN_MS ? 'replaced' : null;
 }
 
 /** "Valid for 5 minutes", counting down: whole minutes rounded up, and the last minute in words. '' once it is over. */

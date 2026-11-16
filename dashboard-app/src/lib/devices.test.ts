@@ -54,14 +54,23 @@ describe('the requests', () => {
     ]);
   });
 
-  it('a read carries the count of codes made when it started, not when it answered', async () => {
-    let answer!: (r: Response) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { answer = r; })));
-    let made = 0;
-    const read = readStamped(() => made);
-    made = 1; // a code is made while the read is in flight
-    answer(new Response(JSON.stringify({ devices: [], pairing: null, redeem: { limited: false } }), { status: 200 }));
-    expect((await read).made).toBe(0);
+  it('a read carries the count of codes made and the time when it started, not when it answered', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.parse('2026-11-15T12:00:00Z'));
+      let answer!: (r: Response) => void;
+      vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { answer = r; })));
+      let made = 0;
+      const read = readStamped(() => made);
+      made = 1; // a code is made while the read is in flight
+      vi.setSystemTime(Date.parse('2026-11-15T12:00:09Z'));
+      answer(new Response(JSON.stringify({ devices: [], pairing: null, redeem: { limited: false } }), { status: 200 }));
+      const got = await read;
+      expect(got.made).toBe(0);
+      expect(got.askedAt).toBe(Date.parse('2026-11-15T12:00:00Z'));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a refused change throws its status and the server\'s body', async () => {
@@ -116,13 +125,25 @@ describe('the code and its countdown', () => {
     for (const [pairing, end] of ends) expect(codeEnd(pairing), JSON.stringify(pairing)).toBe(end);
   });
 
-  it('pins the words for a code that ended', () => {
+  it('pins the words for a code that ended; "used" claims no code, since the server names none', () => {
     expect(END_TEXT).toEqual({
-      used: { text: 'This code was used. The device is paired.', tone: 'ok' },
+      used: { text: 'A code was used. The new device is in the list below.', tone: 'ok' },
       closed_tries: { text: 'This code was closed after too many wrong tries. Make a new one.', tone: 'warn' },
       expired: { text: 'This code has expired. Make a new one.', tone: 'neutral' },
       gone: { text: 'This code no longer works. Make a new one.', tone: 'warn' },
+      replaced: { text: 'A newer code was made. This one no longer works.', tone: 'warn' },
     });
+  });
+
+  it('an open code with more than 10 s more time left than the one on screen is a newer one', () => {
+    expect(codeEnd(OPEN(5, 300), 240_000)).toBe('replaced'); // made a minute after the one on screen
+    expect(codeEnd(OPEN(5, 251), 240_000)).toBe('replaced');
+    expect(codeEnd(OPEN(5, 250), 240_000)).toBeNull(); // 10 s: rounding and clocks, still the same code
+    expect(codeEnd(OPEN(5, 240), 240_000)).toBeNull();
+    expect(codeEnd(OPEN(5, 200), 240_000)).toBeNull(); // less time left than shown: the same code, read late
+    expect(codeEnd(OPEN(5, 300))).toBeNull(); // nothing to compare with
+    expect(codeEnd(null, 240_000)).toBe('gone');
+    expect(codeEnd({ state: 'used' }, 240_000)).toBe('used');
   });
 
   it('with no code on screen, says what the server holds', () => {

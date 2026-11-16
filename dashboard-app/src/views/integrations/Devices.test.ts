@@ -18,6 +18,14 @@ let calls: Call[] = [];
 let handlers: Record<string, () => Answer | Promise<Answer>> = {};
 /** What GET /a2ui/devices answers, unless a handler says otherwise. */
 let listed: DeviceList = deviceList();
+/** When the server's open code was made (null: none made here): its `expires_in` counts down from then, as the
+ * server's does. Setting it again is another tab making a new code. */
+let openedAt: number | null = null;
+/** The list as the server answers it at this moment. */
+function serverList(): DeviceList {
+  if (listed.pairing?.state !== 'open' || openedAt === null) return listed;
+  return { ...listed, pairing: { ...listed.pairing, expires_in: Math.max(0, Math.floor(300 - (Date.now() - openedAt) / 1000)) } };
+}
 
 const CODE = 'K7QM-2XRD';
 const NOW_ISO = () => new Date(Date.now()).toISOString();
@@ -27,13 +35,14 @@ beforeEach(() => {
   calls = [];
   handlers = {};
   listed = deviceList();
+  openedAt = null;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
     const method = init.method ?? 'GET';
     calls.push({ url, method, headers: init.headers as Record<string, string> | undefined, raw: typeof init.body === 'string' ? init.body : undefined });
     const handler = handlers[`${method} ${url}`];
     const [status, payload] = await (handler
       ? handler()
-      : method === 'GET' && url === '/a2ui/devices' ? ([200, listed] as Answer) : ([500, { error: `unexpected ${method} ${url}` }] as Answer));
+      : method === 'GET' && url === '/a2ui/devices' ? ([200, serverList()] as Answer) : ([500, { error: `unexpected ${method} ${url}` }] as Answer));
     if (status === 0) throw new TypeError('Failed to fetch');
     if (status === HANG) {
       return new Promise<Response>((_resolve, reject) => {
@@ -59,6 +68,7 @@ const changes = () => calls.filter((c) => c.method !== 'GET');
 function opening(code = CODE) {
   handlers['POST /a2ui/devices/pairings'] = () => {
     listed = { ...listed, pairing: OPEN() };
+    openedAt = Date.now();
     return [200, { code, expires_in: 300 }];
   };
 }
@@ -233,7 +243,7 @@ describe('Devices: a pairing code', () => {
   });
 
   it.each([
-    [{ state: 'used' }, 'This code was used. The device is paired.'],
+    [{ state: 'used' }, 'A code was used. The new device is in the list below.'],
     [{ state: 'closed_tries' }, 'This code was closed after too many wrong tries. Make a new one.'],
     [{ state: 'expired' }, 'This code has expired. Make a new one.'],
     [null, 'This code no longer works. Make a new one.'],
@@ -251,6 +261,41 @@ describe('Devices: a pairing code', () => {
     const after = reads();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(reads()).toBe(after);
+  });
+
+  it('a code made elsewhere replaces the one on screen: it leaves the screen, said so, and is never called used', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    await vi.advanceTimersByTimeAsync(30_500); // two reads of this very code: it stays
+    expect(s.getByText(CODE)).toBeTruthy();
+    openedAt = Date.now(); // another tab makes a new code: the server's open code has 300 s again
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(s.getByText('A newer code was made. This one no longer works.')).toBeTruthy());
+    expect(s.queryByText(CODE)).toBeNull();
+    // The newer code is used afterwards: nothing more is said about the code that was on screen.
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(s.queryByText('A code was used. The new device is in the list below.')).toBeNull();
+  });
+
+  it.each([3_000, 12_000])('a read that answers %i ms after it was asked does not end a good code', async (late) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    // From now on the server answers `late` ms after it is asked, with the time left as of when it was asked.
+    let answered = 0;
+    handlers['GET /a2ui/devices'] = () => {
+      const answer = serverList();
+      return new Promise<Answer>((r) => setTimeout(() => { answered += 1; r([200, answer]); }, late));
+    };
+    await vi.advanceTimersByTimeAsync(15_000 + late + 500);
+    await vi.waitFor(() => expect(answered).toBeGreaterThanOrEqual(1));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(s.getByText(CODE)).toBeTruthy();
+    expect(s.queryByText(/no longer works/)).toBeNull();
   });
 
   it('while the code is open, the tries left are said once a wrong code was tried', async () => {
@@ -379,16 +424,16 @@ describe('Devices: a pairing code', () => {
     await s.findByText(CODE);
     listed = { ...listed, pairing: { state: 'used' } };
     await vi.advanceTimersByTimeAsync(15_500);
-    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    await vi.waitFor(() => expect(s.getByText('A code was used. The new device is in the list below.')).toBeTruthy());
     handlers['POST /a2ui/devices/pairings'] = () => [409, { error: 'revoke a device first' }];
     await fireEvent.click(s.getByRole('button', { name: 'Show a code' }));
     await vi.waitFor(() => expect(s.getByRole('alert').textContent).toBe('Revoke a device first.'));
-    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+    expect(s.queryByText('A code was used. The new device is in the list below.')).toBeNull();
   });
 
   it('the sentence about a code that ended goes after two minutes, and no line about the used code takes its place', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    const USED = 'This code was used. The device is paired.';
+    const USED = 'A code was used. The new device is in the list below.';
     opening();
     const s = await showCode();
     await s.findByText(CODE);
@@ -426,12 +471,12 @@ describe('Devices: a pairing code', () => {
     await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
     listed = { ...listed, pairing: { state: 'used' } };
     await vi.advanceTimersByTimeAsync(15_500);
-    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    await vi.waitFor(() => expect(s.getByText('A code was used. The new device is in the list below.')).toBeTruthy());
     listed = { ...listed, pairing: OPEN() };
     answer([200, { code: 'P2QR-8XYZ', expires_in: 300 }]);
     expect(await s.findByText('P2QR-8XYZ')).toBeTruthy();
     await fireEvent.click(s.getByRole('button', { name: 'Done' }));
-    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+    expect(s.queryByText('A code was used. The new device is in the list below.')).toBeNull();
   });
 
   it('a try refused while a read ended the code on screen says only the refusal', async () => {
@@ -444,10 +489,10 @@ describe('Devices: a pairing code', () => {
     await fireEvent.click(s.getByRole('button', { name: 'Show a new code' }));
     listed = { ...listed, pairing: { state: 'used' } };
     await vi.advanceTimersByTimeAsync(15_500);
-    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    await vi.waitFor(() => expect(s.getByText('A code was used. The new device is in the list below.')).toBeTruthy());
     answer([409, { error: 'revoke a device first' }]);
     await vi.waitFor(() => expect(s.getByRole('alert').textContent).toBe('Revoke a device first.'));
-    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+    expect(s.queryByText('A code was used. The new device is in the list below.')).toBeNull();
   });
 
   it('a new code with no answer takes the code on screen away: a new one may have replaced it', async () => {

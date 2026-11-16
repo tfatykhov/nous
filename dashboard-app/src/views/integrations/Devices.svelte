@@ -69,12 +69,13 @@
     ended = end;
   }
 
-  // A read made after the code: once it says the code is used, closed, expired or gone, the code leaves the screen.
+  // A read made after the code: once it says the code is used, closed, expired, gone or replaced by a newer one, the
+  // code leaves the screen.
   $effect(() => {
     const page = $store.data;
     untrack(() => {
       if (!shown || !page || page.made !== shown.made) return;
-      const end = codeEnd(page.list.pairing);
+      const end = codeEnd(page.list.pairing, shown.deadline - page.askedAt);
       if (end) finish(end);
     });
   });
