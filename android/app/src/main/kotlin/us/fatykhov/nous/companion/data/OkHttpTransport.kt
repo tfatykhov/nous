@@ -21,9 +21,21 @@ import kotlin.coroutines.resumeWithException
  * = 3× the 15 s keepalive, no call timeout), `/a2ui/call` (200 s: refine
  * runs up to three 60 s compose rounds) and everything else (15 s). The
  * stream never sends `Last-Event-ID` (R2) and returns on any failure.
+ *
+ * All three share one [DeviceTokenInterceptor] and follow no redirect: a 3xx
+ * is the answer, so the device token never travels with a redirect. [base]
+ * is only for tests (a trusted test certificate).
  */
-class OkHttpTransport(private val settings: Settings) : Http {
-    private val plain = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS).build()
+class OkHttpTransport(
+    private val settings: Settings,
+    credential: DeviceCredential,
+    debuggable: Boolean,
+    base: OkHttpClient = OkHttpClient(),
+) : Http {
+    private val plain = base.newBuilder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(false).followSslRedirects(false)
+        .addNetworkInterceptor(DeviceTokenInterceptor(credential, debuggable))
+        .build()
     private val call = plain.newBuilder().readTimeout(200, TimeUnit.SECONDS).build()
     private val stream = plain.newBuilder().readTimeout(45, TimeUnit.SECONDS).callTimeout(0, TimeUnit.SECONDS).build()
     @Volatile private var activeStream: Call? = null
