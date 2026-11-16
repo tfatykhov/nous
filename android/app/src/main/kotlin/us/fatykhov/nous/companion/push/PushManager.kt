@@ -48,7 +48,10 @@ class PushManager(private val context: Context, private val settings: Settings, 
 
     /** Fetch `/a2ui/push/config` (404 == disabled) and cache validated options; then register. */
     suspend fun refreshConfig() {
+        val asked = settings.baseUrl
         val res = try { http.get("/a2ui/push/config") } catch (_: Exception) { status = "server unreachable"; return }
+        // Disconnected, or connected elsewhere, while the request waited: these options are not for this phone's server.
+        if (!settings.configured || settings.baseUrl != asked) return
         if (res.status == 404) { status = "push unavailable (server has no push)"; return }
         if (!res.ok) { status = "push config HTTP ${res.status}"; return }
         val o = runCatching { Json.parseToJsonElement(res.body).jsonObject }.getOrNull() ?: return
