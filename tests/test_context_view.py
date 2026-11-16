@@ -27,6 +27,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from sqlalchemy import text
 from test_runner_call_context import _runner
 
@@ -314,11 +315,13 @@ async def rest(view: Any = None, context_logger: Any = None):
         heart=MagicMock(),
         cognitive=MagicMock(),
         database=_NoDatabase(),
-        settings=Settings(_env_file=None),
+        settings=Settings(_env_file=None, owner_route_secret_sha256=OWNER_DIGEST),
         context_logger=context_logger,
         context_view=view,
     )
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
+    # The payload and sections reads require the owner's or the proxy's secret: the client sends the owner's.
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://nous", headers=OWNER_HEADERS) as client:
         yield client
 
 

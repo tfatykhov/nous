@@ -502,6 +502,7 @@ class TestSleepTriggerEndpoint:
     """POST /sleep/trigger endpoint tests."""
 
     def _make_app(self, sleep_handler=None, bus=None):
+        from f099_support import OWNER_DIGEST, OWNER_HEADERS
         from starlette.testclient import TestClient
 
         from nous.api.rest import create_app
@@ -512,7 +513,8 @@ class TestSleepTriggerEndpoint:
         heart = AsyncMock()
         cognitive = AsyncMock()
         database = AsyncMock()
-        settings = _mock_settings()
+        # The trigger requires the owner's or the proxy's secret: the client sends the owner's.
+        settings = _mock_settings(owner_route_secret_sha256=OWNER_DIGEST)
 
         bus = bus or MagicMock(spec=EventBus)
         bus.emit = AsyncMock()
@@ -527,7 +529,7 @@ class TestSleepTriggerEndpoint:
             bus=bus,
             sleep_handler=sleep_handler,
         )
-        return TestClient(app), bus, settings
+        return TestClient(app, headers=OWNER_HEADERS), bus, settings
 
     def test_trigger_returns_200(self):
         sleep_handler = MagicMock()

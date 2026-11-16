@@ -969,7 +969,8 @@ async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, j
         assert resp.status_code == 200, resp.json()
         assert resp.json()["pre_restore_id"]
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    # The schedule delete and the check update require the owner's or the proxy's secret: the client sends the owner's.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=OWNER_HEADERS) as client:
         # file
         target = workspace / "report.md"
         target.write_bytes(b"# v1\n\x00\xfe binary tail")

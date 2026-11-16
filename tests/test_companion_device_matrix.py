@@ -407,7 +407,12 @@ async def test_a_device_token_is_refused_on_every_owner_route(
             if proof in OWNER_PROVEN:
                 assert response.status_code not in (403, 415), (method, path, response.text)
             elif proof == "proxy-text":
-                assert response.status_code == (415 if method != "GET" else 200), (method, path)
+                # A write with only the proxy's secret needs the JSON media type; a read needs none, and its handler
+                # answers (the ids here name nothing, so a read of one row may say 400 or 404).
+                if method != "GET":
+                    assert response.status_code == 415, (method, path)
+                else:
+                    assert response.status_code not in (403, 415), (method, path, response.text)
             else:
                 assert (response.status_code, response.json()) == (403, {"error": "forbidden"}), (method, path, proof)
 

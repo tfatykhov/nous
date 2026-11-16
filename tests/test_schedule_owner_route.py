@@ -1,5 +1,6 @@
-"""POST /schedules requires the owner's or the proxy's secret in every NOUS_OWNER_ENTRY_MODE (it has no switch). No
-database: the app is built with stand-ins, as tests/test_entry_gate_routes.py does."""
+"""POST /schedules and DELETE /schedules/{id} require the owner's or the proxy's secret in every
+NOUS_OWNER_ENTRY_MODE (they have no switch). No database: the app is built with stand-ins, as
+tests/test_entry_gate_routes.py does."""
 
 from __future__ import annotations
 
@@ -53,11 +54,15 @@ async def test_creating_a_schedule_is_refused_before_the_body_is_read(tmp_path) 
     assert heart.schedules.create.await_count == 0
 
 
-async def test_the_other_schedule_routes_are_unchanged(tmp_path) -> None:
+async def test_the_list_reads_and_the_delete_needs_the_owners_or_the_proxys_secret(tmp_path) -> None:
     heart = _schedule_heart()
     app = _rest_app(tmp_path, "enforce", heart=heart)
     listed = await _send(app, "GET", "/schedules")
     assert (listed.status_code, listed.json()) == (200, {"schedules": []})
-    deleted = await _send(app, "DELETE", "/schedules/5b0b5f1e-0000-4000-8000-000000000001")
+    path = "/schedules/5b0b5f1e-0000-4000-8000-000000000001"
+    refused = await _send(app, "DELETE", path)
+    assert (refused.status_code, refused.json()) == (403, FORBIDDEN)
+    assert heart.schedules.get.await_count == 0
+    deleted = await _send(app, "DELETE", path, headers=PROOFS["owner"])
     assert (deleted.status_code, deleted.json()) == (404, {"error": "Schedule not found"})  # its handler ran
     assert heart.schedules.get.await_count == 1

@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 
 
 class TestRubricEndpoints:
@@ -128,10 +129,10 @@ class TestRubricEndpoints:
             heart=MagicMock(),
             cognitive=MagicMock(),
             database=MagicMock(),
-            settings=MagicMock(agent_id="test"),
+            settings=MagicMock(agent_id="test", owner_route_secret_sha256=OWNER_DIGEST),
             rubric_manager=rubric_mgr,
         )
-        client = TestClient(app)
+        client = TestClient(app, headers=OWNER_HEADERS)
         response = client.post("/rubric/rollback", json={})
         assert response.status_code == 400
 
@@ -147,9 +148,9 @@ class TestRubricEndpoints:
             heart=MagicMock(),
             cognitive=MagicMock(),
             database=MagicMock(),
-            settings=MagicMock(agent_id="test"),
+            settings=MagicMock(agent_id="test", owner_route_secret_sha256=OWNER_DIGEST),
             rubric_manager=rubric_mgr,
         )
-        client = TestClient(app)
+        client = TestClient(app, headers=OWNER_HEADERS)
         response = client.post("/rubric/proposals/fake-id/approve", json={})
         assert response.status_code == 400

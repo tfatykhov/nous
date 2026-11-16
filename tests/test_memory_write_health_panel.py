@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from sqlalchemy import delete, select, text
 
 from nous.a2ui.actions import ActionContext, ActionRouter
@@ -30,6 +31,7 @@ def _agent() -> str:
 
 
 def _settings(agent: str, **over) -> Settings:
+    over.setdefault("owner_route_secret_sha256", OWNER_DIGEST)
     return Settings(agent_id=agent, telegram_bot_token=None, telegram_chat_id=None, **over)
 
 
@@ -38,6 +40,8 @@ def _app(db, settings):
 
 
 async def _call(app, method: str, path: str, **kw):
+    # The acknowledgement requires the owner's or the proxy's secret: every call sends the owner's.
+    kw["headers"] = {**OWNER_HEADERS, **kw.get("headers", {})}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kw)
 

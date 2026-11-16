@@ -1,5 +1,9 @@
 """REST API for Nous agent.
 
+Routes that change state or start work require a secret: the owner's or the proxy's for most, and the route's own row
+in the REST reference (docs/reference/rest-api.md) says which. Chat checks as ``NOUS_OWNER_ENTRY_MODE`` says; the
+companion routes under ``/a2ui`` apply their own checks.
+
 Endpoints:
   POST /chat              - Send message, get response
   DELETE /chat/{session}  - End conversation
@@ -553,7 +557,8 @@ def create_app(
             if q:
                 # Existing search behavior
                 category = request.query_params.get("category")
-                facts = await heart.search_facts(q, limit=limit, category=category)
+                # A browse is not a recall: the results do not count toward recall_count.
+                facts = await heart.search_facts(q, limit=limit, category=category, track_access=False)
                 return JSONResponse({
                     "facts": [f.model_dump(mode="json") for f in facts],
                     "total": len(facts),
@@ -1164,7 +1169,8 @@ def create_app(
         result_text = body.get("result")
         reviewer = body.get("reviewer", "external")
         # The scorer counts a review carrying this tag as the owner's own grade, and only the companion actions write
-        # it (in-process). Anything that reaches this endpoint could otherwise send it, so it is refused here.
+        # it (in-process). The reviewer is the request's word, so this endpoint refuses the tag: no review sent here
+        # carries it.
         if isinstance(reviewer, str) and reviewer.strip().lower() == OWNER_GRADE_REVIEWER:
             return JSONResponse(
                 {"error": f'reviewer "{OWNER_GRADE_REVIEWER}" is reserved for the owner\'s companion actions'},
@@ -2838,6 +2844,7 @@ def create_app(
             query="rubric_dimension_proposal",
             limit=20,
             category="technical",
+            track_access=False,  # a listing is not a recall
         )
         return JSONResponse([
             {
@@ -3925,33 +3932,33 @@ def create_app(
         Route("/status", status),
         Route("/decisions", list_decisions),
         Route("/decisions/unreviewed", list_unreviewed),
-        Route("/decisions/{id}/review", review_decision, methods=["POST"]),
+        owner_guard.route("/decisions/{id}/review", review_decision, methods=["POST"]),
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/profile/facts", list_profile_facts),
-        Route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
+        owner_guard.route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
         Route("/profile-card", get_profile_card),
-        Route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
-        Route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
-        Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
-        Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
+        owner_guard.route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
+        owner_guard.route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
+        owner_guard.route("/facts/{fact_id}", update_fact, methods=["PUT"]),
+        owner_guard.route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),
         Route("/chunks", list_chunks),
-        Route("/censors/{id}", update_censor, methods=["PUT"]),
+        owner_guard.route("/censors/{id}", update_censor, methods=["PUT"]),
         Route("/censors", list_censors),
         Route("/procedures", list_procedures),
         Route("/frames", list_frames),
         Route("/calibration", calibration),
         Route("/identity", get_identity),
-        Route("/identity/{section}", update_identity_section, methods=["PUT"]),
-        Route("/reinitiate", reinitiate, methods=["POST"]),
+        owner_guard.route("/identity/{section}", update_identity_section, methods=["PUT"]),
+        owner_guard.route("/reinitiate", reinitiate, methods=["POST"]),
         Route("/subtasks", list_subtasks),
         Route("/subtasks/{id}", get_subtask),
-        Route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
+        owner_guard.route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
         Route("/schedules", list_schedules),
         owner_guard.route("/schedules", create_schedule, methods=["POST"]),
-        Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
-        Route("/schedules/{id}/run", run_schedule, methods=["POST"]),
+        owner_guard.route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
+        owner_guard.route("/schedules/{id}/run", run_schedule, methods=["POST"]),
         Route("/health", health),
         # F092: A2UI companion — detail before list (Starlette top-down matching)
         Route("/a2ui/stream", a2ui_stream),
@@ -3962,7 +3969,7 @@ def create_app(
         # F097 push. Detail before collection, same rule as the surfaces pair
         # above: Starlette matches top-down.
         Route("/a2ui/push/config", a2ui_push_config),
-        Route("/a2ui/push/installations", a2ui_push_installations),
+        owner_guard.route("/a2ui/push/installations", a2ui_push_installations, methods=["GET"]),
         Route("/a2ui/push/test", a2ui_push_test, methods=["POST"]),
         Route(
             "/a2ui/push/tokens/{installation_id}",
@@ -3980,40 +3987,42 @@ def create_app(
         Route("/events/modifications", events_modifications, methods=["GET"]),
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
-        Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
         owner_guard.route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
         Route("/undo/snapshots", undo_snapshots_list),
         owner_guard.route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
         # F034.1: Finding lifecycle endpoints
-        Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
-        Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
-        Route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
+        owner_guard.route(
+            "/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]
+        ),
+        owner_guard.route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
+        owner_guard.route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
         Route("/heartbeat/findings", heartbeat_findings),
         owner_guard.route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
         # F034.3: Tuning endpoints
         Route("/heartbeat/tuning-report", heartbeat_tuning_report),
-        Route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
+        owner_guard.route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
         # F034: Check-level endpoints
-        Route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
-        Route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
+        owner_guard.route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
         # F034.5: Dynamic check endpoints
-        Route("/heartbeat/checks/dynamic/{name}/trigger", dynamic_checks_trigger, methods=["POST"]),
-        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_update, methods=["PATCH"]),
-        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_delete, methods=["DELETE"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}/trigger", dynamic_checks_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}", dynamic_checks_update, methods=["PATCH"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}", dynamic_checks_delete, methods=["DELETE"]),
         Route("/heartbeat/checks/dynamic", dynamic_checks_list),
-        Route("/heartbeat/checks/dynamic", dynamic_checks_create, methods=["POST"]),
-        Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
+        owner_guard.route("/heartbeat/checks/dynamic", dynamic_checks_create, methods=["POST"]),
+        owner_guard.route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),
         owner_guard.route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # F024 Phase 3b: Rubric endpoints
-        Route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
-        Route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
+        owner_guard.route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
+        owner_guard.route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
         Route("/rubric/proposals", list_proposals),
-        Route("/rubric/rollback", rollback_rubric, methods=["POST"]),
+        owner_guard.route("/rubric/rollback", rollback_rubric, methods=["POST"]),
         Route("/rubric/history", get_rubric_history),
         Route("/rubric/signals", get_outcome_signals),
-        Route("/rubric/evolve", trigger_evolution, methods=["POST"]),
+        owner_guard.route("/rubric/evolve", trigger_evolution, methods=["POST"]),
         Route("/rubric", get_rubric),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
@@ -4037,23 +4046,25 @@ def create_app(
         # F036.1: Cache dashboard
         Route("/dashboard/cache", dashboard_cache),
         # F108: Work view
-        Route("/dashboard/work/sessions", dashboard_work_sessions),
-        Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
+        owner_guard.route("/dashboard/work/sessions", dashboard_work_sessions, methods=["GET"]),
+        owner_guard.route("/dashboard/work/sessions/{session_id}", dashboard_work_trace, methods=["GET"]),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
         Route("/dashboard/work/today", dashboard_work_today),
-        Route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result),
+        owner_guard.route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result, methods=["GET"]),
         Route("/dashboard/model-calls", dashboard_model_calls),
         Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
-        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block),
+        owner_guard.route(
+            "/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block, methods=["GET"]
+        ),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
-        Route("/dashboard/execution/{entry_id}", dashboard_execution_detail),
+        owner_guard.route("/dashboard/execution/{entry_id}", dashboard_execution_detail, methods=["GET"]),
         Route("/dashboard/harness", dashboard_harness),
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
         Route("/dashboard/autonomy", dashboard_autonomy),
-        Route(
+        owner_guard.route(
             "/dashboard/memory-write-health/acknowledge",
             dashboard_memory_write_health_acknowledge,
             methods=["POST"],
@@ -4072,8 +4083,8 @@ def create_app(
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
-        Route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
-        Route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
+        owner_guard.route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
+        owner_guard.route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
         Route("/context/diff", context_diff, methods=["GET"]),
         # F035.3: Behavioral drift detection
         Route("/behavior/snapshot/latest", behavior_snapshot_latest, methods=["GET"]),
