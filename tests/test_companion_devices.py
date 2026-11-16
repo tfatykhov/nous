@@ -661,6 +661,10 @@ async def test_a_bad_body_is_400_and_counts_nothing(make_rig) -> None:
         {"json": {"code": code, "installation_id": "x" * 101}},
         {"json": {"code": code, "installation_id": "inst\x00-1"}},
         {"json": {"code": code, "installation_id": 7}},
+        {  # a lone surrogate (JSON can carry it escaped); the insert would refuse it after the code was taken
+            "content": json.dumps({"code": code, "installation_id": "inst-\ud800"}).encode(),
+            "headers": {"content-type": "application/json"},
+        },
     ]
     for kwargs in bad * 2:  # more than the redeem limit: none of them takes a slot
         response = await _call(rig.app, "POST", "/a2ui/devices/redeem", **kwargs)

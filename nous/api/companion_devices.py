@@ -440,8 +440,14 @@ class _RedeemBody(BaseModel):
     @field_validator("installation_id")
     @classmethod
     def _printable(cls, value: str) -> str:
+        """Refused here, before the code is taken, rather than by the insert after it: a control character, or text
+        that is not valid UTF-8 (a lone surrogate)."""
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
             raise ValueError("installation_id has a control character")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("installation_id is not valid text") from None
         return value
 
 
