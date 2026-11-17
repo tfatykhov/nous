@@ -75,6 +75,8 @@ describe('the create form', () => {
     const form = await openForm();
     expect(within(form).queryByText(COMMANDS().words.checkbox)).toBeNull();
     expect(form.textContent).not.toContain('run any command');
+    expect(form.querySelector('#goal-new-commands')).toBeNull();
+    expect(within(form).queryAllByRole('checkbox')).toHaveLength(0);
   });
 
   it('shows the server words, the sentence from its template, and keeps Create off until it is typed exactly', async () => {
