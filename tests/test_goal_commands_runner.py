@@ -35,7 +35,7 @@ from sqlalchemy import select, text, update
 from nous import main
 from nous.api import tool_policy
 from nous.api.builtin_tools import _BASH_SCHEMA, _LINEAGE_BASH_ENV, _LINEAGE_BUILD_ENV, register_builtin_tools
-from nous.api.execution_context import CONTEXT_KINDS, ExecutionContext
+from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT, CONTEXT_KINDS, ExecutionContext
 from nous.api.runner import AgentRunner
 from nous.api.tools import ToolDispatcher, register_heartbeat_tools
 from nous.autonomy import tool_guard
@@ -497,6 +497,9 @@ async def test_a_lifted_call_carries_the_lineage_flags_and_never_the_build_one(w
         seen = await _dispatched(w, _task(w), {"command": command})
         assert (seen["_lineage"], seen["_lineage_build"], seen["_goal_commands"]) == (True, False, True), command
         assert seen["_lineage_runner"] is tool_policy.lineage_runs_runner(command)
+        assert seen["_long_timeout"] is True  # a task with no time limit of its own: 120 s with no timeout given
+    short = await _dispatched(w, _task(w, turn_timeout=BACKGROUND_BASH_TIMEOUT), {"command": "ls"})
+    assert short["_goal_commands"] is True and short["_long_timeout"] is False  # 30 s with no timeout given
     contained = await _dispatched(w, _ctx("subtask", "internal_only", w.contained_root), {"command": "git push"})
     assert contained["_lineage_build"] is True and "_goal_commands" not in contained
 
