@@ -30,7 +30,7 @@ from goal_grants_baseline import (
     load_seams,
     workspace,
 )
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 
 from nous import main
 from nous.api import tool_policy
@@ -807,3 +807,32 @@ async def test_action_gate_still_blocks_a_bash_call_of_a_task_that_may_run_any_c
     await env.runner.run_turn("subtask-91", "fetch the data", is_background=True, is_subtask=True, context=ctx)
     assert checked == ["bash"] and recorder.seen == []
     assert "BLOCKED by ActionGate" in str(env.model.calls[-1]["messages"])
+
+
+async def test_a_goal_waiting_for_the_owner_keeps_its_mode_lifts_nothing_and_lifts_again_on_resume(world):
+    """A done claim pauses the goal for the owner (the chain's own tool, which writes no mode): its tasks run no
+    command while it waits, its mode stays, and resuming it lifts them again until the same end."""
+    from nous.goals.tools import GoalSessionRef, GoalTools
+
+    w = world
+    end = w.view.commands_entry(w.root).expires_at
+    async with w.db.session() as s:
+        row = (await s.execute(select(GoalSession).where(GoalSession.root_id == w.root).with_for_update())).scalar_one()
+        goal = (await s.execute(select(Goal).where(Goal.id == w.goal.id).with_for_update())).scalar_one()
+        ref = GoalSessionRef(
+            goal_id=goal.id, session_id=row.id, session_n=row.n, root_id=w.root, started_at=row.started_at
+        )
+        tools = GoalTools(w.db, w.settings, w.store, ref)
+        paused, _told = await tools._wait_for_owner(s, goal, row, claim_seq=1)
+        await s.commit()
+    assert paused
+    waiting = await w.store.get(w.goal.id)
+    assert (waiting.state, waiting.pause_reason, waiting.mode) == ("paused", "waiting_for_owner", "commands")
+    assert await w.view.refresh_goal(w.goal.id)
+    assert w.view.commands_entry(w.root) is None
+    for kind in tool_policy.COMMANDS_KINDS:
+        assert w.runner._authorize_tool_call(_task(w, kind), "bash", frozenset({"bash"}), "s", REFUSED) is not None
+    await w.store.resume(w.goal.id, actor="owner")
+    assert await w.view.refresh_goal(w.goal.id)
+    assert w.runner._authorize_tool_call(_task(w), "bash", frozenset({"bash"}), "s", REFUSED) is None
+    assert abs(w.view.commands_entry(w.root).expires_at - end) < 5
