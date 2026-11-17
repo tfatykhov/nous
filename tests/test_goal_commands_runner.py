@@ -29,6 +29,7 @@ from goal_grants_baseline import (
     collect_seams,
     load,
     load_seams,
+    stated_difference,
     workspace,
 )
 from sqlalchemy import select, text, update
@@ -705,7 +706,7 @@ async def test_with_the_hooks_bound_and_every_goal_contained_everything_acts_as_
             dispatcher.set_goal_commands(view.commands_for)
 
     _commit, baseline = load()
-    assert collect(prepare) == baseline
+    assert stated_difference(collect(prepare), baseline) == baseline
     assert await collect_seams(prepare_seams) == load_seams()
 
 

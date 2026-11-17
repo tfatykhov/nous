@@ -16,7 +16,9 @@ A refusal's text names the workspace as ``<ws>``, with ``/`` as the separator, s
 platform.
 
 ``collect`` also records, for bash with the lineage shell off, the refusal ``_authorize_tool_call`` returns in each
-mode (``auth_shell_off``; the offered names are read with the shell off too).
+mode (``auth_shell_off``; the offered names are read with the shell off too), and the same for a task and a workflow
+step with bash added to the offered names (``auth_forced``: with the shell off their offered set never holds it).
+``stated_difference`` checks the one difference from the base this record states, in ``auth_forced``.
 
 ``collect_seams`` (async) records three more places, per context:
 
@@ -220,7 +222,12 @@ def _collect(prepare: Callable[[AgentRunner], None] | None) -> dict[str, Any]:
                 calls[f"{key}|{tool}|{index}"] = row
     object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
     object.__setattr__(settings, "tool_context_policy_mode", "warn")
-    return {"offered": offered, "calls": calls, "auth_shell_off": _auth_shell_off(runner, settings, workspace_dir)}
+    return {
+        "offered": offered,
+        "calls": calls,
+        "auth_shell_off": _auth_shell_off(runner, settings, workspace_dir),
+        "auth_forced": _auth_forced(runner, settings, workspace_dir),
+    }
 
 
 def _auth_shell_off(runner: AgentRunner, settings: Settings, workspace_dir: str) -> dict[str, Any]:
@@ -249,6 +256,60 @@ def _auth_shell_off(runner: AgentRunner, settings: Settings, workspace_dir: str)
         object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
         object.__setattr__(settings, "tool_context_policy_mode", "warn")
     return record
+
+
+def _auth_forced(runner: AgentRunner, settings: Settings, workspace_dir: str) -> dict[str, Any]:
+    """bash's refusal (code and text, or None) in each mode for a task and a workflow step, with the lineage shell
+    off and bash added to the names read with the shell off."""
+    object.__setattr__(settings, "f099_lineage_shell", False)
+    record: dict[str, Any] = {}
+    try:
+        for key, ctx in contexts("bash"):
+            if ctx.kind not in ("subtask", "dag_node"):
+                continue
+            names = frozenset(_offered(runner, ctx, is_subtask=True)) | {"bash"}
+            for index, sample in enumerate(({}, *SAMPLES["bash"])):
+                refusals: dict[str, Any] = {}
+                for mode in MODES:
+                    object.__setattr__(settings, "tool_offered_set_enforcement_mode", mode)
+                    object.__setattr__(settings, "tool_context_policy_mode", mode)
+                    refusal = runner._authorize_tool_call(ctx, "bash", names, ctx.session_id, dict(sample))
+                    refusals[mode] = (
+                        None if refusal is None else [refusal.code, _normalised(refusal.text, workspace_dir)]
+                    )
+                record[f"{key}|bash|{index}"] = refusals
+    finally:
+        object.__setattr__(settings, "f099_lineage_shell", True)
+        object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
+        object.__setattr__(settings, "tool_context_policy_mode", "warn")
+    return record
+
+
+# The refusal of the one stated difference (``stated_difference``), as ``_authorize_tool_call`` returns it.
+STATED_REFUSAL = ["internal_only", "Tool error: 'bash' is not allowed in this turn (not_allowed)."]
+
+
+def stated_rows(base: dict[str, Any]) -> set[str]:
+    """The ``auth_forced`` rows of the one stated difference: an internal_only task's or workflow step's bash call
+    that the base let through in every mode (a command the lineage allowlist accepts)."""
+    return {
+        key
+        for key, refusals in base["auth_forced"].items()
+        if key.split("|")[1] == AUTHORITY_INTERNAL and all(refusal is None for refusal in refusals.values())
+    }
+
+
+def stated_difference(record: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    """``record`` (as ``collect`` returns it) with the rows of the one stated difference from ``base`` (as ``load``
+    returns it) put back as the base has them, after checking each is now refused ``STATED_REFUSAL`` in every mode:
+    with the lineage shell off and no goal running any command, bash in the offered names of an internal_only task or
+    workflow step is refused where the base let the call through. Any other difference is left in place, for the
+    caller's comparison to fail on."""
+    forced, base_forced = record["auth_forced"], base["auth_forced"]
+    stated = stated_rows(base)
+    for key in stated:
+        assert forced.get(key) == dict.fromkeys(MODES, STATED_REFUSAL), key
+    return {**record, "auth_forced": {**forced, **{key: base_forced[key] for key in stated}}}
 
 
 # ---- the tool loop, the dispatcher and the bash tool ----------------------------------------------------------
@@ -426,8 +487,8 @@ async def _bash_records(
 
 def dumps(commit: str, record: dict[str, Any], seams: dict[str, Any], seams_commit: str) -> str:
     """The file's text: each refusal text of ``calls`` once, in ``texts``, and each call's refusals by their index
-    there; then the sections added later (``auth_shell_off`` and ``seams``, texts written out, at ``seams_commit``);
-    one entry per line."""
+    there; then the sections added later (``auth_shell_off``, ``auth_forced`` and ``seams``, texts written out, at
+    ``seams_commit``); one entry per line."""
     texts: list[str] = sorted(
         {refusal[1] for row in record["calls"].values() for refusal in row["auth"].values() if refusal is not None}
     )
@@ -457,6 +518,7 @@ def dumps(commit: str, record: dict[str, Any], seams: dict[str, Any], seams_comm
         f' "calls": {{\n{entries(calls)}\n }},\n'
         f' "seams_generated_at_commit": {json.dumps(seams_commit)},\n'
         f' "auth_shell_off": {{\n{entries(record["auth_shell_off"])}\n }},\n'
+        f' "auth_forced": {{\n{entries(record["auth_forced"])}\n }},\n'
         f' "tool_loop": {{\n{entries(seams["tool_loop"])}\n }},\n'
         f' "dispatch": {{\n{entries(seams["dispatch"])}\n }},\n'
         f' "bash_env": {{\n{entries(seams["bash_env"])}\n }}\n'
@@ -482,6 +544,7 @@ def load() -> tuple[str, dict[str, Any]]:
         "offered": data["offered"],
         "calls": calls,
         "auth_shell_off": data["auth_shell_off"],
+        "auth_forced": data["auth_forced"],
     }
 
 
