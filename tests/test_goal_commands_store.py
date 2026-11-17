@@ -147,11 +147,11 @@ async def test_the_hours_are_within_the_goals_deadline(db):
         "",
     ],
 )
-async def test_the_sentence_is_typed_exactly(db, typed):
+async def test_the_sentence_is_typed_as_shown_spaces_around_it_aside(db, typed):
     store = _store(db)
     with pytest.raises(GoalRefused) as exc:
         await _draft(store, commands=_ask(5, typed))
-    assert str(exc.value) == C.CONFIRM
+    assert str(exc.value) == C.CONFIRM == "Type this sentence to allow it."  # spaces around it are accepted
     goal = await _draft(store, commands=_ask(5, f"  {confirm_sentence(5)} "))
     assert goal.mode == "commands"
 

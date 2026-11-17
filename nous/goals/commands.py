@@ -79,7 +79,7 @@ WORDS: Mapping[str, str] = MappingProxyType(
     }
 )
 NOT_ALLOWED = "Running any command is not allowed on this server."
-CONFIRM = "Type the sentence exactly to allow it."
+CONFIRM = "Type this sentence to allow it."
 HOURS_RANGE = "Hours must be a whole number from 1 to {n}."
 ONE_AT_A_TIME = "Another goal may run any command already. Only one can at a time."
 PROPOSER = "Only you can allow a goal to run any command."
