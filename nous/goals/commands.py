@@ -15,8 +15,10 @@ failing step wins:
 2. the view is fresh by its monotonic clock and by the wall clock (``GoalToolGrants.commands_fresh``: its last
    full read within the per-goal tools view's age by both, so after a host suspend nothing is lifted until the next
    full read);
-3. the view holds an entry for the turn's root (an open session of an active goal in the mode, as last read) and the
-   view's monotonic clock is before the entry's end.
+3. the view holds an entry for the turn's root (an open session of an active goal in the mode, as last read), and
+   the entry's end has come by neither of the view's clocks: its monotonic clock, which a suspended host does not
+   advance, and its wall clock. A wall clock set back does not lengthen the mode (the monotonic end still bounds it);
+   a wall clock set forward ends it early.
 
 ``decide_commands`` never raises: an error is None, logged by its class. The words the screen shows are the tables
 here (``WORDS``, the refusals, ``ENDED``), which the routes return as they are.
@@ -180,11 +182,13 @@ class CommandsRequest:
 @dataclass(frozen=True)
 class CommandsEntry:
     """An open session's root whose goal may run any command, as the view holds it: the goal, the session's number
-    and the end, on the view's monotonic clock."""
+    and the end twice, on the view's monotonic clock (``expires_at``) and on its wall clock (``wall_expires_at``), each
+    the time left as the database measured it at the read, added to that clock's reading at the read."""
 
     goal_id: UUID
     session_n: int
     expires_at: float
+    wall_expires_at: float
 
 
 class CommandsView(Protocol):
@@ -193,6 +197,8 @@ class CommandsView(Protocol):
     def commands_entry(self, root_id: UUID) -> CommandsEntry | None: ...
 
     def now(self) -> float: ...
+
+    def wall_now(self) -> float: ...
 
 
 def decide_commands(view: CommandsView, ctx: ExecutionContext) -> CommandsEntry | None:
@@ -207,7 +213,7 @@ def decide_commands(view: CommandsView, ctx: ExecutionContext) -> CommandsEntry 
         if root is None or not view.commands_fresh():
             return None
         entry = view.commands_entry(root)
-        if entry is None or not view.now() < entry.expires_at:
+        if entry is None or not view.now() < entry.expires_at or not view.wall_now() < entry.wall_expires_at:
             return None
         return entry
     except Exception as exc:

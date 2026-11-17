@@ -332,8 +332,12 @@ class GoalToolGrants:
         return self._commands_on
 
     def now(self) -> float:
-        """The view's clock (monotonic), which the ends of ``commands_entry`` are on."""
+        """The view's clock (monotonic), which ``CommandsEntry.expires_at`` is on."""
         return self._clock()
+
+    def wall_now(self) -> float:
+        """The view's wall clock, which ``CommandsEntry.wall_expires_at`` is on."""
+        return self._wall_clock()
 
     def commands_entry(self, root_id: UUID) -> CommandsEntry | None:
         """The entry of the open session whose root is ``root_id``, when its goal may run any command, or None."""
@@ -499,8 +503,8 @@ class GoalToolGrants:
         self, session: AsyncSession, root_id: UUID | None, goal_id: UUID | None
     ) -> dict[UUID, CommandsEntry]:
         """The open sessions' roots of active goals in the mode whose end is after the database's clock, each with
-        its end on the view's clock: the time left, as the database measures it, added to the view's clock now.
-        Nothing is read without ``commands``."""
+        its end on the view's monotonic clock and on its wall clock: the time left, as the database measures it,
+        added to each clock now. Nothing is read without ``commands``."""
         if not self._commands_on:
             return {}
         remaining = func.extract("epoch", Goal.mode_until - func.clock_timestamp())
@@ -522,8 +526,8 @@ class GoalToolGrants:
         if goal_id is not None:
             query = query.where(Goal.id == goal_id)
         rows = (await session.execute(query)).all()
-        now = self._clock()
-        return {root: CommandsEntry(goal, n, now + float(left)) for root, n, goal, left in rows}
+        now, wall_now = self._clock(), self._wall_clock()
+        return {root: CommandsEntry(goal, n, now + float(left), wall_now + float(left)) for root, n, goal, left in rows}
 
     async def _read_grants(
         self, session: AsyncSession, root_id: UUID | None, goal_id: UUID | None

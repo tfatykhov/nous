@@ -454,7 +454,7 @@ async def test_a_decision_that_raises_lifts_nothing(db, caplog):
 
 
 def test_an_entry_is_frozen():
-    entry = CommandsEntry(uuid.uuid4(), 1, 5.0)
+    entry = CommandsEntry(uuid.uuid4(), 1, 5.0, 1_700_000_005.0)
     with pytest.raises(AttributeError):
         entry.expires_at = 10.0  # type: ignore[misc]
 
@@ -462,14 +462,14 @@ def test_an_entry_is_frozen():
 # ---- a host suspend: the wall clock moves, the monotonic clock does not ------------------------------------------
 
 
-async def _suspended_world(db):
+async def _suspended_world(db, *, left: timedelta = timedelta(hours=2)):
     store, _view, _clock = await _world(db)
     mono, wall = Clock(), Clock()
     wall.now = 1_700_000_000.0
     view = GoalToolGrants(db, _settings(store.agent_id), clock=mono, wall_clock=wall, commands=True)
     goal = await _goal(store)
     root = await _session(db, store, goal)
-    await _mode(db, goal.id)
+    await _mode(db, goal.id, left=left)
     assert await view.refresh()
     return store, view, mono, wall, goal, root
 
@@ -496,6 +496,38 @@ async def test_a_wall_clock_set_back_lifts_nothing_until_the_next_full_read(db):
     assert decide_commands(view, _task(root)) is None
     assert await view.refresh()
     assert decide_commands(view, _task(root)) is not None
+
+
+async def test_a_suspend_across_the_end_shorter_than_the_age_lifts_nothing_once_the_end_has_come(db):
+    """10 seconds left at the read and a 20-second suspend: the monotonic clock has not moved and the view is fresh
+    by both clocks, but by the wall clock the end has come."""
+    _store, view, mono, wall, _goal_row, root = await _suspended_world(db, left=timedelta(seconds=10))
+    entry = view.commands_entry(root)
+    assert decide_commands(view, _task(root)) == entry
+    assert 0 < entry.wall_expires_at - wall.now <= 10  # the database's time left, on the view's wall clock
+    wall.now += 20
+    assert view.commands_fresh() and mono.now < entry.expires_at
+    assert decide_commands(view, _task(root)) is None
+
+
+async def test_a_wall_clock_set_back_does_not_lengthen_the_mode(db):
+    _store, view, mono, wall, _goal_row, root = await _suspended_world(db, left=timedelta(seconds=60))
+    wall.now -= 3600  # set back an hour, then read again: the wall end is an hour earlier too
+    assert await view.refresh()
+    entry = view.commands_entry(root)
+    assert decide_commands(view, _task(root)) == entry
+    mono.now = entry.expires_at  # the end has come by the monotonic clock, while the wall clock is far from its end
+    assert view.commands_fresh() and wall.now < entry.wall_expires_at
+    assert decide_commands(view, _task(root)) is None
+
+
+async def test_before_the_end_by_both_clocks_the_mode_lifts_and_a_wall_clock_set_forward_ends_it(db):
+    _store, view, mono, wall, _goal_row, root = await _suspended_world(db, left=timedelta(seconds=60))
+    entry = view.commands_entry(root)
+    mono.now, wall.now = entry.expires_at - 1, entry.wall_expires_at - 1
+    assert view.commands_fresh() and decide_commands(view, _task(root)) == entry
+    wall.now = entry.wall_expires_at  # set forward to the end: the mode ends early
+    assert decide_commands(view, _task(root)) is None
 
 
 async def test_a_failed_read_leaves_the_wall_clock_unread(db):
