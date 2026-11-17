@@ -42,12 +42,6 @@ _MAX_BASH_TIMEOUT = 300  # seconds
 _DEFAULT_BASH_TIMEOUT = 30  # seconds
 _BACKGROUND_BASH_TIMEOUT = BACKGROUND_BASH_TIMEOUT
 _MAX_OUTPUT_CHARS = 100 * 1024  # 100KB
-
-
-def bash_waits(*, long_timeout: bool) -> tuple[int, int]:
-    """How long one bash call waits, as ``bash_tool`` sets it: the most a call may name, and the wait of a call that
-    names none. ``long_timeout`` is what dispatch passes for the turn (``not ExecutionContext.is_short_turn``)."""
-    return _MAX_BASH_TIMEOUT, (_BACKGROUND_BASH_TIMEOUT if long_timeout else _DEFAULT_BASH_TIMEOUT)
 _MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
 _UNDO_WRITE_LOCK_WAIT_SECONDS = 5.0  # write_file's wait for its path lock when the undo journal takes it
 # read_file page cap. A larger result is cut to a CONTIGUOUS leading window
@@ -170,6 +164,12 @@ def _job_cancel_provenance(
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
+
+
+def bash_waits(*, long_timeout: bool) -> tuple[int, int]:
+    """How long one bash call waits, as ``bash_tool`` sets it: the most a call may name, and the wait of a call that
+    names none. ``long_timeout`` is what dispatch passes for the turn (``not ExecutionContext.is_short_turn``)."""
+    return _MAX_BASH_TIMEOUT, (_BACKGROUND_BASH_TIMEOUT if long_timeout else _DEFAULT_BASH_TIMEOUT)
 
 
 async def bash_tool(
