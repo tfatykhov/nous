@@ -1,6 +1,7 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
+  import CommandsBanner from '$lib/ui/CommandsBanner.svelte';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -167,6 +168,8 @@
 <!-- ── Main content ───────────────────────────────────────────── -->
 <!-- The page ground (class page-ground): chart paper, on every route. -->
 <main id="main-content" class="main-content page-ground">
+  <!-- Above every route, on a desktop screen: the goals whose tasks may run any command now. -->
+  <CommandsBanner />
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.

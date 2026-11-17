@@ -357,10 +357,16 @@ def build_autonomy_routes(
         setting = current.tools.get(name)
         lineage_shell = bool(settings.f099_lineage_shell)
         goal_grants = goal_may_be_given(name, description is not None)
+        goal_commands = settings.goal_commands_enabled is True
         not_offered = [
             {"place": place.key, "why": why}
             for place in PLACES
-            if (why := why_not_offered(place, name, lineage_shell=lineage_shell, goal_grants=goal_grants)) is not None
+            if (
+                why := why_not_offered(
+                    place, name, lineage_shell=lineage_shell, goal_grants=goal_grants, goal_commands=goal_commands
+                )
+            )
+            is not None
         ]
         counted = calls.get(name) if calls is not None else None
         return {

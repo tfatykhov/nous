@@ -15,14 +15,36 @@ and, per context, the names ``_offered_tools`` offers with ``is_subtask`` and th
 A refusal's text names the workspace as ``<ws>``, with ``/`` as the separator, so the record is the same on every
 platform.
 
-Run as a script, it writes ``tests/fixtures/goal_grants_parity_baseline.json`` with the commit it ran at (``dumps``);
-``load`` reads it back in the shape ``collect`` returns.
+``collect`` also records, for bash with the lineage shell off, the refusal ``_authorize_tool_call`` returns in each
+mode (``auth_shell_off``; the offered names are read with the shell off too), and the same for a task and a workflow
+step with bash added to the offered names (``auth_forced``: with the shell off their offered set never holds it).
+``stated_difference`` checks the one difference from the base this record states, in ``auth_forced``.
+
+``collect_seams`` (async) records three more places, per context:
+
+- ``tool_loop``: the ``goal_lifted`` value ``_tool_loop`` hands to ``_dispatch_with_ledger`` for each tool that reaches
+  it, in one real tool loop whose model calls every tool once (the dispatch itself is a spy);
+- ``dispatch``: the dispatcher's own arguments (those starting with ``_``) a real ``ToolDispatcher.dispatch`` passes to
+  a recording bash handler, for a plain command, a build command, a runner.sh command, and a call that sends ``_``
+  arguments of its own;
+- ``bash_env``: the environment's variable NAMES and the stdin the registered bash tool starts its command with
+  (``asyncio.create_subprocess_shell`` replaced by a recorder), for the same calls, while the process environment is
+  ``SYNTHETIC_ENV``: names invented here, so the record never holds a real machine's variable names.
+
+For a turn whose goal may run any command (none in this record), a bash call is meant to reach the tool with
+``_lineage`` true and ``_lineage_build`` false, to start with stdin at end of file, and to see the lineage variables
+(``_LINEAGE_BASH_ENV``) and nothing else.
+
+Run as a script, it writes ``tests/fixtures/goal_grants_parity_baseline.json`` (``dumps``); ``load`` reads it back in
+the shape ``collect`` returns, ``load_seams`` in the shape ``collect_seams`` returns.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,11 +52,13 @@ import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from nous.api import tool_classes, tool_policy
+from nous.api.builtin_tools import _BASH_SCHEMA, register_builtin_tools
 from nous.api.execution_context import CONTEXT_KINDS, FOREGROUND_KINDS, ExecutionContext
-from nous.api.runner import AgentRunner
+from nous.api.models import Conversation, Message
+from nous.api.runner import AgentRunner, Dispatched
 from nous.api.tool_classes import TOOL_CLASSES
 from nous.api.tools import ToolDispatcher
 from nous.brain.intentions import AUTHORITIES, AUTHORITY_INTERNAL
@@ -198,12 +222,273 @@ def _collect(prepare: Callable[[AgentRunner], None] | None) -> dict[str, Any]:
                 calls[f"{key}|{tool}|{index}"] = row
     object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
     object.__setattr__(settings, "tool_context_policy_mode", "warn")
-    return {"offered": offered, "calls": calls}
+    return {
+        "offered": offered,
+        "calls": calls,
+        "auth_shell_off": _auth_shell_off(runner, settings, workspace_dir),
+        "auth_forced": _auth_forced(runner, settings, workspace_dir),
+    }
 
 
-def dumps(commit: str, record: dict[str, Any]) -> str:
-    """The file's text: each refusal text once, in ``texts``, and each call's refusals by their index there; one
-    entry per line."""
+def _auth_shell_off(runner: AgentRunner, settings: Settings, workspace_dir: str) -> dict[str, Any]:
+    """bash's refusal (code and text, or None) in each mode with the lineage shell off, the offered names read with
+    the shell off as well."""
+    object.__setattr__(settings, "f099_lineage_shell", False)
+    record: dict[str, Any] = {}
+    try:
+        for key, ctx in contexts("bash"):
+            if ctx.kind == "approved_action":
+                names = frozenset({"bash"})
+            else:
+                names = frozenset(_offered(runner, ctx, is_subtask=ctx.kind in ("subtask", "dag_node")))
+            for index, sample in enumerate(({}, *SAMPLES["bash"])):
+                refusals: dict[str, Any] = {}
+                for mode in MODES:
+                    object.__setattr__(settings, "tool_offered_set_enforcement_mode", mode)
+                    object.__setattr__(settings, "tool_context_policy_mode", mode)
+                    refusal = runner._authorize_tool_call(ctx, "bash", names, ctx.session_id, dict(sample))
+                    refusals[mode] = (
+                        None if refusal is None else [refusal.code, _normalised(refusal.text, workspace_dir)]
+                    )
+                record[f"{key}|bash|{index}"] = refusals
+    finally:
+        object.__setattr__(settings, "f099_lineage_shell", True)
+        object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
+        object.__setattr__(settings, "tool_context_policy_mode", "warn")
+    return record
+
+
+def _auth_forced(runner: AgentRunner, settings: Settings, workspace_dir: str) -> dict[str, Any]:
+    """bash's refusal (code and text, or None) in each mode for a task and a workflow step, with the lineage shell
+    off and bash added to the names read with the shell off."""
+    object.__setattr__(settings, "f099_lineage_shell", False)
+    record: dict[str, Any] = {}
+    try:
+        for key, ctx in contexts("bash"):
+            if ctx.kind not in ("subtask", "dag_node"):
+                continue
+            names = frozenset(_offered(runner, ctx, is_subtask=True)) | {"bash"}
+            for index, sample in enumerate(({}, *SAMPLES["bash"])):
+                refusals: dict[str, Any] = {}
+                for mode in MODES:
+                    object.__setattr__(settings, "tool_offered_set_enforcement_mode", mode)
+                    object.__setattr__(settings, "tool_context_policy_mode", mode)
+                    refusal = runner._authorize_tool_call(ctx, "bash", names, ctx.session_id, dict(sample))
+                    refusals[mode] = (
+                        None if refusal is None else [refusal.code, _normalised(refusal.text, workspace_dir)]
+                    )
+                record[f"{key}|bash|{index}"] = refusals
+    finally:
+        object.__setattr__(settings, "f099_lineage_shell", True)
+        object.__setattr__(settings, "tool_offered_set_enforcement_mode", "warn")
+        object.__setattr__(settings, "tool_context_policy_mode", "warn")
+    return record
+
+
+# The refusal of the one stated difference (``stated_difference``), as ``_authorize_tool_call`` returns it.
+STATED_REFUSAL = ["internal_only", "Tool error: 'bash' is not allowed in this turn (not_allowed)."]
+
+
+def stated_rows(base: dict[str, Any]) -> set[str]:
+    """The ``auth_forced`` rows of the one stated difference: an internal_only task's or workflow step's bash call
+    that the base let through in every mode (a command the lineage allowlist accepts)."""
+    return {
+        key
+        for key, refusals in base["auth_forced"].items()
+        if key.split("|")[1] == AUTHORITY_INTERNAL and all(refusal is None for refusal in refusals.values())
+    }
+
+
+def stated_difference(record: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+    """``record`` (as ``collect`` returns it) with the rows of the one stated difference from ``base`` (as ``load``
+    returns it) put back as the base has them, after checking each is now refused ``STATED_REFUSAL`` in every mode:
+    with the lineage shell off and no goal running any command, bash in the offered names of an internal_only task or
+    workflow step is refused where the base let the call through. Any other difference is left in place, for the
+    caller's comparison to fail on."""
+    forced, base_forced = record["auth_forced"], base["auth_forced"]
+    stated = stated_rows(base)
+    for key in stated:
+        assert forced.get(key) == dict.fromkeys(MODES, STATED_REFUSAL), key
+    return {**record, "auth_forced": {**forced, **{key: base_forced[key] for key in stated}}}
+
+
+# ---- the tool loop, the dispatcher and the bash tool ----------------------------------------------------------
+
+# The process environment while the bash tool runs: every name invented here, each value a placeholder.
+SYNTHETIC_ENV: dict[str, str] = {
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/home/synthetic",
+    "LANG": "C.UTF-8",
+    "TZ": "UTC",
+    "TERM": "dumb",
+    "USER": "synthetic",
+    "LOGNAME": "synthetic",
+    "SHELL": "/bin/sh",
+    "TMPDIR": "/tmp",
+    "GITHUB_TOKEN": "synthetic-code-host-token",
+    "GH_TOKEN": "synthetic-code-host-token",
+    "GH_HOST": "code-host.example",
+    "GH_REPO": "process/repo",
+    "DB_PASSWORD": "synthetic-db-password",
+    "DATABASE_URL": "postgresql://synthetic@db.example/nous",
+    "ANTHROPIC_API_KEY": "synthetic-model-key",
+    "OPENAI_API_KEY": "synthetic-model-key",
+    "NOUS_TELEGRAM_BOT_TOKEN": "synthetic-chat-token",
+    "GOOGLE_SERVICE_ACCOUNT_JSON": "{}",
+    "NOUS_OWNER_ROUTE_SECRET": "synthetic-owner-secret",
+    "NOUS_SYNTHETIC_OTHER": "synthetic",
+}
+# The bash calls the dispatcher and the bash tool are recorded with: a plain command, a build command, a runner.sh
+# command, and a call that sends arguments named like the dispatcher's own.
+BASH_CALLS: dict[str, dict[str, Any]] = {
+    "plain": {"command": "ls"},
+    "build": {"command": "git status"},
+    "runner": {"command": "claude-jobs/runner.sh list"},
+    "sent": {"command": "ls", "_lineage": False, "_lineage_build": True, "_goal_commands": True, "_gh_repo": "x/y"},
+}
+GH_REPO = "settings/repo"
+
+
+def _jsonable(value: Any) -> Any:
+    """A dispatcher argument as recorded: a cancel record without its time."""
+    if isinstance(value, dict):
+        return {k: v for k, v in sorted(value.items()) if k != "at"}
+    return value
+
+
+class _Recorder:
+    """A bash handler that keeps the dispatcher's own arguments of each call."""
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.seen.append({k: _jsonable(v) for k, v in sorted(kwargs.items()) if k.startswith("_")})
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+
+class _Process:
+    returncode = 0
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return b"", b""
+
+
+class _Shell:
+    """``asyncio.create_subprocess_shell`` as the bash tool calls it: keeps the variable names and the stdin."""
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, Any]] = []
+
+    async def __call__(self, command: str, **kwargs: Any) -> _Process:
+        stdin = kwargs.get("stdin")
+        self.seen.append(
+            {
+                "env": sorted(kwargs["env"]),
+                "stdin": "devnull" if stdin == asyncio.subprocess.DEVNULL else repr(stdin),
+            }
+        )
+        return _Process()
+
+
+async def collect_seams(
+    prepare: Callable[[AgentRunner, list[ToolDispatcher]], None] | None = None,
+) -> dict[str, Any]:
+    """The record of the tool loop, the dispatcher and the bash tool (see the module). ``prepare`` is called with the
+    tool-loop runner and the two dispatchers (the recording one and the one with the real bash tool) before anything
+    is recorded."""
+    saved = dict(tool_classes._MCP_TOOLS)
+    tool_classes._MCP_TOOLS.clear()
+    tool_classes._MCP_TOOLS.update(MCP_NOTED)
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)  # each refusal logs a line
+    try:
+        workspace_dir = workspace()
+        runner, _settings = build(workspace_dir)
+        bash_settings = settings_for(workspace_dir)
+        object.__setattr__(bash_settings, "github_default_repo", GH_REPO)
+        recording = ToolDispatcher()
+        recorder = _Recorder()
+        recording.register("bash", recorder, _BASH_SCHEMA)
+        real = ToolDispatcher()
+        register_builtin_tools(real, bash_settings)
+        if prepare is not None:
+            prepare(runner, [recording, real])
+        return {
+            "tool_loop": await _tool_loop_record(runner),
+            **await _bash_records(recording, recorder, real),
+        }
+    finally:
+        logging.disable(previous)
+        tool_classes._MCP_TOOLS.clear()
+        tool_classes._MCP_TOOLS.update(saved)
+
+
+async def _tool_loop_record(runner: AgentRunner) -> dict[str, dict[str, bool]]:
+    """Per context: each tool that reached ``_dispatch_with_ledger`` in one tool loop, with its ``goal_lifted``."""
+    record: dict[str, dict[str, bool]] = {}
+    for key, ctx in contexts("bash"):
+        lifted: dict[str, bool] = {}
+
+        async def spy(_ctx: Any, tool_name: str, _tool_input: Any, *, goal_lifted: bool = False, **_kw: Any):
+            lifted[tool_name] = goal_lifted
+            return Dispatched("ok", False, None, None, None)
+
+        calls = [
+            {"type": "tool_use", "id": f"toolu_{index:04d}", "name": tool, "input": dict(SAMPLES.get(tool, ({},))[0])}
+            for index, tool in enumerate(TOOLS)
+        ]
+        steps = [calls, [{"type": "text", "text": "done"}]]
+
+        async def model(*_args: Any, **_kwargs: Any) -> Any:
+            from nous.api.models import ApiResponse
+
+            blocks = steps.pop(0)
+            stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
+            return ApiResponse(content=blocks, stop_reason=stop, usage={"input_tokens": 1, "output_tokens": 1})
+
+        runner._call_api = model  # type: ignore[method-assign]
+        runner._dispatch_with_ledger = spy  # type: ignore[method-assign]
+        conversation = Conversation(session_id=ctx.session_id)
+        conversation.messages.append(Message(role="user", content="work"))
+        await runner._tool_loop(
+            "system",
+            conversation,
+            "task",
+            session_id=ctx.session_id,
+            is_subtask=ctx.kind in ("subtask", "dag_node"),
+            context=ctx,
+            is_background=ctx.is_background,
+        )
+        record[key] = dict(sorted(lifted.items()))
+    return record
+
+
+async def _bash_records(
+    recording: ToolDispatcher, recorder: _Recorder, real: ToolDispatcher
+) -> dict[str, dict[str, Any]]:
+    """``dispatch`` and ``bash_env`` (see the module), per context and call."""
+    dispatch: dict[str, Any] = {}
+    bash_env: dict[str, Any] = {}
+    shell = _Shell()
+    for key, ctx in contexts("bash"):
+        for name, call in BASH_CALLS.items():
+            recorder.seen.clear()
+            await recording.dispatch("bash", dict(call), session_id=ctx.session_id, context=ctx)
+            [seen] = recorder.seen
+            dispatch[f"{key}|{name}"] = seen
+            shell.seen.clear()
+            with patch.dict(os.environ, SYNTHETIC_ENV, clear=True), patch("asyncio.create_subprocess_shell", shell):
+                await real.dispatch("bash", dict(call), session_id=ctx.session_id, context=ctx)
+            [started] = shell.seen
+            bash_env[f"{key}|{name}"] = started
+    return {"dispatch": dispatch, "bash_env": bash_env}
+
+
+def dumps(commit: str, record: dict[str, Any], seams: dict[str, Any], seams_commit: str) -> str:
+    """The file's text: each refusal text of ``calls`` once, in ``texts``, and each call's refusals by their index
+    there; then the sections added later (``auth_shell_off``, ``auth_forced`` and ``seams``, texts written out, at
+    ``seams_commit``); one entry per line."""
     texts: list[str] = sorted(
         {refusal[1] for row in record["calls"].values() for refusal in row["auth"].values() if refusal is not None}
     )
@@ -230,7 +515,13 @@ def dumps(commit: str, record: dict[str, Any]) -> str:
         f' "generated_at_commit": {json.dumps(commit)},\n'
         f' "texts": [\n{block([json.dumps(text) for text in texts])}\n ],\n'
         f' "offered": {{\n{entries(record["offered"])}\n }},\n'
-        f' "calls": {{\n{entries(calls)}\n }}\n'
+        f' "calls": {{\n{entries(calls)}\n }},\n'
+        f' "seams_generated_at_commit": {json.dumps(seams_commit)},\n'
+        f' "auth_shell_off": {{\n{entries(record["auth_shell_off"])}\n }},\n'
+        f' "auth_forced": {{\n{entries(record["auth_forced"])}\n }},\n'
+        f' "tool_loop": {{\n{entries(seams["tool_loop"])}\n }},\n'
+        f' "dispatch": {{\n{entries(seams["dispatch"])}\n }},\n'
+        f' "bash_env": {{\n{entries(seams["bash_env"])}\n }}\n'
         "}\n"
     )
 
@@ -249,16 +540,30 @@ def load() -> tuple[str, dict[str, Any]]:
         }
         for key, row in data["calls"].items()
     }
-    return data["generated_at_commit"], {"offered": data["offered"], "calls": calls}
+    return data["generated_at_commit"], {
+        "offered": data["offered"],
+        "calls": calls,
+        "auth_shell_off": data["auth_shell_off"],
+        "auth_forced": data["auth_forced"],
+    }
+
+
+def load_seams() -> dict[str, Any]:
+    """The record as ``collect_seams`` returns it."""
+    data = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    return {name: data[name] for name in ("tool_loop", "dispatch", "bash_env")}
 
 
 def main() -> int:
     logging.disable(logging.CRITICAL)  # each refusal logs a line
-    commit = subprocess.run(
+    head = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=Path(__file__).parent
     ).stdout.strip()
+    # The first sections keep the commit they were first written at; the later ones are written at HEAD.
+    commit = json.loads(FIXTURE.read_text(encoding="utf-8"))["generated_at_commit"] if FIXTURE.exists() else head
     record = collect()
-    FIXTURE.write_text(dumps(commit, record), encoding="utf-8", newline="\n")
+    seams = asyncio.run(collect_seams())
+    FIXTURE.write_text(dumps(commit, record, seams, head), encoding="utf-8", newline="\n")
     print(f"wrote {FIXTURE} ({len(record['calls'])} calls, {len(record['offered'])} offered sets)")
     return 0
 

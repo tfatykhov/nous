@@ -102,6 +102,11 @@ INTERNAL_ONLY_CHECKED_TOOLS: frozenset[str] = frozenset({"write_file", "cancel_t
 # Per-goal tool grants: the kinds of turn a goal session's own lineage runs in. A tool the owner allowed for one goal
 # can be lifted only in a turn of these kinds (nous/goals/grants.py decides which turn).
 GRANT_KINDS: frozenset[str] = frozenset({"continuation", "subtask", "dag_node"})
+# A goal that may run any command: the kinds of turn of its session's lineage that bash runs any command in (a task,
+# or a workflow step that runs as a task; never a chain decision), and the one tool it changes. nous/goals/commands.py
+# decides which turn.
+COMMANDS_KINDS: frozenset[str] = frozenset({"subtask", "dag_node"})
+COMMANDS_TOOL = "bash"
 # Logged with their root when called from a lineage (spec section 9).
 INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search"})
 
@@ -487,8 +492,13 @@ def _lift(name: str, lifted: bool) -> bool:
     return lifted and grant_refusal(name) is None
 
 
+def _commands(name: str, ctx: ExecutionContext, commands: bool) -> bool:
+    """Whether ``commands`` applies to a call of ``name`` in ``ctx``: only to bash, in a turn of ``COMMANDS_KINDS``."""
+    return commands and name == COMMANDS_TOOL and ctx.kind in COMMANDS_KINDS
+
+
 def internal_only_allowed(
-    name: str, *, ctx: ExecutionContext, lineage_shell: bool = False, lifted: bool = False
+    name: str, *, ctx: ExecutionContext, lineage_shell: bool = False, lifted: bool = False, commands: bool = False
 ) -> bool:
     """Whether an internal_only context may be OFFERED ``name``.
 
@@ -497,12 +507,13 @@ def internal_only_allowed(
     ``lineage_shell`` (``NOUS_F099_LINEAGE_SHELL``) lifts the denylist for ``bash``
     alone; its calls are then held to ``lineage_bash_allowed``. ``lifted`` (the owner allowed this tool for the
     turn's goal, ``nous/goals/grants.py``) skips the class rule for a tool ``grant_refusal`` accepts; the other
-    rules still apply.
+    rules still apply. ``commands`` (the turn's goal may run any command, ``nous/goals/commands.py``) offers bash
+    to a turn of ``COMMANDS_KINDS``, with the lineage shell on or off; it changes no other tool.
     """
     cls = tool_class(name)
     if cls is None or (cls.side_effect not in ("none", "write") and not _lift(name, lifted)):
         return False
-    if name == "bash" and lineage_shell:
+    if name == "bash" and (lineage_shell or _commands(name, ctx, commands)):
         return True
     if name in INTERNAL_ONLY_DENYLIST or name in INTERNAL_ONLY_EXTRA_TOOLS:
         return False
@@ -1282,6 +1293,32 @@ def lineage_bash_description(*, build_commands: bool) -> str:
     )
 
 
+# What bash's description says in a task of a goal that may run any command, in place of the lineage shell's sentence:
+# its first sentence, then the waits of that turn's bash calls (``commands_bash_note``).
+COMMANDS_BASH_LEAD = "In this goal's tasks bash runs any command, until the goal's end time."
+COMMANDS_BASH_NOTE = COMMANDS_BASH_LEAD + (
+    " One call waits at most {most} seconds. With no timeout given it waits {default} seconds. Run longer work "
+    "detached. If a task needs a token, fetch it and use it in the same task: text passed to another task is stored."
+)
+
+
+def commands_bash_note(*, most: int, default: int) -> str:
+    """``COMMANDS_BASH_NOTE`` with the turn's waits: ``most`` and ``default`` are ``builtin_tools.bash_waits`` for
+    the turn, the values its bash calls are run with."""
+    return COMMANDS_BASH_NOTE.format(most=most, default=default)
+
+
+def commands_bash_description(description: str, *, build_commands: bool, most: int, default: int) -> str:
+    """bash's ``description`` as a task of a goal that may run any command is offered it: the lineage shell's
+    sentence (``lineage_bash_description``) replaced by ``commands_bash_note``, or the note appended when the
+    description has no such sentence."""
+    note = commands_bash_note(most=most, default=default)
+    lineage = lineage_bash_description(build_commands=build_commands)
+    if lineage in description:
+        return description.replace(lineage, note)
+    return f"{description} {note}" if description else note
+
+
 def lineage_write_file_description(workspace_dir: str, *, lineage_shell: bool, extra_write_dirs: Sequence[str]) -> str:
     """The one sentence write_file's description gives the directories ``lineage_write_dirs`` allows, by name:
     the root's own directory, ``claude-jobs/prompts/`` with ``lineage_shell``, and each owner's directory that
@@ -1740,6 +1777,11 @@ def granted_call_violation(
 
 GRANT_CLEANUP_HINT = "With this goal's grant, send_file may not delete the file it sends: leave cleanup out."
 
+# A call authorized under a goal's lift that ended before the call started, refused by the rules without it
+# (``AgentRunner._lift_at_dispatch``).
+COMMANDS_ENDED_REFUSAL = "Tool error: this goal's time to run any command has ended; the command did not run."
+GRANT_ENDED_REFUSAL = "Tool error: '{tool}' is no longer allowed for this goal's work; the call did not run."
+
 
 def granted_call_hint(ctx: ExecutionContext, name: str, workspace_dir: str, code: str) -> str:
     """What a granted call may do, appended to its ``grant_file`` or ``grant_cleanup`` refusal."""
@@ -1769,6 +1811,7 @@ def internal_only_call_violation(
     build_commands: bool = False,
     extra_write_dirs: Sequence[str] = (),
     lifted: bool = False,
+    commands: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
@@ -1777,13 +1820,16 @@ def internal_only_call_violation(
     it for the turn's goal, see ``internal_only_allowed``), whose call is held to ``granted_call_violation``
     instead (``"grant_file"``, ``"grant_cleanup"``); for bash, the command is not on
     the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
-    ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
+    ``NOUS_F099_LINEAGE_BUILD_COMMANDS``), unless ``commands`` applies (see ``internal_only_allowed``): then a bash
+    call has no per-call rule here. ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
     ``NOUS_F099_LINEAGE_SHELL``; ``extra_write_dirs`` is ``NOUS_F099_LINEAGE_WRITE_DIRS``). ``"foreign_cancel"``:
     cancel_task with an id that is not a UUID. The cancel_task lineage check needs the target's row, so it lives in
     the handler (``tools.py``); this sync function only rejects what needs no read.
     """
     if name == "bash":
+        if _commands(name, ctx, commands):
+            return None
         command = tool_input.get("command")
         if not isinstance(command, str) or not lineage_bash_allowed(
             ctx,
@@ -2173,6 +2219,7 @@ def evaluate(
     workspace_dir: str | None = None,
     extra_write_dirs: Sequence[str] = (),
     lifted: bool = False,
+    commands: bool = False,
 ) -> str | None:
     """None if ``ctx`` may make this call; otherwise the violation code:
     ``unclassified``, ``undeclared``, ``level:<level>``, ``spawn``, ``reenable``.
@@ -2180,7 +2227,8 @@ def evaluate(
     With ``workspace_dir``, an internal_only bash call on the lineage allowlist (with ``extra_write_dirs``,
     ``NOUS_F099_LINEAGE_WRITE_DIRS``) is judged at ``write``: the read-only gh calls it permits are ``external``
     only to the classifier, and a continuation's row is local. ``lifted`` (the owner allowed the tool for the turn's
-    goal, see ``internal_only_allowed``) skips the level rule alone for a tool ``grant_refusal`` accepts."""
+    goal, see ``internal_only_allowed``) skips the level rule alone for a tool ``grant_refusal`` accepts; so does
+    ``commands`` for a bash call in a turn of ``COMMANDS_KINDS``."""
     if ctx.kind in FOREGROUND_KINDS:
         return None
     policy = CONTEXT_POLICY[ctx.kind]
@@ -2201,7 +2249,7 @@ def evaluate(
         )
     ):
         level = "write"
-    if level not in policy.levels and not _lift(tool_name, lifted):
+    if level not in policy.levels and not _lift(tool_name, lifted) and not _commands(tool_name, ctx, commands):
         return f"level:{level}"
     # Phase 2.8: check undoability BEFORE the spawn gate so that a tool that
     # both spawns and lacks a compensator (e.g. dag_create) returns

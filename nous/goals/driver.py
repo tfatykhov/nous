@@ -41,6 +41,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, owner_message, roots, spend
+from nous.goals import commands as goal_commands
 from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, WAITING_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
@@ -60,6 +61,7 @@ from nous.storage.models import (
 
 if TYPE_CHECKING:
     from nous.goals.grants import GoalToolGrants
+    from nous.goals.modes import ModeSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +289,7 @@ class GoalDriver:
         runner: Any,
         *,
         tool_grants: GoalToolGrants | None = None,
+        modes: ModeSweeper | None = None,
     ) -> None:
         self._db = database
         self._settings = settings
@@ -297,6 +300,12 @@ class GoalDriver:
         # F115 per-goal tools: the runner's view of the goals' tool grants (main.py, with the flag on), read again at
         # the start, at the end of every tick, after a session starts and after one closes. None: no grants.
         self.tool_grants = tool_grants
+        # The ends of the goals' modes no owner's change makes (main.py): ``at_start`` once in ``start``, and with
+        # NOUS_GOAL_COMMANDS_ENABLED on ``expire`` first in every tick. None: none are swept.
+        self._modes = modes
+        # With NOUS_GOAL_COMMANDS_ENABLED on, an ``at_start`` that failed: tried again first in every tick until it
+        # succeeds, the view's commands held meanwhile (``_reconcile_modes``).
+        self._reconcile_pending = False
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
@@ -318,6 +327,7 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
+        await self._reconcile_modes()
         await self._read_grants()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
@@ -362,6 +372,10 @@ class GoalDriver:
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
+            if self._reconcile_pending:
+                await self._reconcile_modes()
+            if goal_commands.enabled(self._settings):
+                await self._sweep_modes()
             claimed = await self.claim_reports()
             stopped = await self.handle_requests()
             closed = await self.close_finished()
@@ -374,6 +388,39 @@ class GoalDriver:
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
+
+    async def _reconcile_modes(self) -> None:
+        """The start's reconciliation of the goals' modes with the host's settings (``ModeSweeper.at_start``). With
+        NOUS_GOAL_COMMANDS_ENABLED on, once it succeeds the view's commands are released (main.py holds them when it
+        builds the view), and one that fails stays pending: no goal's tasks run any command, and each tick
+        tries it again first, until it succeeds. One warning when it fails, one line when it succeeds after that."""
+        if await self._sweep_modes(at_start=True):
+            if self._reconcile_pending:
+                logger.info("The goals' modes were reconciled with the host's settings: their commands run again")
+            self._reconcile_pending = False
+            if self.tool_grants is not None and goal_commands.enabled(self._settings):
+                self.tool_grants.release_commands()
+        elif goal_commands.enabled(self._settings) and not self._reconcile_pending:
+            self._reconcile_pending = True
+            logger.warning(
+                "The goals' modes were not reconciled at the start: no goal's tasks run any command until a tick does"
+            )
+
+    async def _sweep_modes(self, *, at_start: bool = False) -> bool:
+        """The ends of the goals' modes no owner's change makes (``modes``): ``at_start`` once, else ``expire``. A
+        sweep that fails never fails the start or the tick: logged by its class, tried again at the next tick.
+        Returns whether it ran (True with no sweeper)."""
+        if self._modes is None:
+            return True
+        try:
+            if at_start:
+                await self._modes.at_start()
+            else:
+                await self._modes.expire()
+        except Exception as exc:
+            logger.warning("The goals' modes were not swept (%s)", type(exc).__name__)
+            return False
+        return True
 
     async def _read_grants(self, root_id: UUID | None = None, *, goal_id: UUID | None = None) -> None:
         """F115: read the goals' tool grants into the runner's view again (all of them, one session's root, or one
@@ -733,12 +780,22 @@ class GoalDriver:
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
             moved = len(await moved_steps(s, self._agent_id, goal.id))  # steps the plan moved to the journal
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
         tools = await self._tool_lines(goal) if self.tool_grants is not None else None
+        until = goal_commands.charter_until(goal, now=now, settings=self._settings)
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
             return charter.build_session_task(
-                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved, tools=tools
+                goal,
+                plan,
+                rows,
+                spent=total,
+                day_spent=today,
+                max_chars=max_chars,
+                moved=moved,
+                tools=tools,
+                commands_until=until,
             )
 
         task = build(charter.MAX_TASK_CHARS)
@@ -1706,7 +1763,8 @@ class GoalDriver:
         """The close's writes, in the caller's transaction: the session row (only while still open), an active
         goal's next wake, and the harness ``state`` row (with ``evidence``). False when the session was closed
         meanwhile (nothing else is written). When the owner cancelled the session's root (``cancelled_by_owner``),
-        an active goal is paused (``owner``) instead, its wake and request cleared, with a harness row saying so.
+        an active goal is paused (``owner``) instead, its wake and request cleared, with a harness row saying so; and
+        a goal that may run any command, active or paused, returns to contained, with a harness row (``stopped``).
 
         The ``state`` row's own words are the harness's (``detail`` included). The chain's text goes in only as
         ``session_note`` (its newest arrival note, when the session sent no report), on one line after a fixed label
@@ -1729,6 +1787,7 @@ class GoalDriver:
             return False
         active = [Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active"]
         paused = False
+        ended = False
         if cancelled_by_owner:
             values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None}
             paused = (
@@ -1736,6 +1795,19 @@ class GoalDriver:
                     update(Goal)
                     .where(*active)
                     .values(**values, pending_request=None, pending_request_at=None, updated_at=func.clock_timestamp())
+                    .execution_options(synchronize_session=False)
+                )
+            ).rowcount == 1
+            ended = (
+                await s.execute(
+                    update(Goal)
+                    .where(
+                        Goal.id == goal.id,
+                        Goal.agent_id == self._agent_id,
+                        Goal.state.in_(("active", "paused")),
+                        Goal.mode != goal_commands.MODE_CONTAINED,
+                    )
+                    .values(**goal_commands.CONTAINED_VALUES, updated_at=func.clock_timestamp())
                     .execution_options(synchronize_session=False)
                 )
             ).rowcount == 1
@@ -1765,6 +1837,8 @@ class GoalDriver:
                 actor="harness",
                 session_n=row.n,
             )
+        if ended:
+            self._ended(s, goal.id, "stopped", session_n=row.n)
         return True
 
     async def refresh_sessions(self) -> int:
@@ -2327,8 +2401,10 @@ class GoalDriver:
         """In the caller's transaction (which has read whatever the pause depends on under the goal row's lock): an
         active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state`` row saying
         why (with ``evidence``). With ``newest_session`` the row's session is the goal's newest, read with the goal
-        row locked (no start of this goal can add one before the commit). False (nothing written) when the goal is no
-        longer active."""
+        row locked (no start of this goal can add one before the commit). A goal that may run any command returns to
+        contained in the same UPDATE, with a second harness row. False (nothing written) when the goal is no longer
+        active."""
+        mode = await s.scalar(select(Goal.mode).where(Goal.id == goal_id, Goal.agent_id == self._agent_id))
         result = await s.execute(
             update(Goal)
             .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
@@ -2339,6 +2415,7 @@ class GoalDriver:
                 pending_request=None,
                 pending_request_at=None,
                 updated_at=func.clock_timestamp(),
+                **goal_commands.CONTAINED_VALUES,
             )
             .execution_options(synchronize_session=False)
         )
@@ -2351,7 +2428,21 @@ class GoalDriver:
                 )
             )
         self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n, evidence=evidence)
+        if mode != goal_commands.MODE_CONTAINED:
+            self._ended(s, goal_id, "paused", session_n=session_n)
         return True
+
+    def _ended(self, s: AsyncSession, goal_id: UUID, why: str, *, session_n: int | None = None) -> None:
+        """The harness row of the end of a goal's mode (``commands.ENDED``), in the caller's transaction."""
+        self._journal(
+            s,
+            goal_id,
+            "state",
+            goal_commands.ENDED[why],
+            actor="harness",
+            session_n=session_n,
+            evidence=goal_commands.mode_refs("off", why=why),
+        )
 
     def _journal(
         self,

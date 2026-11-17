@@ -22,7 +22,7 @@ from f099_support import (
     say,
     use,
 )
-from goal_grants_baseline import TOOLS, collect, load, workspace
+from goal_grants_baseline import TOOLS, collect, load, stated_difference, workspace
 from sqlalchemy import select, text
 
 from nous import main
@@ -575,7 +575,7 @@ async def test_with_the_hook_bound_and_no_grant_the_runner_decides_as_recorded(d
         runner.set_goal_lift(view.lifts, view.note_used)
 
     _commit, baseline = load()
-    assert collect(prepare) == baseline
+    assert stated_difference(collect(prepare), baseline) == baseline
 
 
 # ---- the flag ---------------------------------------------------------------------------------------------------

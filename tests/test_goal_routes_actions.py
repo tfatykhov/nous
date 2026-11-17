@@ -9,6 +9,7 @@ store accepts it."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -22,6 +23,14 @@ pytestmark = pytest.mark.postgres_only
 
 REASONS = ("owner", "budget", "stalled", "waiting_for_owner", "error", "deadline")
 
+async def _contained(store: GoalStore, goal: Goal) -> Any:
+    """The return to contained, which answers a goal that is contained already as it is: accepted only when it
+    changed the goal."""
+    if goal.mode == "contained":
+        raise GoalRefused("the goal is contained already")
+    return await store.return_to_contained(goal.id, actor="owner")
+
+
 # One canonical call per action, with the owner as the actor.
 CALLS: dict[str, Callable[[GoalStore, Goal], Awaitable[Any]]] = {
     "approve": lambda s, g: s.approve(g.id, actor="owner"),
@@ -34,6 +43,7 @@ CALLS: dict[str, Callable[[GoalStore, Goal], Awaitable[Any]]] = {
     "deadline": lambda s, g: s.extend_deadline(g.id, days=1, actor="owner"),
     "note": lambda s, g: s.add_note(g.id, "A note.", actor="owner"),
     "cancel": lambda s, g: s.cancel(g.id, actor="owner"),
+    "contained": _contained,
 }
 
 # (state, options) per case. Options: reason, session (an open session), request (a pending one), spent ("all": the
@@ -63,6 +73,11 @@ CASES: dict[str, dict[str, Any]] = {
     "failed": {"state": "failed"},
     "cancelled": {"state": "cancelled"},
     "cancelled-session-open": {"state": "cancelled", "session": True},
+    # A goal that may run any command (a draft's choice, or an end set at approval)
+    "draft-armed": {"state": "draft", "commands": True},
+    "active-commands": {"state": "active", "commands": True},
+    "active-commands-session-open": {"state": "active", "commands": True, "session": True},
+    "paused-owner-commands": {"state": "paused", "reason": "owner", "commands": True},
 }
 
 
@@ -94,6 +109,9 @@ async def _goal(env: Env, case: dict[str, Any]) -> Goal:
         await deadline_in(store, goal, case["deadline"])
     if case.get("request"):
         await set_values(store, goal, pending_request=case["request"], pending_request_at=goal.updated_at)
+    if case.get("commands"):
+        until = goal.approved_at + timedelta(hours=5) if goal.approved_at is not None else None
+        await set_values(store, goal, mode="commands", mode_hours=5, mode_until=until)
     if state in ("done", "failed"):
         await set_values(store, goal, state=state, next_wake_at=None, finished_at=goal.updated_at)
     if state == "cancelled":

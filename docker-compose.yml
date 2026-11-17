@@ -103,6 +103,10 @@ services:
       # F115 per-goal tools: the owner allows one goal's background sessions to use an outward tool without asking.
       # Lands dark. Needs NOUS_GOALS_ENABLED, NOUS_AUTONOMY_SETTINGS_ENABLED and NOUS_TOOL_GUARD_ENABLED.
       - NOUS_GOAL_TOOL_GRANTS_ENABLED=${NOUS_GOAL_TOOL_GRANTS_ENABLED:-false}
+      # A goal whose tasks may run any command until an end time, chosen when it is created. Lands dark. Needs
+      # the per-goal tools and their flags, NOUS_OWNER_ENTRY_MODE=enforce and both owner digests.
+      - NOUS_GOAL_COMMANDS_ENABLED=${NOUS_GOAL_COMMANDS_ENABLED:-false}
+      - NOUS_GOAL_COMMANDS_MAX_HOURS=${NOUS_GOAL_COMMANDS_MAX_HOURS:-24}
       # F099 kill switches, both on by default: bash for internal_only turns (lineage_bash_allowed), and in it
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}

@@ -17,11 +17,24 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.runner import _SUBTASK_EXCLUDED_TOOLS
 from nous.brain.intentions import AUTHORITY_INTERNAL, AUTHORITY_OWNER
 
-__all__ = ["CHAIN_TOOLS_GRANT_CLAUSE", "CHAIN_TOOLS_WORDS", "PLACES", "Place", "context_for", "why_not_offered"]
+__all__ = [
+    "CHAIN_TOOLS_COMMANDS_CLAUSE",
+    "CHAIN_TOOLS_GRANT_CLAUSE",
+    "CHAIN_TOOLS_WORDS",
+    "PLACES",
+    "Place",
+    "context_for",
+    "why_not_offered",
+]
 
 CHAIN_TOOLS_WORDS = "A chain keeps to a fixed set of tools that act inside Nous."
 # Added for a tool the owner may allow one goal (F115 per-goal tools) in a place a goal's grant reaches.
 CHAIN_TOOLS_GRANT_CLAUSE = " You can allow it for one goal on the Goals screen."
+# Added for bash in a place a goal that may run any command reaches (tool_policy.COMMANDS_KINDS), with that mode
+# on the server.
+CHAIN_TOOLS_COMMANDS_CLAUSE = (
+    " A goal created to run any command gets the shell without the command list while that holds."
+)
 
 
 @dataclass(frozen=True)
@@ -59,11 +72,15 @@ def context_for(place: Place) -> ExecutionContext:
     )
 
 
-def why_not_offered(place: Place, tool: str, *, lineage_shell: bool, goal_grants: bool = False) -> str | None:
+def why_not_offered(
+    place: Place, tool: str, *, lineage_shell: bool, goal_grants: bool = False, goal_commands: bool = False
+) -> str | None:
     """Why the code does not offer ``tool`` to ``place``, in one sentence; None when it does. With ``goal_grants``
     (the caller's word that the owner could allow a goal this tool now: ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` and the grant
     route's own checks), a chain's sentence about a tool the owner may allow one goal, in a place such a grant reaches
-    and where the MCP floor would not refuse it, ends with ``CHAIN_TOOLS_GRANT_CLAUSE``."""
+    and where the MCP floor would not refuse it, ends with ``CHAIN_TOOLS_GRANT_CLAUSE``. With ``goal_commands``
+    (``NOUS_GOAL_COMMANDS_ENABLED``), a chain's sentence about bash in a place of ``tool_policy.COMMANDS_KINDS`` ends
+    with ``CHAIN_TOOLS_COMMANDS_CLAUSE``."""
     ctx = context_for(place)
     if place.is_subtask and tool in _SUBTASK_EXCLUDED_TOOLS:
         return "Work started in the background may not start more work this way."
@@ -74,6 +91,8 @@ def why_not_offered(place: Place, tool: str, *, lineage_shell: bool, goal_grants
     if place.authority == AUTHORITY_INTERNAL and not tool_policy.internal_only_allowed(
         tool, ctx=ctx, lineage_shell=lineage_shell
     ):
+        if goal_commands and tool == tool_policy.COMMANDS_TOOL and place.kind in tool_policy.COMMANDS_KINDS:
+            return CHAIN_TOOLS_WORDS + CHAIN_TOOLS_COMMANDS_CLAUSE
         if (
             goal_grants
             and place.kind in tool_policy.GRANT_KINDS

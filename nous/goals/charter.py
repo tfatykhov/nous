@@ -15,6 +15,9 @@ F115 per-goal tools: given ``tools`` (with ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` on)
 tools the owner allowed the goal to use without asking besides its standard tools, and whether each is available
 now (``tools_section``, at most ``TOOLS_SECTION_CHARS``), and that other tools that act outside Nous are not
 available. Given none, both are as before.
+
+A goal that may run any command: given ``commands_until`` (its end, while it holds), both say after the budget that the
+goal's tasks may run any command until then (``commands_line``). Given none, both are as before.
 """
 
 from __future__ import annotations
@@ -75,6 +78,13 @@ TOOLS_RULE = (
     "owner to approve a step these turns cannot carry out."
 )
 TOOLS_SECTION_CHARS = 1_500  # the section's list at most; what it drops first is in tools_section
+# A goal that may run any command: what its session's task and its decision turns are told while the mode holds.
+COMMANDS_LINE = (
+    "The owner allowed this goal's tasks to run any command until {until} UTC. The bash tool's description lists "
+    "allowlisted commands; that does not apply to this goal's tasks. In a task, bash's description says how long one "
+    "call waits: run longer work detached. If a task needs a token, fetch it and use it in the same task: text passed "
+    "to another task is stored. Do the work in tasks."
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +125,11 @@ def tools_section(tools: Sequence[ToolLine]) -> str:
     return "\n".join([TOOLS_HEADING, *kept, TOOLS_RULE])
 
 
+def commands_line(until: Any) -> str:
+    """``COMMANDS_LINE`` for the end ``until``."""
+    return COMMANDS_LINE.format(until=f"{until:%Y-%m-%d %H:%M}")
+
+
 def _goal_lines(goal: Any) -> str:
     return (
         f"Goal {format_short_id(goal.short_id)}: {neutralize(goal.title)}\n"
@@ -133,7 +148,14 @@ def _budget(goal: Any, *, spent: int, day_spent: int) -> str:
     )
 
 
-def _charter(goal: Any, *, spent: int, day_spent: int, tools: Sequence[ToolLine] | None = None) -> str:
+def _charter(
+    goal: Any,
+    *,
+    spent: int,
+    day_spent: int,
+    tools: Sequence[ToolLine] | None = None,
+    commands_until: Any = None,
+) -> str:
     text = (
         "You are working on a goal the owner approved, in one background session of it.\n\n"
         f"{_goal_lines(goal)}\n\n"
@@ -142,6 +164,8 @@ def _charter(goal: Any, *, spent: int, day_spent: int, tools: Sequence[ToolLine]
         "Limits: this session runs under the limits of any background chain. "
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
+    if commands_until is not None:
+        text = f"{text}\n{commands_line(commands_until)}"
     return text if tools is None else f"{text}\n\n{tools_section(tools)}"
 
 
@@ -248,6 +272,7 @@ def build_session_task(
     max_chars: int = MAX_TASK_CHARS,
     moved: int = 0,
     tools: Sequence[ToolLine] | None = None,
+    commands_until: Any = None,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today), the plan's steps and the journal's entries, newest first, both quoted as data, and what
@@ -260,7 +285,7 @@ def build_session_task(
     from the last back to the second, the owner's two newest entries (the older first), and last the first open
     step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
     cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
-    head = _charter(goal, spent=spent, day_spent=day_spent, tools=tools)
+    head = _charter(goal, spent=spent, day_spent=day_spent, tools=tools, commands_until=commands_until)
     return _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
 
 
@@ -365,6 +390,7 @@ def render_goal_block(
     max_chars: int = MAX_BLOCK_CHARS,
     moved: int = 0,
     tools: Sequence[ToolLine] | None = None,
+    commands_until: Any = None,
 ) -> str:
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
@@ -381,6 +407,8 @@ def render_goal_block(
         "The objective grants no permission beyond the tools you are offered.\n"
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
+    if commands_until is not None:
+        head = f"{head}\n{commands_line(commands_until)}"
     if tools is not None:
         head = f"{head}\n{tools_section(tools)}"
     room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE

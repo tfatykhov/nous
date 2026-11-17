@@ -609,8 +609,21 @@ async def _build_continuation_runner(
     return continuation_runner
 
 
+def _bind_goal_commands(view: Any, runner: Any) -> None:
+    """Bind the commands hook (``view.commands_for``) to the runner. The runner asks it when it offers bash, when it
+    authorizes a bash call and again right before the dispatch, and hands the dispatcher that last answer, which
+    sets the command's environment."""
+    runner.set_goal_commands(view.commands_for)
+
+
 def _build_goals(
-    settings: Settings, *, database: Database, heart: Heart, continuation_runner: Any | None, runner: Any = None
+    settings: Settings,
+    *,
+    database: Database,
+    heart: Heart,
+    continuation_runner: Any | None,
+    runner: Any = None,
+    dispatcher: Any = None,
 ) -> Any | None:
     """F114: with ``NOUS_GOALS_ENABLED`` on (its validator turns it off unless continuation, intentions, the result
     inbox and subtasks are on) and a continuation runner, build the one goal driver and bind the three goal hooks: a
@@ -622,23 +635,42 @@ def _build_goals(
     F115 per-goal tools: with ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` on as well (its validator needs the autonomy settings
     and the tool guard), the view of the goals' tool grants is built here, handed to the chain and the driver
     (``goal_driver.tool_grants``) and bound to ``runner`` (``set_goal_lift``); the caller reads it the first time.
-    Off: nothing of it is imported or bound."""
+    Off: nothing of it is imported or bound.
+
+    With ``NOUS_GOAL_COMMANDS_ENABLED`` on as well (its validator needs the grants and the owner's entry gate) and
+    a ``dispatcher``, the view also reads which goals may run any command, and its ``commands_for`` is bound to the
+    runner (``_bind_goal_commands``). The driver gets the sweeper of the goals' modes
+    (``nous.goals.modes.ModeSweeper``) either way: with the flag off it only returns every goal to contained when it
+    starts."""
     if not settings.goals_enabled or continuation_runner is None:
         return None
     from nous.goals.chain import GoalChain, report_channel
     from nous.goals.driver import GoalDriver
+    from nous.goals.modes import ModeSweeper
     from nous.goals.store import GoalStore
 
     tool_grants = None
     if settings.goal_tool_grants_enabled and runner is not None:
         from nous.goals.grants import GoalToolGrants
 
-        tool_grants = GoalToolGrants(database, settings)
+        commands = settings.goal_commands_enabled and dispatcher is not None
+        tool_grants = GoalToolGrants(database, settings, commands=commands)
+        tool_grants.hold_commands()  # until the driver's start has reconciled the goals' modes
         runner.set_goal_lift(tool_grants.lifts, tool_grants.note_used)
+        if commands:
+            _bind_goal_commands(tool_grants, runner)
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
     continuation_runner.set_goal_turns(GoalChain(database, settings, store, tool_grants=tool_grants).turn_context)
-    goal_driver = GoalDriver(database, settings, heart, store, continuation_runner, tool_grants=tool_grants)
+    goal_driver = GoalDriver(
+        database,
+        settings,
+        heart,
+        store,
+        continuation_runner,
+        tool_grants=tool_grants,
+        modes=ModeSweeper(database, settings, store),
+    )
     continuation_runner.set_goals(goal_driver)
     return goal_driver
 
@@ -1591,7 +1623,12 @@ async def create_components(settings: Settings) -> dict:
     )
     # F114: the goal hooks are bound here, before anything below can write a goal chain's report or run its turn.
     goal_driver = _build_goals(
-        settings, database=database, heart=heart, continuation_runner=continuation_runner, runner=runner
+        settings,
+        database=database,
+        heart=heart,
+        continuation_runner=continuation_runner,
+        runner=runner,
+        dispatcher=dispatcher,
     )
     # F115 per-goal tools: the view is read before any loop or worker runs; a read that fails leaves it empty (no
     # tool is lifted) until the driver's start or its first tick reads it again.
@@ -2139,6 +2176,9 @@ async def create_components(settings: Settings) -> dict:
     # F114: the goal driver's loop, once the runner that works its sessions runs.
     if goal_driver is not None:
         await goal_driver.start()
+    # With goals that may run any command, the view reads itself again each tick, whatever a driver tick takes.
+    if goal_tool_grants is not None and goal_tool_grants.commands_on:
+        goal_tool_grants.start_loop()
     # F115: a locked tool name that matches no tool registered by now locks nothing (an MCP tool may connect later).
     if autonomy is not None:
         autonomy.warn_unknown_locks(dispatcher.is_registered)
@@ -2217,6 +2257,10 @@ async def shutdown_components(components: dict) -> None:
             continuation_runner.set_goal_turns(None)
     if components.get("goal_tool_grants") is not None and components.get("runner") is not None:
         components["runner"].set_goal_lift(None)  # F115: nor does the per-goal tool grant hook
+        if getattr(components["goal_tool_grants"], "commands_on", False) is True:
+            # Nor the commands hook, nor the view's own loop.
+            components["runner"].set_goal_commands(None)
+            await components["goal_tool_grants"].stop_loop()
 
     # F034: Stop heartbeat before other components
     heartbeat_runner = components.get("heartbeat_runner")

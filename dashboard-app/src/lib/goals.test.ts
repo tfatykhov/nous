@@ -62,7 +62,7 @@ describe('state words', () => {
 
 describe('actions', () => {
   it('the list of actions is the server order', () => {
-    expect([...ACTIONS]).toEqual(['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel']);
+    expect([...ACTIONS]).toEqual(['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel', 'contained']);
   });
 
   it('spending and ending actions say so before they act; pause and note ask nothing', () => {
@@ -76,7 +76,7 @@ describe('actions', () => {
       expect(ACTION_TEXT[action].ends, action).toBe(true);
       expect(confirmText(action, goal, { driverRunning: true }), action).toMatch(/ends|cancels|closes/);
     }
-    for (const action of ['pause', 'note'] as Action[]) expect(asksFirst(action), action).toBe(false);
+    for (const action of ['pause', 'note', 'contained'] as Action[]) expect(asksFirst(action), action).toBe(false);
   });
 
   it('the confirm sentences use the goal\'s numbers', () => {

@@ -4,7 +4,11 @@ Every change of a goal is one transaction: the goal row is taken ``FOR UPDATE``,
 guarded by the state it was read in (never a save of the whole row, so a concurrent pause is never overwritten), and
 one ``state`` journal row naming the actor is appended. A refusal raises ``GoalRefused`` with the reason in words and
 changes nothing. The journal is append-only: the store can add to it and read it, never change or remove a row.
-Every query is scoped to the store's agent. No method sets a goal's ``mode``: every goal stays ``contained``.
+Every query is scoped to the store's agent.
+
+A goal's ``mode`` (``nous.goals.commands``): ``create`` may set ``commands`` with its hours, on the owner's word only;
+``approve`` sets its end; ``return_to_contained`` clears it, and so do ``stop``, ``cancel`` and ``confirm_done`` in the
+same transaction as their change. No method sets it on a goal that exists.
 
 A session's ``spent`` is the uncached input plus output tokens of its chain. Cache reads and writes, jobs launched
 from the chain, embeddings and helper calls are not counted.
@@ -26,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.api import tool_policy
 from nous.api.tool_classes import McpIdentity
 from nous.brain.continuation import owner_channel
+from nous.goals import commands as goal_commands
+from nous.goals.commands import CONTAINED_VALUES, MODE_COMMANDS, MODE_CONTAINED, CommandsRequest, mode_refs
 from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, validate
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
@@ -273,14 +279,27 @@ class GoalStore:
         origin_channel: str | None = None,
         tools: Sequence[tuple[str, McpIdentity | None]] = (),
         proof: str | None = None,
+        commands: CommandsRequest | None = None,
     ) -> Goal:
         """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given. ``tools`` (F115
         per-goal tools, the owner's only): each ``(tool, identity)`` the goal may use without asking, granted in the
         same transaction as the goal, each with ``proof`` as ``granted_by`` and an owner ``state`` journal row after
-        the creation's; nothing is written when one cannot be (a tool a goal may never be given among them)."""
+        the creation's; nothing is written when one cannot be (a tool a goal may never be given among them).
+
+        ``commands`` (the owner's only, with ``NOUS_GOAL_COMMANDS_ENABLED`` on): the goal's tasks may run any command
+        for ``hours`` hours from its approval, 1 to the host's ceiling and to the goal's deadline, when ``confirm`` is
+        ``commands.confirm_sentence(hours)`` (surrounding spaces aside). Written as ``mode = 'commands'`` with its
+        hours and no end yet, with an owner ``state`` row whose evidence names ``proof``, in the same transaction."""
         actor = _PROPOSER_ACTOR.get(proposed_by)
         if actor is None:
             raise GoalRefused(f"proposed_by must be one of {', '.join(_PROPOSER_ACTOR)}")
+        if commands is not None:
+            if proposed_by != "owner":
+                raise GoalRefused(goal_commands.PROPOSER)
+            if not goal_commands.enabled(self._settings):
+                raise GoalRefused(goal_commands.NOT_ALLOWED)
+            if proof is None:
+                raise ValueError("running any command needs the proof the owner's route accepted")
         if tools:
             _owner_only(actor, "change the tools a goal may use")
             if proof is None:
@@ -300,6 +319,17 @@ class GoalStore:
             preset_name, limits = envelope_for(preset, overrides)
         except EnvelopeError as exc:
             raise GoalRefused(str(exc)) from exc
+        mode: dict[str, Any] = {}
+        if commands is not None:
+            longest = min(goal_commands.max_hours(self._settings), limits.deadline_days * 24)
+            hours = commands.hours
+            if isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= longest:
+                raise GoalRefused(goal_commands.HOURS_RANGE.format(n=longest))
+            if not isinstance(commands.confirm, str) or commands.confirm.strip() != goal_commands.confirm_sentence(
+                hours
+            ):
+                raise GoalRefused(goal_commands.CONFIRM)
+            mode = {"mode": MODE_COMMANDS, "mode_hours": hours, "mode_until": None}
         channel = origin_channel.strip() if origin_channel and origin_channel.strip() else None
         if channel is not None:
             kind, colon, chat = channel.partition(":")
@@ -316,6 +346,7 @@ class GoalStore:
                 **asdict(limits),
                 proposed_by=proposed_by,
                 origin_channel=channel,
+                **mode,
             )
             s.add(goal)
             await s.flush()
@@ -324,13 +355,29 @@ class GoalStore:
                 assert proof is not None
                 self._add_grant(s, goal.id, tool, identity, proof=proof)
                 self.add_journal_row(s, goal.id, "state", _allowed_text(tool, identity), actor=actor)
+            if mode:
+                self.add_journal_row(
+                    s,
+                    goal.id,
+                    "state",
+                    goal_commands.armed_text(mode["mode_hours"]),
+                    actor=actor,
+                    evidence=mode_refs("armed", via=proof),
+                )
             await s.commit()
             return goal
 
-    async def approve(self, ref: GoalRef, *, actor: str) -> Goal:
+    async def approve(self, ref: GoalRef, *, actor: str, proof: str | None = None) -> Goal:
         """``draft`` to ``active``: the deadline runs from now and the first session may start now. Refused when
         the goal has nowhere to ask the owner (no origin channel and no default chat): its questions and reports
-        would be dropped."""
+        would be dropped.
+
+        A goal created to run any command gets its end in the same UPDATE: the least of its hours, its deadline and
+        the host's ceiling from now, with a second owner row (``proof`` as its ``via``, else the actor). Refused
+        while another goal of the agent, active or paused, may run any command until a later time
+        (``commands.COMMANDS_MAX_GOALS``), counted under a transaction lock of the agent's, so two approvals at once
+        cannot both pass. With ``NOUS_GOAL_COMMANDS_ENABLED`` off by now, it is approved contained, with a harness row
+        saying so."""
         _owner_only(actor, "approve a goal")
         async with self._locked(ref) as (s, goal, now):
             if goal.state != "draft":
@@ -341,9 +388,74 @@ class GoalStore:
                     "NOUS_TELEGRAM_CHAT_ID"
                 )
             deadline = now + timedelta(days=goal.deadline_days)
-            values = {"state": "active", "approved_at": now, "deadline_at": deadline, "next_wake_at": now}
+            values: dict[str, Any] = {
+                "state": "active",
+                "approved_at": now,
+                "deadline_at": deadline,
+                "next_wake_at": now,
+            }
             note = f"Approved: active until {deadline:%Y-%m-%d %H:%M} UTC."
-            return await self._apply(s, goal, ("draft",), {**values, **_NO_REQUEST}, actor=actor, note=note)
+            then: list[tuple[str, str, list[str]]] = []
+            if goal.mode != MODE_CONTAINED:
+                if not goal_commands.enabled(self._settings):
+                    values.update(CONTAINED_VALUES)
+                    then.append(("harness", goal_commands.ENDED["flag_off"], mode_refs("off", why="flag_off")))
+                else:
+                    await self._one_at_a_time(s, goal, now)
+                    hours = min(int(goal.mode_hours or 0), goal_commands.max_hours(self._settings))
+                    until = min(now + timedelta(hours=hours), deadline)
+                    values["mode_until"] = until
+                    then.append((actor, goal_commands.on_text(until), mode_refs("on", via=proof or actor)))
+            return await self._apply(s, goal, ("draft",), {**values, **_NO_REQUEST}, actor=actor, note=note, then=then)
+
+    async def _one_at_a_time(self, s: AsyncSession, goal: Goal, now: datetime) -> None:
+        """Refused while ``COMMANDS_MAX_GOALS`` other goals of the agent, active or paused, may run any command until
+        after ``now``: counted after a transaction lock of the agent's (held until the caller's commit)."""
+        key = func.hashtextextended(f"nous-goal-commands:{self.agent_id}", 0)
+        await s.execute(select(func.pg_advisory_xact_lock(key)))
+        others = await s.scalar(
+            select(func.count())
+            .select_from(Goal)
+            .where(
+                Goal.agent_id == self.agent_id,
+                Goal.id != goal.id,
+                Goal.state.in_(("active", "paused")),
+                Goal.mode == MODE_COMMANDS,
+                Goal.mode_until.is_not(None),
+                Goal.mode_until > now,
+            )
+        )
+        if int(others or 0) >= goal_commands.COMMANDS_MAX_GOALS:
+            raise GoalRefused(goal_commands.ONE_AT_A_TIME)
+
+    async def return_to_contained(self, ref: GoalRef, *, actor: str, proof: str | None = None) -> Goal:
+        """The goal's tasks no longer run any command: ``mode``, its hours and its end cleared, with an owner ``state``
+        row (``proof`` as its ``via``), in any live state and whatever the flag. Only the owner (never the host
+        command). A contained goal is returned as it is, with nothing written. Cancels nothing: a session runs on."""
+        if actor != "owner":
+            raise GoalRefused("only the owner can return a goal to contained")
+        async with self._locked(ref) as (s, goal, now):
+            if goal.mode == MODE_CONTAINED:
+                return goal
+            if goal.state not in LIVE_STATES:
+                raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal can return to contained")
+            self.add_journal_row(
+                s,
+                goal.id,
+                "state",
+                goal_commands.ENDED["returned"],
+                actor=actor,
+                evidence=mode_refs("off", why="returned", via=proof or actor),
+            )
+            result = await s.execute(
+                update(Goal)
+                .where(Goal.id == goal.id, Goal.agent_id == self.agent_id, Goal.mode != MODE_CONTAINED)
+                .values(**CONTAINED_VALUES, updated_at=func.clock_timestamp())
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                raise GoalRefused(f"{describe(goal)} changed meanwhile; nothing was done")
+            return await self._commit_read(s, goal)
 
     async def pause(self, ref: GoalRef, *, actor: str) -> Goal:
         """``active`` to ``paused (owner)``: no new session starts; an open one runs to its end."""
@@ -383,8 +495,9 @@ class GoalStore:
         async with self._locked(ref) as (s, goal, now):
             if (goal.state, goal.pause_reason) != ("paused", "waiting_for_owner"):
                 raise GoalRefused(f"{describe(goal)}: only a goal waiting for the owner can be confirmed done")
-            values = {"state": "done", "pause_reason": None, "finished_at": now, "next_wake_at": None}
-            return await self._apply(s, goal, ("paused",), values, actor=actor, note="Confirmed done.")
+            ended, then = self._ending(goal, "done", actor)
+            values = {"state": "done", "pause_reason": None, "finished_at": now, "next_wake_at": None, **ended}
+            return await self._apply(s, goal, ("paused",), values, actor=actor, note="Confirmed done.", then=then)
 
     async def cancel(self, ref: GoalRef, *, actor: str) -> Goal:
         """A draft, active or paused goal to ``cancelled``. With a session open, the driver is also asked to stop
@@ -394,10 +507,19 @@ class GoalStore:
                 raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal can be cancelled")
             session = await self._open_session(s, goal.id)
             request = {"pending_request": "cancel", "pending_request_at": now} if session else _NO_REQUEST
-            values = {"state": "cancelled", "pause_reason": None, "next_wake_at": None, "finished_at": now, **request}
+            ended, then = self._ending(goal, "cancelled", actor)
+            values = {
+                "state": "cancelled",
+                "pause_reason": None,
+                "next_wake_at": None,
+                "finished_at": now,
+                **request,
+                **ended,
+            }
             note = "Cancelled." + (f" Session {session.n} is open: it is to be stopped." if session else "")
+            session_n = session.n if session else None
             return await self._apply(
-                s, goal, LIVE_STATES, values, actor=actor, note=note, session_n=session.n if session else None
+                s, goal, LIVE_STATES, values, actor=actor, note=note, session_n=session_n, then=then
             )
 
     async def stop(self, ref: GoalRef, *, actor: str) -> Goal:
@@ -418,8 +540,16 @@ class GoalStore:
                 values, note = request, "Stop asked."
             if session is not None:
                 note += f" Session {session.n} is open: it is to be stopped."
+            ended, then = self._ending(goal, "stopped", actor)
             return await self._apply(
-                s, goal, (goal.state,), values, actor=actor, note=note, session_n=session.n if session else None
+                s,
+                goal,
+                (goal.state,),
+                {**values, **ended},
+                actor=actor,
+                note=note,
+                session_n=session.n if session else None,
+                then=then,
             )
 
     async def request_run_now(self, ref: GoalRef, *, actor: str) -> Goal:
@@ -680,8 +810,10 @@ class GoalStore:
         actor: str,
         note: str,
         session_n: int | None = None,
+        then: Sequence[tuple[str, str, Sequence[str]]] = (),
     ) -> Goal:
-        """The targeted UPDATE (guarded by ``from_states``) and its ``state`` journal row, committed together."""
+        """The targeted UPDATE (guarded by ``from_states``) and its ``state`` journal row, committed together; then
+        each ``(actor, text, evidence)`` of ``then`` as one more ``state`` row (a change of the goal's mode)."""
         result = await s.execute(
             update(Goal)
             .where(Goal.id == goal.id, Goal.agent_id == self.agent_id, Goal.state.in_(from_states))
@@ -691,7 +823,15 @@ class GoalStore:
         if result.rowcount != 1:
             raise GoalRefused(f"{describe(goal)} changed meanwhile; nothing was done")
         self.add_journal_row(s, goal.id, "state", note, actor=actor, session_n=session_n)
+        for row_actor, text, evidence in then:
+            self.add_journal_row(s, goal.id, "state", text, actor=row_actor, session_n=session_n, evidence=evidence)
         return await self._commit_read(s, goal)
+
+    def _ending(self, goal: Goal, why: str, actor: str) -> tuple[dict[str, Any], list[tuple[str, str, list[str]]]]:
+        """The values and the row that end ``goal``'s mode with the change ``why`` (nothing for a contained goal)."""
+        if goal.mode == MODE_CONTAINED:
+            return {}, []
+        return dict(CONTAINED_VALUES), [(actor, goal_commands.ENDED[why], mode_refs("off", why=why))]
 
     async def _commit_read(self, s: AsyncSession, goal: Goal) -> Goal:
         """Read ``goal`` back inside the changing transaction (its row lock still held, so the values read are the ones

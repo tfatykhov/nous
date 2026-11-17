@@ -39,7 +39,7 @@ from nous.api.attachments import (
     sanitize_blocks_for_storage,
     validate_attachment,
 )
-from nous.api.builtin_tools import ABSENT, drop_write_fence, register_write_fence
+from nous.api.builtin_tools import ABSENT, bash_waits, drop_write_fence, register_write_fence
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
@@ -142,6 +142,12 @@ def _no_goal_lift(_ctx: ExecutionContext, _tool_name: str) -> bool:
 
 def _no_goal_note_use(_ctx: ExecutionContext, _tool_name: str) -> None:
     """The default first-use hook of a per-goal tool grant: nothing to note."""
+    return None
+
+
+def _no_goal_commands(_ctx: ExecutionContext) -> None:
+    """The default commands hook: no turn's goal may run any command. Installed until ``set_goal_commands``
+    replaces it."""
     return None
 
 
@@ -590,6 +596,9 @@ class AgentRunner:
         # hook told when such a call was authorized; nothing is lifted until main.py installs them.
         self._goal_lift: Callable[[ExecutionContext, str], bool] = _no_goal_lift
         self._goal_note_use: Callable[[ExecutionContext, str], None] = _no_goal_note_use
+        # A goal that may run any command: the hook that returns the entry that lets a turn run any command with bash
+        # (``set_goal_commands``), or None; every reader tests ``is not None``. None until main.py installs it.
+        self._goal_commands: Callable[[ExecutionContext], Any] = _no_goal_commands
         # Phase 2.8: compensation snapshot store (wired when compensation_enabled).
         self._snap_store: Any | None = None
         self._workspace_dir: str = settings.workspace_dir
@@ -833,7 +842,9 @@ class AgentRunner:
         is true, for every kind whose ``ctx.authority`` is ``internal_only`` (a lineage
         check's ``tool_filter`` included: a tool must pass both), with ``lifted`` from the per-goal
         tool grant hook (``set_goal_lift``); the MCP floor and the guard still drop a lifted tool after it.
-        Extra tools are the caller's and are not filtered.
+        For bash alone, ``commands`` comes from the commands hook (``set_goal_commands``): when it answers, bash is
+        offered whatever the lineage shell says, and its offered copy's description says it runs any command
+        (``tool_policy.commands_bash_description``). Extra tools are the caller's and are not filtered.
         """
         tools = self._dispatcher.available_tools(frame_id)
         if is_subtask:
@@ -857,13 +868,21 @@ class AgentRunner:
             before = len(tools)
             tools = [t for t in tools if t["name"] not in denylist]
             logger.info("F078 refuse: stripped %d state-modifying tool(s)", before - len(tools))
+        commands = False
         if ctx.authority == AUTHORITY_INTERNAL:
             lineage_shell = self._settings.f099_lineage_shell
+            commands = any(t["name"] == tool_policy.COMMANDS_TOOL for t in tools) and (
+                self._goal_commands(ctx) is not None
+            )
             tools = [
                 t
                 for t in tools
                 if tool_policy.internal_only_allowed(
-                    t["name"], ctx=ctx, lineage_shell=lineage_shell, lifted=self._goal_lift(ctx, t["name"])
+                    t["name"],
+                    ctx=ctx,
+                    lineage_shell=lineage_shell,
+                    lifted=self._goal_lift(ctx, t["name"]),
+                    commands=commands and t["name"] == tool_policy.COMMANDS_TOOL,
                 )
             ]
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
@@ -875,6 +894,22 @@ class AgentRunner:
         guard = tool_guard.current()
         if guard is not None:
             tools = [t for t in tools if not guard.denies(ctx.kind, ctx.session_id, t["name"])]
+        if commands:
+            # An offered copy, as add_reason_field makes: the dispatcher's schema and its per-frame cache keep theirs.
+            # The waits it states are the ones dispatch runs this turn's bash calls with (``_long_timeout``).
+            build_commands = self._settings.f099_lineage_build_commands
+            most, default = bash_waits(long_timeout=not ctx.is_short_turn)
+            tools = [
+                {
+                    **t,
+                    "description": tool_policy.commands_bash_description(
+                        t.get("description", ""), build_commands=build_commands, most=most, default=default
+                    ),
+                }
+                if t["name"] == tool_policy.COMMANDS_TOOL
+                else t
+                for t in tools
+            ]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         if self._settings.tool_reason_enabled:
@@ -911,12 +946,90 @@ class AgentRunner:
     ) -> Refusal | None:
         """Return a refusal for a call the harness must not execute, else None (``_authorize_checks``).
 
-        F115 per-goal tools: the per-goal tool grant hook (``set_goal_lift``) is asked once per call; its answer
-        reaches only the class verdicts of the internal_only floor and of the context policy. The first-use hook is
-        not told here: ``_tool_loop`` reads the lift of an authorized call again, with no await in between, and hands
-        it to ``_dispatch_with_ledger``, which tells the hook only once the call is dispatched."""
-        lifted = self._goal_lift(ctx, tool_name)
-        return self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted)
+        F115 per-goal tools: the per-goal tool grant hook (``set_goal_lift``) is asked once per call, and for bash the
+        commands hook (``set_goal_commands``); their answers reach only the per-call rules of the internal_only floor
+        and the context policy. ``_tool_loop`` calls ``_authorize_lifted`` instead, which also returns the two
+        answers the call was authorized under."""
+        lifted, commands = self._goal_lift(ctx, tool_name), self._commands_lift(ctx, tool_name)
+        return self._authorize_checks(
+            ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted, commands=commands
+        )
+
+    def _authorize_lifted(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        offered_names: frozenset[str],
+        session_id: str | None,
+        tool_input: dict,
+    ) -> tuple[Refusal | None, bool, bool]:
+        """``_authorize_tool_call``, and the two answers the call was authorized under: whether a goal's grant lifted
+        it and whether its goal could run any command (each False for a refused call). ``_dispatch_with_ledger`` is
+        handed both and asks the hooks again right before the dispatch (``_lift_at_dispatch``)."""
+        lifted, commands = self._goal_lift(ctx, tool_name), self._commands_lift(ctx, tool_name)
+        refusal = self._authorize_checks(
+            ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted, commands=commands
+        )
+        return refusal, refusal is None and lifted, refusal is None and commands
+
+    def _commands_lift(self, ctx: ExecutionContext, tool_name: str) -> bool:
+        """Whether the commands hook lets this bash call run any command now (never for another tool)."""
+        return tool_name == tool_policy.COMMANDS_TOOL and self._goal_commands(ctx) is not None
+
+    def _internal_call_violation(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, *, lifted: bool, commands: bool
+    ) -> str | None:
+        """The per-call rules of an internal_only call (``tool_policy.internal_only_call_violation``), and for a bash
+        call of a task or a workflow step with the lineage shell off and no goal running any command, ``not_allowed``:
+        bash reached that turn's offered set only while its goal could run any command."""
+        strict = tool_policy.internal_only_call_violation(
+            ctx,
+            tool_name,
+            tool_input,
+            workspace_dir=self._settings.workspace_dir,
+            lineage_shell=self._settings.f099_lineage_shell,
+            build_commands=self._settings.f099_lineage_build_commands,
+            extra_write_dirs=self._settings.f099_lineage_write_dirs,
+            lifted=lifted,
+            commands=commands,
+        )
+        if (
+            strict is None
+            and tool_name == tool_policy.COMMANDS_TOOL
+            and ctx.kind in tool_policy.COMMANDS_KINDS
+            and not self._settings.f099_lineage_shell
+            and not commands
+        ):
+            strict = "not_allowed"
+        return strict
+
+    def _lift_at_dispatch(
+        self, ctx: ExecutionContext, tool_name: str, tool_input: dict, *, lifted: bool, commands: bool
+    ) -> tuple[str | None, bool, bool]:
+        """The two lifts a call was authorized under, asked again right before its dispatch (after the action gate,
+        the ledger row, the write lock and the snapshot, with no await between this and the dispatch): (a refusal,
+        the grant lift, the commands lift). When one has ended since, the call is held to the per-call rules without
+        it (``_internal_call_violation``): one they refuse is refused with ``tool_policy.COMMANDS_ENDED_REFUSAL`` or
+        ``tool_policy.GRANT_ENDED_REFUSAL``; one they accept runs as a call with no lift."""
+        still_lifted = lifted and self._goal_lift(ctx, tool_name)
+        still_commands = commands and self._commands_lift(ctx, tool_name)
+        if (still_lifted, still_commands) == (lifted, commands):
+            return None, lifted, commands
+        violation = self._internal_call_violation(
+            ctx, tool_name, tool_input, lifted=still_lifted, commands=still_commands
+        )
+        if violation is None:
+            return None, still_lifted, still_commands
+        logger.warning(
+            "F115: refused %r at dispatch: its goal's %s ended after the call was authorized (%s, session=%s)",
+            tool_name,
+            "time to run any command" if commands and not still_commands else "grant",
+            violation,
+            ctx.session_id,
+        )
+        if commands and not still_commands:
+            return tool_policy.COMMANDS_ENDED_REFUSAL, still_lifted, still_commands
+        return tool_policy.GRANT_ENDED_REFUSAL.format(tool=tool_name), still_lifted, still_commands
 
     def _authorize_checks(
         self,
@@ -927,6 +1040,7 @@ class AgentRunner:
         tool_input: dict,
         *,
         lifted: bool,
+        commands: bool,
     ) -> Refusal | None:
         """Return a refusal for a call the harness must not execute, else None.
 
@@ -945,6 +1059,10 @@ class AgentRunner:
         or locked by the host) is refused, whatever the two mode settings say. The turn's session is read from
         ``ctx``, as ``_offered_tools`` reads it. Neither of these two reads ``lifted``: it goes only to
         ``tool_policy.internal_only_call_violation`` and ``tool_policy.evaluate``.
+
+        ``commands`` (the commands hook's answer for a bash call, asked by the caller at every call) goes to the same
+        two functions. A bash call of a task or a workflow step without it while the lineage shell is off is refused
+        (``not_allowed``): bash reached that turn's offered set only while its goal could run any command.
         """
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
@@ -996,16 +1114,7 @@ class AgentRunner:
             elif ctx.kind == "approved_action" and tool_name not in (ctx.declared_tools or ()):
                 strict = "undeclared"
             elif ctx.authority == AUTHORITY_INTERNAL:
-                strict = tool_policy.internal_only_call_violation(
-                    ctx,
-                    tool_name,
-                    tool_input,
-                    workspace_dir=self._settings.workspace_dir,
-                    lineage_shell=self._settings.f099_lineage_shell,
-                    build_commands=self._settings.f099_lineage_build_commands,
-                    extra_write_dirs=self._settings.f099_lineage_write_dirs,
-                    lifted=lifted,
-                )
+                strict = self._internal_call_violation(ctx, tool_name, tool_input, lifted=lifted, commands=commands)
             if strict is not None:
                 scope = "internal_only" if ctx.authority == AUTHORITY_INTERNAL else ctx.kind
                 logger.warning(
@@ -1162,6 +1271,7 @@ class AgentRunner:
                 workspace_dir=self._settings.workspace_dir,
                 extra_write_dirs=self._settings.f099_lineage_write_dirs,
                 lifted=lifted,
+                commands=commands,
             )
         if violation is None:
             return None
@@ -1233,6 +1343,14 @@ class AgentRunner:
         self._goal_note_use = note_use if note_use is not None else _no_goal_note_use
         for fork in self._forks:
             fork.set_goal_lift(lift, note_use)
+
+    def set_goal_commands(self, commands: Callable[[ExecutionContext], Any] | None) -> None:
+        """Install the hook that returns the entry letting a turn run any command with bash
+        (``nous.goals.grants.GoalToolGrants.commands_for``), or None; None puts the default back (no turn may).
+        Propagated to the forks, as the per-goal tool grant hook is."""
+        self._goal_commands = commands if commands is not None else _no_goal_commands
+        for fork in self._forks:
+            fork.set_goal_commands(commands)
 
     def root_cancelled(self, root_id: UUID) -> bool:
         """F099 2e: whether the view of cancelled roots says ``root_id`` was cancelled, as ``_authorize_tool_call``
@@ -1979,6 +2097,7 @@ class AgentRunner:
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         forked._goal_lift = self._goal_lift  # F115: and set_goal_lift propagates later hooks
         forked._goal_note_use = self._goal_note_use
+        forked._goal_commands = self._goal_commands  # and set_goal_commands propagates a later one
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
         forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
@@ -4020,12 +4139,16 @@ class AgentRunner:
         is_background: bool,
         turn_id: UUID | None = None,
         goal_lifted: bool = False,
+        goal_commands: bool = False,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
         snapshot, the dispatch, the close of the row (a cancellation closes it ``unknown`` and re-raises, any
-        other exception closes it and re-raises) and the review-card hand-off. ``goal_lifted`` (a goal's grant lifted
-        the call, read by ``_tool_loop``): the first-use hook is told right before the dispatch.
+        other exception closes it and re-raises) and the review-card hand-off. ``goal_lifted`` and ``goal_commands``
+        (whether a goal's grant lifted the call and whether its goal could run any command, as ``_authorize_lifted``
+        authorized it) are asked again right before the dispatch (``_lift_at_dispatch``): a call one of them no longer
+        lifts is refused there, its row closed ``blocked``, or runs without it. The first-use hook is told right
+        before the dispatch, and the dispatcher is handed whether the bash call runs any command.
 
         Lifted UNCHANGED out of ``_tool_loop`` (F099 2d) so that the approved-action path
         (``execute_single_call``) runs the very same code: one definition of the ledger invariants. The
@@ -4084,10 +4207,21 @@ class AgentRunner:
                             _snap_blocked2,
                             "blocked",
                         )
+            lapsed: str | None = None
+            if _snap_blocked2 is None and suppressed is None and (goal_lifted or goal_commands):
+                # F115: no await from here to the dispatch below.
+                lapsed, goal_lifted, goal_commands = self._lift_at_dispatch(
+                    ctx, tool_name, tool_input, lifted=goal_lifted, commands=goal_commands
+                )
             if _snap_blocked2 is not None:
                 result_text, is_error = _snap_blocked2, True
             elif suppressed is not None:
                 result_text, is_error = suppressed.text, suppressed.is_error
+            elif lapsed is not None:
+                await self._ledger_close(entry_id, "blocked", lapsed, keyed=send_key is not None)
+                if ledger:
+                    ledger.record(tool_name, tool_input, lapsed, "blocked")
+                result_text, is_error = lapsed, True
             else:
                 keyed = send_key is not None
                 if goal_lifted:  # F115: past every check that could still refuse it
@@ -4107,6 +4241,8 @@ class AgentRunner:
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
                         turn_id=turn_id,  # F111: commit's idempotency key
+                        # F115: as asked again right above; passed only when true, so every other call is as before.
+                        **({"goal_commands": True} if goal_commands else {}),
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4638,10 +4774,10 @@ class AgentRunner:
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
-                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
-                    # F115: whether a goal's grant lifted it, read with no await since the authorization; the
-                    # first-use hook is told at the dispatch (``_dispatch_with_ledger``).
-                    goal_lifted = refusal is None and self._goal_lift(ctx, tool_name)
+                    # F115: the lifts the call is authorized under go to the dispatch, which asks them again.
+                    refusal, goal_lifted, goal_commands = self._authorize_lifted(
+                        ctx, tool_name, offered_names, session_id, tool_input
+                    )
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
@@ -4770,6 +4906,7 @@ class AgentRunner:
                                 is_background=is_background,
                                 turn_id=turn_id,
                                 goal_lifted=goal_lifted,
+                                goal_commands=goal_commands,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             call_images = dispatched.images

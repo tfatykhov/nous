@@ -542,6 +542,7 @@ class ToolDispatcher:
         outcome: CallOutcome | None = None,
         turn_id: UUID | None = None,
         stream: bool = False,
+        goal_commands: bool = False,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -564,6 +565,10 @@ class ToolDispatcher:
 
         stream: True when ``stream_chat`` dispatches the call (F111 PR B1:
         ``commit`` stamps a streamed chat turn's row ``chat_stream``).
+
+        goal_commands: True when the runner hands an internal_only bash call that runs any command (its goal's mode,
+        as ``AgentRunner._dispatch_with_ledger`` asked it right before this dispatch): the command gets the lineage
+        environment, never the build one, and no stdin. Read for nothing else.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -672,8 +677,20 @@ class ToolDispatcher:
                     # command (git, pytest, ruff, make) runs the repo's code: it gets no GitHub token either.
                     # A runner.sh command gets no GH_REPO: the Claude Code job it starts would inherit it.
                     command = str(args.get("command", ""))
-                    build, runner = lineage_runs_build(command), lineage_runs_runner(command)
-                    args = {**args, "_lineage": True, "_lineage_build": build, "_lineage_runner": runner}
+                    runner = lineage_runs_runner(command)
+                    if goal_commands:
+                        # A call that runs any command: the lineage environment, never the build one (so git push
+                        # keeps the code-host token), and no stdin.
+                        args = {
+                            **args,
+                            "_lineage": True,
+                            "_lineage_build": False,
+                            "_lineage_runner": runner,
+                            "_goal_commands": True,
+                        }
+                    else:
+                        build = lineage_runs_build(command)
+                        args = {**args, "_lineage": True, "_lineage_build": build, "_lineage_runner": runner}
             if ctx.channel and name in ("spawn_task", "dag_create"):
                 # F098: the channel outlives the session, so the result can
                 # reach the conversation after the session has expired.

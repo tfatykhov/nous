@@ -468,12 +468,14 @@ async def test_short_id_forms_resolve(db):
         await other.pause(goal.id, actor="host")
 
 
-async def test_the_store_cannot_set_a_mode(db):
+async def test_no_method_takes_a_mode_and_a_limit_is_never_one(db):
+    """A mode is chosen only by ``create``'s ``commands`` (tests/test_goal_commands_store.py classifies every method
+    that writes one); no method takes a ``mode``, and the limits never carry one."""
     for name, fn in inspect.getmembers(GoalStore, inspect.isfunction):
         assert "mode" not in inspect.signature(fn).parameters, name
     store = _store(db)
     with pytest.raises(GoalRefused, match="mode"):
-        await _draft(store, overrides={"mode": "full_autonomy"})
+        await _draft(store, overrides={"mode": "commands"})
     goal = await _draft(store, overrides={"jobs_per_day": 3})
     assert (goal.mode, goal.mode_until, goal.preset) == ("contained", None, "custom")
     async with store._db.session() as s:

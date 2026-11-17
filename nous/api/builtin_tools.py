@@ -166,6 +166,12 @@ def _job_cancel_provenance(
 # ---------------------------------------------------------------------------
 
 
+def bash_waits(*, long_timeout: bool) -> tuple[int, int]:
+    """How long one bash call waits, as ``bash_tool`` sets it: the most a call may name, and the wait of a call that
+    names none. ``long_timeout`` is what dispatch passes for the turn (``not ExecutionContext.is_short_turn``)."""
+    return _MAX_BASH_TIMEOUT, (_BACKGROUND_BASH_TIMEOUT if long_timeout else _DEFAULT_BASH_TIMEOUT)
+
+
 async def bash_tool(
     command: str,
     timeout: int | None = None,
@@ -177,6 +183,7 @@ async def bash_tool(
     _actor: dict | None = None,
     _gh_repo: str = "",
     _lineage_runner: bool = True,
+    _goal_commands: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -202,13 +209,16 @@ async def bash_tool(
             runner.sh (tool_policy.lineage_runs_runner), whose Claude Code job
             would inherit GH_REPO, so it gets none. True unless dispatch says
             otherwise
+        _goal_commands: Set by dispatch with ``_lineage`` (and ``_lineage_build``
+            False) when the turn's goal may run any command: the command starts
+            with no stdin
 
     Returns:
         MCP-format response with stdout + stderr
     """
     try:
         if timeout is None:
-            timeout = _BACKGROUND_BASH_TIMEOUT if _long_timeout else _DEFAULT_BASH_TIMEOUT
+            timeout = bash_waits(long_timeout=_long_timeout)[1]
         # Clamp timeout
         effective_timeout = max(1, min(timeout, _MAX_BASH_TIMEOUT))
 
@@ -218,7 +228,7 @@ async def bash_tool(
 
         proc = await asyncio.create_subprocess_shell(
             command,
-            stdin=asyncio.subprocess.DEVNULL if _lineage and _lineage_build else None,
+            stdin=asyncio.subprocess.DEVNULL if _lineage and (_lineage_build or _goal_commands) else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
@@ -1022,6 +1032,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
         _long_timeout: bool = False,
         _actor: dict | None = None,
         _lineage_runner: bool = True,
+        _goal_commands: bool = False,
     ) -> dict[str, Any]:
         return await bash_tool(
             command,
@@ -1033,6 +1044,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _actor=_actor,
             _gh_repo=gh_repo,
             _lineage_runner=_lineage_runner,
+            _goal_commands=_goal_commands,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
