@@ -109,13 +109,15 @@ describe('the create form', () => {
     });
   });
 
-  it('bounds the hours by the goal deadline and by the server ceiling', async () => {
-    options = OPTIONS({ commands: COMMANDS({ max_hours: 2160 }) });
+  it('bounds the hours by the goal deadline and by the server ceiling, in the server words', async () => {
+    const refusals = { hours_range: 'From 1 to {n} hours here.', confirm: 'The sentence differs.' };
+    options = OPTIONS({ commands: COMMANDS({ max_hours: 2160, refusals }) });
     const form = await openForm();
     await fireEvent.click(within(form).getByRole('checkbox', { name: COMMANDS().words.checkbox }));
     expect(within(form).getByText('1 to 72')).toBeTruthy(); // small: 3 days
+    expect(within(form).getByText('The sentence differs.')).toBeTruthy();
     await fireEvent.input(within(form).getByLabelText('Hours from approval'), { target: { value: '73' } });
-    expect(within(form).getByText('Hours must be a whole number from 1 to 72.')).toBeTruthy();
+    expect(within(form).getByText('From 1 to 72 hours here.')).toBeTruthy();
   });
 
   it('leaves the part out of the body when it is not chosen', async () => {

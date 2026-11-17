@@ -824,6 +824,7 @@ def build_goal_routes(
             "hour_one": goal_commands.HOUR_ONE,
             "hours_many": goal_commands.HOURS_MANY,
             "words": dict(goal_commands.WORDS),
+            "refusals": {"hours_range": goal_commands.HOURS_RANGE, "confirm": goal_commands.CONFIRM},
         }
 
     async def commands_now(request: Request) -> Response:

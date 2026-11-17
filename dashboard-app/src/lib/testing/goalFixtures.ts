@@ -123,6 +123,7 @@ export const COMMANDS = (over: Partial<CommandsOptions> = {}): CommandsOptions =
     approve: "Approving starts its time: this goal's tasks may then run any command for {hours}.",
     banner: '{ref} may run any command until {until} UTC.',
   },
+  refusals: { hours_range: 'Hours must be a whole number from 1 to {n}.', confirm: 'Type the sentence exactly to allow it.' },
   ...over,
 });
 /** A goal's `commands` while it may run any command until 2026-11-15 20:00 UTC, its tasks running any command now. */

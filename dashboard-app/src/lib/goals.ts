@@ -99,13 +99,15 @@ export interface GoalCommands {
 
 /** The create form's part for a goal that may run any command (GET /goals/options `commands`, with that flag on):
  * the host's ceiling, the sentence to type with `{hours}` in it (filled with `hour_one` or `hours_many`, each with
- * `{n}`), and the words of the form and of the goal's page. */
+ * `{n}`), the words of the form and of the goal's page, and the store's refusals of the hours (with `{n}`) and of
+ * the sentence. */
 export interface CommandsOptions {
   max_hours: number;
   sentence: string;
   hour_one: string;
   hours_many: string;
   words: Record<string, string>;
+  refusals: { hours_range: string; confirm: string };
 }
 
 /** GET /goals/commands: the goals whose tasks may run any command now, for the banner. */
@@ -224,11 +226,11 @@ export function commandsSentence(words: CommandsOptions, hours: number): string 
 export const commandsMostHours = (words: CommandsOptions, deadlineDays: number) =>
   Math.max(0, Math.min(words.max_hours, deadlineDays * 24));
 
-/** What is wrong with the hours and the typed sentence, in words; null when they can be sent. */
+/** What is wrong with the hours and the typed sentence, in the server's words; null when they can be sent. */
 export function commandsProblem(words: CommandsOptions, hours: number, typed: string, deadlineDays: number): string | null {
   const most = commandsMostHours(words, deadlineDays);
-  if (!Number.isInteger(hours) || hours < 1 || hours > most) return `Hours must be a whole number from 1 to ${most}.`;
-  if (typed.trim() !== commandsSentence(words, hours)) return 'Type the sentence exactly to allow it.';
+  if (!Number.isInteger(hours) || hours < 1 || hours > most) return words.refusals.hours_range.replace('{n}', String(most));
+  if (typed.trim() !== commandsSentence(words, hours)) return words.refusals.confirm;
   return null;
 }
 

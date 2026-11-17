@@ -70,6 +70,7 @@ async def test_options_carry_the_forms_words_only_with_the_flag_on(db):
         "hour_one": "{n} hour",
         "hours_many": "{n} hours",
         "words": dict(C.WORDS),
+        "refusals": {"hours_range": C.HOURS_RANGE, "confirm": C.CONFIRM},
     }
     for hours in (1, 24):
         unit = on["commands"]["hour_one" if hours == 1 else "hours_many"].format(n=hours)
