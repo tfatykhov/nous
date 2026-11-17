@@ -390,15 +390,15 @@ class GoalDriver:
             )
 
     async def _reconcile_modes(self) -> None:
-        """The start's reconciliation of the goals' modes with the host's settings (``ModeSweeper.at_start``). Once
-        it succeeds the view's commands are released (main.py holds them when it builds the view). With
-        NOUS_GOAL_COMMANDS_ENABLED on, one that fails stays pending: no goal's tasks run any command, and each tick
+        """The start's reconciliation of the goals' modes with the host's settings (``ModeSweeper.at_start``). With
+        NOUS_GOAL_COMMANDS_ENABLED on, once it succeeds the view's commands are released (main.py holds them when it
+        builds the view), and one that fails stays pending: no goal's tasks run any command, and each tick
         tries it again first, until it succeeds. One warning when it fails, one line when it succeeds after that."""
         if await self._sweep_modes(at_start=True):
             if self._reconcile_pending:
                 logger.info("The goals' modes were reconciled with the host's settings: their commands run again")
             self._reconcile_pending = False
-            if self.tool_grants is not None:
+            if self.tool_grants is not None and goal_commands.enabled(self._settings):
                 self.tool_grants.release_commands()
         elif goal_commands.enabled(self._settings) and not self._reconcile_pending:
             self._reconcile_pending = True
