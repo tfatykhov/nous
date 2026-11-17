@@ -71,8 +71,10 @@ WORDS: Mapping[str, str] = MappingProxyType(
         "return": "Return to contained",
         "return_note": (
             "Takes effect at the next tool call. A command already running, anything it left running, and anything "
-            "it changed stay as they are. Use Stop now for the session."
+            "it changed stay as they are."
         ),
+        # After return_note, only where Stop now is offered: a draft, or a paused goal with no open session, has none.
+        "return_stop": "Use Stop now for the session.",
         "stops": "A lock or Not allowed on bash under Limits and tools stops its commands.",
         "approve": "Approving starts its time: this goal's tasks may then run any command for {hours}.",
         "banner": "{ref} may run any command until {until} UTC.",

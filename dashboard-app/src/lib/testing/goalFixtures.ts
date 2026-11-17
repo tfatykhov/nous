@@ -118,7 +118,8 @@ export const COMMANDS = (over: Partial<CommandsOptions> = {}): CommandsOptions =
     ended: 'Ended: {reason}',
     return: 'Return to contained',
     return_note:
-      'Takes effect at the next tool call. A command already running, anything it left running, and anything it changed stay as they are. Use Stop now for the session.',
+      'Takes effect at the next tool call. A command already running, anything it left running, and anything it changed stay as they are.',
+    return_stop: 'Use Stop now for the session.',
     stops: 'A lock or Not allowed on bash under Limits and tools stops its commands.',
     approve: "Approving starts its time: this goal's tasks may then run any command for {hours}.",
     banner: '{ref} may run any command until {until} UTC.',

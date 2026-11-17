@@ -353,6 +353,7 @@ def test_the_words_table_has_its_keys():
         "ended",
         "return",
         "return_note",
+        "return_stop",
         "stops",
         "approve",
         "banner",

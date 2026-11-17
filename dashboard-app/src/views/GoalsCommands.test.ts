@@ -172,7 +172,7 @@ describe('the goal page', () => {
     expect(within(card).getByText('On until 2026-11-15 20:00 UTC.')).toBeTruthy();
     expect(within(card).getByText(DESCRIPTION)).toBeTruthy();
     expect(within(card).getByText(COMMANDS().words.stops)).toBeTruthy();
-    expect(within(card).getByText(COMMANDS().words.return_note)).toBeTruthy();
+    expect(within(card).getByText(`${COMMANDS().words.return_note} ${COMMANDS().words.return_stop}`)).toBeTruthy();
     // Not among the other actions.
     const head = screen.getByRole('heading', { name: 'Ship the fix' }).closest('.card') as HTMLElement;
     expect(within(head).queryByRole('button', { name: 'Return to contained' })).toBeNull();
@@ -213,25 +213,27 @@ describe('the goal page', () => {
     expect(confirmText('approve', goal, { driverRunning: false })).toContain("this goal's tasks may then run any command for 5 hours.");
   });
 
-  it('an armed draft has no session: Return to contained without the note that names Stop now', async () => {
-    const note = COMMANDS().words.return_note;
-    expect(note).toContain('Use Stop now for the session.');
+  it('a goal without Stop now (an armed draft) has the note under Return to contained without naming Stop now', async () => {
+    const { return_note: note, return_stop: stop } = COMMANDS().words;
+    expect(stop).toBe('Use Stop now for the session.');
     await show(goalDetail({
       ref: 'G-0007', title: 'Armed draft', state: 'draft', deadline_at: null, approved_at: null, mode: 'commands',
       mode_hours: 5, actions: ['approve', 'note', 'cancel', 'contained'],
       commands: { state: 'set', says: 'Set: 5 hours from approval.', usable: false, not_usable_why: null, approve: null },
     }));
-    const back = screen.getByRole('button', { name: 'Return to contained' });
-    expect(screen.queryByText(note)).toBeNull();
-    expect(back.getAttribute('aria-describedby')).toBeNull();
+    const shown = screen.getByText(note);
+    expect(shown.textContent).toBe(note);
+    expect(screen.queryByText(stop, { exact: false })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Return to contained' }).getAttribute('aria-describedby')).toBe(shown.id);
   });
 
-  it('a goal where Stop now is offered has the note under Return to contained', async () => {
+  it('a goal where Stop now is offered names it after the note', async () => {
+    const { return_note: note, return_stop: stop } = COMMANDS().words;
     await show(goalDetail({
       ref: 'G-0008', title: 'Running', mode: 'commands', mode_hours: 8, mode_until: '2026-11-15T20:00:00+00:00',
       commands: COMMANDS_ON, actions: ['pause', 'stop', 'note', 'cancel', 'contained'],
     }));
-    const shown = screen.getByText(COMMANDS().words.return_note);
+    const shown = screen.getByText(`${note} ${stop}`);
     expect(screen.getByRole('button', { name: 'Return to contained' }).getAttribute('aria-describedby')).toBe(shown.id);
   });
 
