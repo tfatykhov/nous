@@ -207,13 +207,13 @@ async def test_the_tool_loop_runs_an_alias_as_its_target():
     # enforce: an alias checked under its own name would be refused as not offered
     r, events = _runner(calls, store, tool_offered_set_enforcement_mode="enforce")
     seen: list[str] = []
-    authorize = r._authorize_tool_call
+    authorize = r._authorize_lifted  # the tool loop's authorization (it also returns the goal lifts)
 
     def recording(ctx, tool_name, offered_names, session_id, tool_input):
         seen.append(tool_name)
         return authorize(ctx, tool_name, offered_names, session_id, tool_input)
 
-    r._authorize_tool_call = recording
+    r._authorize_lifted = recording
     call = {"decision_id": DECISION, "outcome": "noise", "resolution_note": "tick"}
     r._call_api, sent = _one_call("resolve_decision", call)
     _text, results, _u, _t = await _run_loop(r, is_background=True, context=ExecutionContext(kind="subtask"))

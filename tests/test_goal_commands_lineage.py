@@ -86,7 +86,7 @@ async def _lineage_world(env_factory, *, in_mode: bool):  # noqa: F811
     assert await view.refresh()
     w.driver.tool_grants = view
     runner, dispatcher = _runner_over(w.env.settings)
-    main._bind_goal_commands(view, runner, dispatcher)
+    main._bind_goal_commands(view, runner)
     root, session = await _started(w, goal)
     first = ExecutionContext.for_subtask(await _subtask(w, session.first_subtask_id), "subtask-first")
     return w, goal, view, runner, root, session, first
@@ -220,7 +220,7 @@ async def _shell_turn(make_env, tmp_path, *, which: str) -> str:
     tool_guard.install(ToolGuard())
     view = GoalToolGrants(env.db, env.settings, commands=True)
     assert await view.refresh()
-    main._bind_goal_commands(view, env.runner, env.dispatcher)
+    main._bind_goal_commands(view, env.runner)
     kinds = {"decision": "continuation", "background": "background", "step": "dag_node", "chat": "interactive"}
     kind = kinds.get(which, "subtask")
     root = roots[1] if which == "other_goal" else roots[0]

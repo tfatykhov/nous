@@ -1777,6 +1777,11 @@ def granted_call_violation(
 
 GRANT_CLEANUP_HINT = "With this goal's grant, send_file may not delete the file it sends: leave cleanup out."
 
+# A call authorized under a goal's lift that ended before the call started, refused by the rules without it
+# (``AgentRunner._lift_at_dispatch``).
+COMMANDS_ENDED_REFUSAL = "Tool error: this goal's time to run any command has ended; the command did not run."
+GRANT_ENDED_REFUSAL = "Tool error: '{tool}' is no longer allowed for this goal's work; the call did not run."
+
 
 def granted_call_hint(ctx: ExecutionContext, name: str, workspace_dir: str, code: str) -> str:
     """What a granted call may do, appended to its ``grant_file`` or ``grant_cleanup`` refusal."""

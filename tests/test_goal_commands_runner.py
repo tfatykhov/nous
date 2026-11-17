@@ -168,7 +168,7 @@ async def world(db):
     view = GoalToolGrants(db, settings, clock=clock, commands=True)
     assert await view.refresh()
     runner.set_goal_lift(view.lifts, view.note_used)
-    main._bind_goal_commands(view, runner, dispatcher)
+    main._bind_goal_commands(view, runner)
     yield SimpleNamespace(
         db=db,
         settings=settings,
@@ -224,11 +224,10 @@ def _observe(w, ctx, tool: str = "bash", tool_input: dict | None = None) -> tupl
 
 def _unbound(w):
     w.runner.set_goal_commands(None)
-    w.dispatcher.set_goal_commands(None)
 
 
 def _rebound(w):
-    main._bind_goal_commands(w.view, w.runner, w.dispatcher)
+    main._bind_goal_commands(w.view, w.runner)
 
 
 def _contexts(w):
@@ -432,9 +431,9 @@ async def test_in_enforce_an_external_command_runs_under_the_lift(world, monkeyp
 # ---- the hooks ----------------------------------------------------------------------------------------------------
 
 
-async def test_the_runner_and_the_dispatcher_hold_the_same_hook(world):
+async def test_the_runner_holds_the_views_hook_and_the_dispatcher_none(world):
     w = world
-    assert w.runner._goal_commands is w.dispatcher._goal_commands
+    assert not hasattr(w.dispatcher, "set_goal_commands") and not hasattr(w.dispatcher, "_goal_commands")
     assert (
         w.runner._goal_commands.__self__ is w.view and w.runner._goal_commands.__func__ is GoalToolGrants.commands_for
     )
@@ -494,10 +493,10 @@ async def test_the_tool_loop_hands_no_grant_lift_for_bash(world):
 # ---- the dispatcher and the bash tool ----------------------------------------------------------------------------
 
 
-async def _dispatched(w, ctx, call: dict) -> dict:
+async def _dispatched(w, ctx, call: dict, *, goal_commands: bool = False) -> dict:
     recorder = w.dispatcher._handlers["bash"]
     recorder.seen.clear()
-    await w.dispatcher.dispatch("bash", dict(call), session_id="subtask-1", context=ctx)
+    await w.dispatcher.dispatch("bash", dict(call), session_id="subtask-1", context=ctx, goal_commands=goal_commands)
     [seen] = recorder.seen
     return seen
 
@@ -505,14 +504,16 @@ async def _dispatched(w, ctx, call: dict) -> dict:
 async def test_a_lifted_call_carries_the_lineage_flags_and_never_the_build_one(world):
     w = world
     for command in ("ls", "git push origin fix", "curl https://example.com", "claude-jobs/runner.sh list"):
-        seen = await _dispatched(w, _task(w), {"command": command})
+        seen = await _dispatched(w, _task(w), {"command": command}, goal_commands=True)
         assert (seen["_lineage"], seen["_lineage_build"], seen["_goal_commands"]) == (True, False, True), command
         assert seen["_lineage_runner"] is tool_policy.lineage_runs_runner(command)
         assert seen["_long_timeout"] is True  # a task with no time limit of its own: 120 s with no timeout given
-    short = await _dispatched(w, _task(w, turn_timeout=BACKGROUND_BASH_TIMEOUT), {"command": "ls"})
+    short = await _dispatched(w, _task(w, turn_timeout=BACKGROUND_BASH_TIMEOUT), {"command": "ls"}, goal_commands=True)
     assert short["_goal_commands"] is True and short["_long_timeout"] is False  # 30 s with no timeout given
     contained = await _dispatched(w, _ctx("subtask", "internal_only", w.contained_root), {"command": "git push"})
     assert contained["_lineage_build"] is True and "_goal_commands" not in contained
+    handed_none = await _dispatched(w, _task(w), {"command": "git push"})  # the lift stands, the runner handed none
+    assert handed_none["_lineage_build"] is True and "_goal_commands" not in handed_none
 
 
 async def test_a_model_sent_flag_is_dropped(world):
@@ -520,19 +521,21 @@ async def test_a_model_sent_flag_is_dropped(world):
     sent = {"command": "git push", "_goal_commands": True, "_lineage_build": False, "_lineage": False}
     contained = await _dispatched(w, _ctx("subtask", "internal_only", w.contained_root), sent)
     assert contained["_lineage"] is True and contained["_lineage_build"] is True and "_goal_commands" not in contained
-    owner = await _dispatched(w, _ctx("subtask", "owner", w.root), sent)
-    assert "_goal_commands" not in owner and "_lineage" not in owner
+    owner = await _dispatched(w, _ctx("subtask", "owner", w.root), sent, goal_commands=True)
+    assert "_goal_commands" not in owner and "_lineage" not in owner  # handed to an internal_only call only
 
 
 async def _started(w, ctx, command: str, *, settings=None) -> dict:
     """The environment names and stdin the registered bash tool starts ``command`` with, the process environment
-    being ``SYNTHETIC_ENV``."""
+    being ``SYNTHETIC_ENV``, handed ``goal_commands`` as the runner would hand it now."""
     real = ToolDispatcher()
     register_builtin_tools(real, settings or w.settings)
-    real.set_goal_commands(w.dispatcher._goal_commands)
+    goal_commands = w.runner._commands_lift(ctx, "bash")
     shell = _Shell()
     with patch.dict(os.environ, SYNTHETIC_ENV, clear=True), patch("asyncio.create_subprocess_shell", shell):
-        await real.dispatch("bash", {"command": command}, session_id="subtask-1", context=ctx)
+        await real.dispatch(
+            "bash", {"command": command}, session_id="subtask-1", context=ctx, goal_commands=goal_commands
+        )
     [started] = shell.seen
     return started
 
@@ -574,7 +577,7 @@ async def _waited(w, ctx, call: dict) -> int:
     """The timeout the registered bash tool waits on its command with, for ``call`` dispatched in ``ctx``."""
     real = ToolDispatcher()
     register_builtin_tools(real, w.settings)
-    real.set_goal_commands(w.dispatcher._goal_commands)
+    goal_commands = w.runner._commands_lift(ctx, "bash")
     waits: list[float] = []
     wait_for = asyncio.wait_for
 
@@ -588,7 +591,7 @@ async def _waited(w, ctx, call: dict) -> int:
         patch("asyncio.create_subprocess_shell", _Shell()),
         patch.object(builtin_tools.asyncio, "wait_for", recorded),
     ):
-        await real.dispatch("bash", dict(call), session_id="subtask-1", context=ctx)
+        await real.dispatch("bash", dict(call), session_id="subtask-1", context=ctx, goal_commands=goal_commands)
     [waited] = waits
     return int(waited)
 
@@ -650,15 +653,120 @@ async def test_a_low_tool_timeout_does_not_end_a_tasks_call(world):
     assert len(recorder.seen) == 1
 
 
-async def test_the_dispatcher_reads_the_hook_when_it_dispatches(world):
-    """The dispatcher reads the commands hook when it dispatches a bash call: after the entry's end, a build command
-    is started with the build environment."""
-    w = world
-    ctx = _task(w)
-    assert w.runner._authorize_tool_call(ctx, "bash", frozenset({"bash"}), "s", {"command": "git push"}) is None
-    w.clock.now = w.view.commands_entry(w.root).expires_at
-    started = await _started(w, ctx, "git push origin fix")
-    assert "GITHUB_TOKEN" not in started["env"]
+# ---- a lift that ends between the authorization and the dispatch -------------------------------------------------
+
+
+class _GateThat:
+    """An action gate that approves every call, after running ``during`` (once) while the call waits on it."""
+
+    def __init__(self, during) -> None:
+        self.during, self.checked = during, []
+
+    async def check(self, tool_name, tool_input, ledger, user_message=""):
+        from nous.cognitive.action_gate import GateResult
+
+        self.checked.append(tool_name)
+        if self.during is not None:
+            during, self.during = self.during, None
+            await during()
+        return GateResult(approved=True, reason="ok")
+
+
+async def _window_world(runner_env, tool: str, call: dict, *, mode: bool = True):  # noqa: F811
+    from f099_support import say, use
+
+    from nous.cognitive.ledger_store import LedgerStore
+
+    env = await runner_env([use(tool, **call)], [say("I stop.")], telegram_chat_id="", **RUNNER_FLAGS)
+    env.runner.set_ledger_store(LedgerStore(env.db, env.agent))
+    store = GoalStore(env.db, env.agent, env.settings)
+    goal = await _goal(store)
+    root = await _session(env.db, store, goal)
+    if mode:
+        await _mode(env.db, goal.id)
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(env.db, env.settings, commands=True)
+    assert await view.refresh()
+    env.runner.set_goal_lift(view.lifts, view.note_used)
+    main._bind_goal_commands(view, env.runner)
+    object.__setattr__(env.settings, "action_gating_mode", "enforce")
+    ctx = ExecutionContext(
+        kind="subtask", authority="internal_only", session_id="subtask-93", intention_id=root, root_intention_id=root
+    )
+    return env, store, goal, view, ctx
+
+
+async def _ledger_rows(env, tool: str) -> list[tuple[str, str]]:
+    from nous.storage.models import ExecutionLedgerEntry
+
+    await asyncio.gather(*env.runner._ledger_pending_tasks, return_exceptions=True)
+    async with env.db.session() as s:
+        query = select(ExecutionLedgerEntry).where(
+            ExecutionLedgerEntry.agent_id == env.agent, ExecutionLedgerEntry.tool_name == tool
+        )
+        return [(row.context_kind, row.status) for row in (await s.execute(query)).scalars()]
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["mode_stands", "mode_ended_meanwhile"])
+async def test_a_command_outside_the_list_runs_only_while_the_mode_stands_at_its_dispatch(runner_env, ended):  # noqa: F811
+    env, store, goal, view, ctx = await _window_world(runner_env, "bash", REFUSED)
+    recorder = _Recorder()
+    env.dispatcher.register("bash", recorder, _BASH_SCHEMA)
+
+    async def return_to_contained():
+        await store.return_to_contained(goal.id, actor="owner", proof="owner")
+        assert await view.refresh_goal(goal.id)
+
+    gate = _GateThat(return_to_contained if ended else None)
+    env.runner._action_gate = gate
+    await env.runner.run_turn("subtask-93", "fetch the data", is_background=True, is_subtask=True, context=ctx)
+    told = str(env.model.calls[-1]["messages"])
+    assert gate.checked == ["bash"]
+    if ended:
+        assert recorder.seen == [] and tool_policy.COMMANDS_ENDED_REFUSAL in told  # nothing ran
+        assert await _ledger_rows(env, "bash") == [("subtask", "blocked")]
+    else:
+        [seen] = recorder.seen
+        assert seen["_goal_commands"] is True and tool_policy.COMMANDS_ENDED_REFUSAL not in told
+        assert await _ledger_rows(env, "bash") == [("subtask", "success")]
+
+
+async def test_a_command_the_list_allows_runs_contained_when_the_mode_ended_meanwhile(runner_env):  # noqa: F811
+    env, store, goal, view, ctx = await _window_world(runner_env, "bash", {"command": "ls"})
+    recorder = _Recorder()
+    env.dispatcher.register("bash", recorder, _BASH_SCHEMA)
+
+    async def return_to_contained():
+        await store.return_to_contained(goal.id, actor="owner", proof="owner")
+        assert await view.refresh_goal(goal.id)
+
+    env.runner._action_gate = _GateThat(return_to_contained)
+    await env.runner.run_turn("subtask-93", "list the files", is_background=True, is_subtask=True, context=ctx)
+    [seen] = recorder.seen
+    assert seen["_lineage"] is True and seen["_lineage_build"] is False and "_goal_commands" not in seen
+    assert tool_policy.COMMANDS_ENDED_REFUSAL not in str(env.model.calls[-1]["messages"])
+    assert await _ledger_rows(env, "bash") == []  # a read: the ledger holds side-effecting calls only
+
+
+async def test_a_granted_call_whose_grant_is_removed_meanwhile_is_refused_and_sends_nothing(runner_env):  # noqa: F811
+    from f099_support import SEND_EMAIL_ARGS, register_send_email
+
+    env, store, goal, view, ctx = await _window_world(runner_env, "send_email", SEND_EMAIL_ARGS, mode=False)
+    sent = register_send_email(env)
+    await store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
+    assert await view.refresh()
+    used: list = []
+    env.runner.set_goal_lift(view.lifts, lambda ctx, tool: used.append(tool))
+
+    async def revoke():
+        await store.revoke_tool(goal.id, "send_email", actor="owner", proof="owner")
+        assert await view.refresh_goal(goal.id)
+
+    env.runner._action_gate = _GateThat(revoke)
+    await env.runner.run_turn("subtask-93", "send the note", is_background=True, is_subtask=True, context=ctx)
+    assert sent == [] and used == []  # nothing sent, no first use
+    assert tool_policy.GRANT_ENDED_REFUSAL.format(tool="send_email") in str(env.model.calls[-1]["messages"])
+    assert await _ledger_rows(env, "send_email") == [("subtask", "blocked")]
 
 
 async def test_heartbeat_check_create_passes_the_loader_no_metadata():
@@ -700,10 +808,8 @@ async def test_with_the_hooks_bound_and_every_goal_contained_everything_acts_as_
         runner.set_goal_lift(view.lifts, view.note_used)
         runner.set_goal_commands(view.commands_for)
 
-    def prepare_seams(runner: AgentRunner, dispatchers: list[ToolDispatcher]) -> None:
+    def prepare_seams(runner: AgentRunner, _dispatchers: list[ToolDispatcher]) -> None:
         prepare(runner)
-        for dispatcher in dispatchers:
-            dispatcher.set_goal_commands(view.commands_for)
 
     _commit, baseline = load()
     assert stated_difference(collect(prepare), baseline) == baseline
@@ -801,11 +907,7 @@ class _Runner:
 
 
 class _Dispatcher:
-    def __init__(self) -> None:
-        self.commands: list = []
-
-    def set_goal_commands(self, commands) -> None:
-        self.commands.append(commands)
+    """The dispatcher holds no commands hook: anything that tried to bind one would fail."""
 
 
 class _Continuation:
@@ -816,7 +918,7 @@ class _Continuation:
         self.goals = goals
 
 
-def test_build_goals_binds_the_one_hook_to_both_only_with_the_flag(db):
+def test_build_goals_binds_the_hook_to_the_runner_only_with_the_flag(db):
     on = Settings(_env_file=None, goal_commands_enabled=True, **ALL_ON)
     runner, dispatcher = _Runner(), _Dispatcher()
     driver = main._build_goals(
@@ -825,24 +927,24 @@ def test_build_goals_binds_the_one_hook_to_both_only_with_the_flag(db):
     view = driver.tool_grants
     assert view.commands_on is True
     [hook] = runner.commands
-    assert dispatcher.commands == [hook] and hook.__self__ is view and hook.__func__ is GoalToolGrants.commands_for
+    assert hook.__self__ is view and hook.__func__ is GoalToolGrants.commands_for
     assert runner.lift == [(view.lifts, view.note_used)]
     off = Settings(_env_file=None, **{**ALL_ON})
     runner, dispatcher = _Runner(), _Dispatcher()
     driver = main._build_goals(
         off, database=db, heart=MagicMock(), continuation_runner=_Continuation(), runner=runner, dispatcher=dispatcher
     )
-    assert driver.tool_grants.commands_on is False and runner.commands == [] and dispatcher.commands == []
+    assert driver.tool_grants.commands_on is False and runner.commands == []
 
 
-async def test_shutdown_unbinds_both_and_stops_the_views_loop(db):
+async def test_shutdown_unbinds_the_hook_and_stops_the_views_loop(db):
     settings = _settings(f"commands-wiring-{uuid.uuid4().hex[:8]}")
     view = GoalToolGrants(db, settings, commands=True)
     view._tick_seconds = 3600
     view.start_loop()
     runner, dispatcher = _Runner(), _Dispatcher()
     await main.shutdown_components({"goal_tool_grants": view, "runner": runner, "dispatcher": dispatcher})
-    assert runner.lift == [(None, None)] and runner.commands == [None] and dispatcher.commands == [None]
+    assert runner.lift == [(None, None)] and runner.commands == [None]
     assert view._loop_task is None
 
 
@@ -850,7 +952,7 @@ async def test_shutdown_with_the_flag_off_unbinds_only_the_grant_hook(db):
     view = GoalToolGrants(db, _settings("x"))
     runner, dispatcher = _Runner(), _Dispatcher()
     await main.shutdown_components({"goal_tool_grants": view, "runner": runner, "dispatcher": dispatcher})
-    assert runner.lift == [(None, None)] and runner.commands == [] and dispatcher.commands == []
+    assert runner.lift == [(None, None)] and runner.commands == []
 
 
 def test_the_process_stub_is_awaitable():
@@ -892,7 +994,7 @@ async def test_action_gate_still_blocks_a_bash_call_of_a_task_that_may_run_any_c
     tool_guard.install(ToolGuard())
     view = GoalToolGrants(env.db, env.settings, commands=True)
     assert await view.refresh()
-    main._bind_goal_commands(view, env.runner, env.dispatcher)
+    main._bind_goal_commands(view, env.runner)
     checked: list[str] = []
 
     class Blocking:

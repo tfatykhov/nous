@@ -374,11 +374,6 @@ async def _recorded_policy_note(spec: intentions.IntentionSpec | None, read: Cal
     return f" (wake_policy '{spec.wake_policy}' is not available from a {spec.origin_kind} turn; recorded '{recorded}')"
 
 
-def _no_goal_commands(_ctx: ExecutionContext) -> None:
-    """The dispatcher's default commands hook: no turn's goal may run any command."""
-    return None
-
-
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -417,14 +412,6 @@ class ToolDispatcher:
         # Old tool names: an alias the runner rewrites to its target before any check, or a retired name
         # that answers with its message. Never offered, never registered (see nous/tool_names.py).
         self._aliases: dict[str, ToolAlias] = {}
-        # A goal that may run any command (``set_goal_commands``): the same hook the runner asks, read here for the
-        # environment of a lineage's bash call. None until main.py installs it.
-        self._goal_commands: Callable[[ExecutionContext], Any] = _no_goal_commands
-
-    def set_goal_commands(self, commands: Callable[[ExecutionContext], Any] | None) -> None:
-        """Install the hook that returns the entry letting a turn run any command with bash
-        (``nous.goals.grants.GoalToolGrants.commands_for``), or None; None puts the default back."""
-        self._goal_commands = commands if commands is not None else _no_goal_commands
 
     def is_registered(self, name: str) -> bool:
         """True when ``name`` has a handler -- the only way a call can run."""
@@ -555,6 +542,7 @@ class ToolDispatcher:
         outcome: CallOutcome | None = None,
         turn_id: UUID | None = None,
         stream: bool = False,
+        goal_commands: bool = False,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -577,6 +565,10 @@ class ToolDispatcher:
 
         stream: True when ``stream_chat`` dispatches the call (F111 PR B1:
         ``commit`` stamps a streamed chat turn's row ``chat_stream``).
+
+        goal_commands: True when the runner hands an internal_only bash call that runs any command (its goal's mode,
+        as ``AgentRunner._dispatch_with_ledger`` asked it right before this dispatch): the command gets the lineage
+        environment, never the build one, and no stdin. Read for nothing else.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -686,9 +678,9 @@ class ToolDispatcher:
                     # A runner.sh command gets no GH_REPO: the Claude Code job it starts would inherit it.
                     command = str(args.get("command", ""))
                     runner = lineage_runs_runner(command)
-                    if self._goal_commands(ctx) is not None:
-                        # A turn whose goal may run any command: the lineage environment, never the build one (so
-                        # git push keeps the code-host token), and no stdin.
+                    if goal_commands:
+                        # A call that runs any command: the lineage environment, never the build one (so git push
+                        # keeps the code-host token), and no stdin.
                         args = {
                             **args,
                             "_lineage": True,

@@ -609,12 +609,11 @@ async def _build_continuation_runner(
     return continuation_runner
 
 
-def _bind_goal_commands(view: Any, runner: Any, dispatcher: Any) -> None:
-    """Bind the one commands hook (``view.commands_for``) to the runner and to the dispatcher: the same object on
-    both, so the turn that is allowed to run any command and the environment its command gets are one answer's."""
-    hook = view.commands_for
-    runner.set_goal_commands(hook)
-    dispatcher.set_goal_commands(hook)
+def _bind_goal_commands(view: Any, runner: Any) -> None:
+    """Bind the commands hook (``view.commands_for``) to the runner. The runner asks it when it offers bash, when it
+    authorizes a bash call and again right before the dispatch, and hands the dispatcher that last answer, which
+    sets the command's environment."""
+    runner.set_goal_commands(view.commands_for)
 
 
 def _build_goals(
@@ -640,7 +639,7 @@ def _build_goals(
 
     With ``NOUS_GOAL_COMMANDS_ENABLED`` on as well (its validator needs the grants and the owner's entry gate) and
     a ``dispatcher``, the view also reads which goals may run any command, and its ``commands_for`` is bound to the
-    runner and the dispatcher (``_bind_goal_commands``). The driver gets the sweeper of the goals' modes
+    runner (``_bind_goal_commands``). The driver gets the sweeper of the goals' modes
     (``nous.goals.modes.ModeSweeper``) either way: with the flag off it only returns every goal to contained when it
     starts."""
     if not settings.goals_enabled or continuation_runner is None:
@@ -658,7 +657,7 @@ def _build_goals(
         tool_grants = GoalToolGrants(database, settings, commands=commands)
         runner.set_goal_lift(tool_grants.lifts, tool_grants.note_used)
         if commands:
-            _bind_goal_commands(tool_grants, runner, dispatcher)
+            _bind_goal_commands(tool_grants, runner)
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
     continuation_runner.set_goal_turns(GoalChain(database, settings, store, tool_grants=tool_grants).turn_context)
@@ -2258,10 +2257,8 @@ async def shutdown_components(components: dict) -> None:
     if components.get("goal_tool_grants") is not None and components.get("runner") is not None:
         components["runner"].set_goal_lift(None)  # F115: nor does the per-goal tool grant hook
         if getattr(components["goal_tool_grants"], "commands_on", False) is True:
-            # Nor the commands hook, on the runner and on the dispatcher, nor the view's own loop.
+            # Nor the commands hook, nor the view's own loop.
             components["runner"].set_goal_commands(None)
-            if components.get("dispatcher") is not None:
-                components["dispatcher"].set_goal_commands(None)
             await components["goal_tool_grants"].stop_loop()
 
     # F034: Stop heartbeat before other components
