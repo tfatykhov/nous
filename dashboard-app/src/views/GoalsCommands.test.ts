@@ -6,7 +6,7 @@ import { COMMANDS, COMMANDS_ON, DESCRIPTION, OPTIONS, goalDetail, goalRow } from
 import { commandsSentence, confirmText, type GoalDetail, type GoalOptions } from '../lib/goals';
 
 // A goal that may run any command, on the Goals screen: the create form's part only when the server sends it, the
-// sentence from the server's template typed exactly before Create can be pressed, the body POST /goals takes, the
+// sentence from the server's template typed before Create can be pressed, the body POST /goals takes, the
 // goal page's card in the server's words with Return to contained (no question first), and the approve question that
 // names the hours. Every value is made up.
 
@@ -79,7 +79,7 @@ describe('the create form', () => {
     expect(within(form).queryAllByRole('checkbox')).toHaveLength(0);
   });
 
-  it('shows the server words, the sentence from its template, and keeps Create off until it is typed exactly', async () => {
+  it('shows the server words, the sentence from its template, and keeps Create off until it is typed', async () => {
     const form = await openForm();
     await fill(form);
     const submit = within(form).getByRole('button', { name: 'Create draft' }) as HTMLButtonElement;

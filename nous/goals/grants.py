@@ -31,7 +31,8 @@ granted tool in a session writes one harness journal row (``note_use``).
 With ``commands`` (``NOUS_GOAL_COMMANDS_ENABLED``) the view also holds, in a map of its own, the open sessions' roots
 of active goals that may run any command now (``nous.goals.commands``), each with its end on the view's clock: read in
 the same transaction as the grants, replaced by every refresh, cleared with them, and asked through
-``commands_for``.
+``commands_for``, which lifts nothing unless ``commands_fresh``: the last full read within the view's age by its
+monotonic clock and by the wall clock.
 
 The screen's words come from the tables here (``GRANT_PLACES``, ``NEVER_SENTENCE``, ``GRANT_FACTS``), which the
 routes read and tests tie to the code's own tables.

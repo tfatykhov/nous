@@ -13,7 +13,7 @@
   // the server's own sentence is shown when it refuses. What was typed stays until the draft is made. With per-goal
   // tools on, the tools the goal may use without asking can be chosen here too; Create then asks once for the lot.
   // With goals that may run any command on, the owner may choose that here, and only here: the hours from approval,
-  // the server's description, and the server's sentence typed exactly; Create stays off until it matches.
+  // the server's description, and the server's sentence typed (spaces around it aside); Create stays off until then.
   let { options, onCreated }: { options: GoalOptions; onCreated: (ref: string) => void } = $props();
 
   const presets = $derived(PRESET_NAMES.filter((name) => options.presets?.[name]));
