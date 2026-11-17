@@ -101,7 +101,7 @@ export const OPTIONS = (over: Partial<GoalOptions> = {}): GoalOptions => ({
 // A goal that may run any command: GET /goals/options `commands` in its real shape, with the server's own words
 // (nous/goals/commands.py WORDS). Refresh it when the route's answer changes.
 export const DESCRIPTION =
-  "This goal's tasks can run any command on the server Nous runs on, as the same user Nous runs as, and can start coding jobs. Nous does not pass its database login, model keys or chat tokens to those commands, but a command can read them from the running server, and can read and change Nous's files, settings and data. The code-host token is passed to them. Nous checks the end time before each tool call. A command already running at that time, anything it left running, and anything it changed stay as they are.";
+  "This goal's tasks can run any command on the server Nous runs on, as the same user Nous runs as, and can start coding jobs. Nous does not pass its database login, model keys or chat tokens to those commands, but a command can read them from the running server, and can read and change Nous's files, settings and data. The code-host token is passed to them. Nous checks the end time before each command. A command already running at that time, anything it left running, and anything it changed stay as they are.";
 export const COMMANDS = (over: Partial<CommandsOptions> = {}): CommandsOptions => ({
   max_hours: 24,
   sentence: 'allow this goal to run any command for {hours}',

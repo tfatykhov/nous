@@ -53,7 +53,7 @@ DESCRIPTION = (
     "This goal's tasks can run any command on the server Nous runs on, as the same user Nous runs as, and can start "
     "coding jobs. Nous does not pass its database login, model keys or chat tokens to those commands, but a command "
     "can read them from the running server, and can read and change Nous's files, settings and data. The code-host "
-    "token is passed to them. Nous checks the end time before each tool call. A command already running at that "
+    "token is passed to them. Nous checks the end time before each command. A command already running at that "
     "time, anything it left running, and anything it changed stay as they are."
 )
 WORDS: Mapping[str, str] = MappingProxyType(
