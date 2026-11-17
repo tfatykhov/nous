@@ -531,3 +531,18 @@ def test_the_chains_tools_cannot_reach_the_mode():
     source = (Path(__file__).resolve().parents[1] / "nous" / "goals" / "tools.py").read_text(encoding="utf-8")
     for word in ("return_to_contained", "CONTAINED_VALUES", "mode_until", "mode_hours", "commands", ".approve("):
         assert word not in source, word
+
+
+async def test_two_creates_at_once_both_arm_and_their_approvals_leave_one_goal_in_the_mode(db):
+    """The rule binds at approval: two drafts may each be created to run any command, and approving both at once
+    leaves exactly one with an end."""
+    store = _store(db)
+    one, two = await asyncio.gather(_draft(store, commands=_ask()), _draft(store, commands=_ask()))
+    assert (one.mode, two.mode) == ("commands", "commands")
+    results = await asyncio.gather(
+        store.approve(one.id, actor="owner"), store.approve(two.id, actor="owner"), return_exceptions=True
+    )
+    approved = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, GoalRefused)]
+    assert len(approved) == 1 and len(refused) == 1 and str(refused[0]) == C.ONE_AT_A_TIME
+    assert approved[0].mode_until is not None

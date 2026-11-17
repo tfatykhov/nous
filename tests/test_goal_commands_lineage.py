@@ -221,7 +221,8 @@ async def _shell_turn(make_env, tmp_path, *, which: str) -> str:
     view = GoalToolGrants(env.db, env.settings, commands=True)
     assert await view.refresh()
     main._bind_goal_commands(view, env.runner, env.dispatcher)
-    kind = {"decision": "continuation", "background": "background", "step": "dag_node"}.get(which, "subtask")
+    kinds = {"decision": "continuation", "background": "background", "step": "dag_node", "chat": "interactive"}
+    kind = kinds.get(which, "subtask")
     root = roots[1] if which == "other_goal" else roots[0]
     ctx = ExecutionContext(
         kind=kind, authority="internal_only", session_id="subtask-90", intention_id=uuid.uuid4(), root_intention_id=root
@@ -262,7 +263,7 @@ async def test_a_task_of_the_goal_runs_a_command_the_allowlist_refuses_and_sees_
 
 
 @posix_only
-@pytest.mark.parametrize("which", ["ended", "other_goal", "decision", "background"])
+@pytest.mark.parametrize("which", ["ended", "other_goal", "decision", "background", "chat"])
 async def test_the_same_command_is_refused_elsewhere(runner_env, tmp_path, which):  # noqa: F811
     result = await _shell_turn(runner_env, tmp_path, which=which)
     assert result.startswith("Tool error: 'bash' is not allowed"), result

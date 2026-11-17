@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from f099_support import env_factory, runner_env  # noqa: F401
 from goal_grants_baseline import (
     SYNTHETIC_ENV,
     TOOLS,
@@ -60,6 +61,8 @@ STANDING = (
     "compose_surface",
 )
 INSIDE_ONLY = ("submit_final_report", "resolve_intention", "propose_action", "goal_note", "goal_plan")
+# The settings a real turn of a goal's task runs with here: the flags the mode needs.
+RUNNER_FLAGS = {"workspace_dir": workspace(), "f099_lineage_shell": True}
 
 
 class Clock:
@@ -751,3 +754,56 @@ async def test_shutdown_with_the_flag_off_unbinds_only_the_grant_hook(db):
 
 def test_the_process_stub_is_awaitable():
     assert asyncio.iscoroutinefunction(_Process.communicate)
+
+
+# ---- beside the per-goal tool grants, and ActionGate ------------------------------------------------------------
+
+
+async def test_a_grant_and_the_mode_lift_together_and_the_grant_outlives_the_return(world):
+    w = world
+    await w.store.grant_tool(w.goal.id, "send_email", None, actor="owner", proof="owner")
+    assert await w.view.refresh()
+    ctx = _task(w)
+    offered = {t["name"]: t for t in _offered(w.runner, ctx)}
+    assert "send_email" in offered and tool_policy.COMMANDS_BASH_NOTE in offered["bash"]["description"]
+    names = frozenset(offered)
+    assert w.runner._authorize_tool_call(ctx, "send_email", names, "s", {}) is None
+    assert w.runner._authorize_tool_call(ctx, "bash", names, "s", REFUSED) is None
+    await w.store.return_to_contained(w.goal.id, actor="owner", proof="owner")
+    assert await w.view.refresh_goal(w.goal.id)
+    assert w.runner._authorize_tool_call(ctx, "send_email", names, "s", {}) is None
+    refused = w.runner._authorize_tool_call(ctx, "bash", names, "s", REFUSED)
+    assert refused is not None and "(external)" in refused.text
+
+
+async def test_action_gate_still_blocks_a_bash_call_of_a_task_that_may_run_any_command(runner_env):  # noqa: F811
+    from f099_support import say, use
+
+    from nous.cognitive.action_gate import GateResult
+
+    env = await runner_env([use("bash", **REFUSED)], [say("I stop.")], telegram_chat_id="", **RUNNER_FLAGS)
+    recorder = _Recorder()
+    env.dispatcher.register("bash", recorder, _BASH_SCHEMA)
+    store = GoalStore(env.db, env.agent, env.settings)
+    goal = await _goal(store)
+    root = await _session(env.db, store, goal)
+    await _mode(env.db, goal.id)
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(env.db, env.settings, commands=True)
+    assert await view.refresh()
+    main._bind_goal_commands(view, env.runner, env.dispatcher)
+    checked: list[str] = []
+
+    class Blocking:
+        async def check(self, tool_name, tool_input, ledger, user_message=""):
+            checked.append(tool_name)
+            return GateResult(approved=False, reason="not now")
+
+    env.runner._action_gate = Blocking()
+    object.__setattr__(env.settings, "action_gating_mode", "enforce")
+    ctx = ExecutionContext(
+        kind="subtask", authority="internal_only", session_id="subtask-91", intention_id=root, root_intention_id=root
+    )
+    await env.runner.run_turn("subtask-91", "fetch the data", is_background=True, is_subtask=True, context=ctx)
+    assert checked == ["bash"] and recorder.seen == []
+    assert "BLOCKED by ActionGate" in str(env.model.calls[-1]["messages"])
