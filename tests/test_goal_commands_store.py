@@ -465,21 +465,42 @@ async def test_a_driver_pause_of_a_contained_goal_writes_no_mode_row(db):
     assert await _mode_rows(store, goal.id) == []
 
 
-async def test_the_owners_cancel_of_a_sessions_chain_ends_the_mode(db):
-    store = _store(db)
-    goal = await _in_mode(store)
-    row = await _session(store, goal)
-    driver = GoalDriver(db, store._settings, None, store, None)
+async def _owner_cancels_the_chain(store: GoalStore, goal: Goal, row: GoalSession) -> None:
+    driver = GoalDriver(store._db, store._settings, None, store, None)
     now = await _db_now(store)
-    async with db.session() as s:
+    async with store._db.session() as s:
         goal_row = (await s.execute(select(Goal).where(Goal.id == goal.id).with_for_update())).scalar_one()
         assert await driver._end(
             s, goal_row, row, now, outcome="interrupted", spent=0, steps=0, summary=None, cancelled_by_owner=True
         )
         await s.commit()
+
+
+@pytest.mark.parametrize("paused_first", [False, True])
+async def test_the_owners_cancel_of_a_sessions_chain_ends_the_mode_whether_active_or_paused(db, paused_first):
+    store = _store(db)
+    goal = await _in_mode(store)
+    row = await _session(store, goal)
+    if paused_first:
+        await store.pause(goal.id, actor="owner")
+    await _owner_cancels_the_chain(store, goal, row)
     goal = await store.get(goal.id)
-    assert goal.pause_reason == "owner" and _ended(goal)
-    assert (await _rows(store, goal.id))[-1].evidence == ["mode:off", "why:stopped"]
+    assert (goal.state, goal.pause_reason) == ("paused", "owner") and _ended(goal)
+    ended = [r for r in await _rows(store, goal.id) if "mode:off" in r.evidence]
+    assert len(ended) == 1
+    assert (ended[0].actor, ended[0].evidence, ended[0].text) == (
+        "harness",
+        ["mode:off", "why:stopped"],
+        C.ENDED["stopped"],
+    )
+
+
+async def test_the_owners_cancel_of_a_contained_goals_chain_writes_no_mode_row(db):
+    store = _store(db)
+    goal = await store.approve((await _draft(store)).id, actor="owner")
+    row = await _session(store, goal)
+    await _owner_cancels_the_chain(store, goal, row)
+    assert await _mode_rows(store, goal.id) == []
 
 
 # ---- who writes the mode ----------------------------------------------------------------------------------------

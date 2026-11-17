@@ -1738,7 +1738,8 @@ class GoalDriver:
         """The close's writes, in the caller's transaction: the session row (only while still open), an active
         goal's next wake, and the harness ``state`` row (with ``evidence``). False when the session was closed
         meanwhile (nothing else is written). When the owner cancelled the session's root (``cancelled_by_owner``),
-        an active goal is paused (``owner``) instead, its wake and request cleared, with a harness row saying so.
+        an active goal is paused (``owner``) instead, its wake and request cleared, with a harness row saying so; and
+        a goal that may run any command, active or paused, returns to contained, with a harness row (``stopped``).
 
         The ``state`` row's own words are the harness's (``detail`` included). The chain's text goes in only as
         ``session_note`` (its newest arrival note, when the session sent no report), on one line after a fixed label
@@ -1761,23 +1762,27 @@ class GoalDriver:
             return False
         active = [Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active"]
         paused = False
-        in_mode = False
+        ended = False
         if cancelled_by_owner:
-            in_mode = (
-                await s.scalar(select(Goal.mode).where(Goal.id == goal.id, Goal.agent_id == self._agent_id))
-            ) != goal_commands.MODE_CONTAINED
             values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None}
             paused = (
                 await s.execute(
                     update(Goal)
                     .where(*active)
-                    .values(
-                        **values,
-                        pending_request=None,
-                        pending_request_at=None,
-                        updated_at=func.clock_timestamp(),
-                        **goal_commands.CONTAINED_VALUES,
+                    .values(**values, pending_request=None, pending_request_at=None, updated_at=func.clock_timestamp())
+                    .execution_options(synchronize_session=False)
+                )
+            ).rowcount == 1
+            ended = (
+                await s.execute(
+                    update(Goal)
+                    .where(
+                        Goal.id == goal.id,
+                        Goal.agent_id == self._agent_id,
+                        Goal.state.in_(("active", "paused")),
+                        Goal.mode != goal_commands.MODE_CONTAINED,
                     )
+                    .values(**goal_commands.CONTAINED_VALUES, updated_at=func.clock_timestamp())
                     .execution_options(synchronize_session=False)
                 )
             ).rowcount == 1
@@ -1807,8 +1812,8 @@ class GoalDriver:
                 actor="harness",
                 session_n=row.n,
             )
-            if in_mode:
-                self._ended(s, goal.id, "stopped", session_n=row.n)
+        if ended:
+            self._ended(s, goal.id, "stopped", session_n=row.n)
         return True
 
     async def refresh_sessions(self) -> int:
