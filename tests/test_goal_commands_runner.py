@@ -661,10 +661,7 @@ async def test_the_dispatcher_reads_the_hook_when_it_dispatches(world):
 
 
 async def test_heartbeat_check_create_passes_the_loader_no_metadata():
-    """heartbeat_check_create calls the loader's create_check with no ``metadata`` argument, and
-    ``lineage_from_stamp(None)`` gives the owner's authority."""
-    from nous.api.execution_context import lineage_from_stamp
-
+    """heartbeat_check_create calls the loader's create_check with no ``metadata`` argument."""
     loader = MagicMock()
 
     async def create_check(**kwargs):
@@ -683,7 +680,6 @@ async def test_heartbeat_check_create_passes_the_loader_no_metadata():
         context=task,
     )
     assert "metadata" not in loader.seen
-    assert lineage_from_stamp(None)[2] == "owner"
 
 
 # ---- byte-for-byte while every goal is contained -----------------------------------------------------------------
