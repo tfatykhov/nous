@@ -1,7 +1,8 @@
 // Test-only: answers of the goal routes (nous/api/goal_routes.py) in their real shape, with made-up values. The
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
 import type {
-  GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords, NewGoalTools,
+  CommandsOptions, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords,
+  NewGoalTools,
 } from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
@@ -48,6 +49,8 @@ export function goalDetail(over: Partial<GoalDetail> = {}): GoalDetail {
     quiet_hours_ok: false,
     stall_limit: 3,
     mode_until: null,
+    mode_hours: null,
+    commands: { state: 'off', says: 'Off', usable: false, not_usable_why: null, approve: null },
     approved_at: '2026-11-11T12:00:00+00:00',
     finished_at: null,
     created_at: '2026-11-11T11:00:00+00:00',
@@ -92,6 +95,51 @@ export const OPTIONS = (over: Partial<GoalOptions> = {}): GoalOptions => ({
   bounds: { title: 200, objective: 4000, done_when: 2000, channel: 200, note: 4000, deadline_days: 90, journal: 200 },
   driver_running: false,
   spend_note: SPEND_NOTE,
+  ...over,
+});
+
+// A goal that may run any command: GET /goals/options `commands` in its real shape, with the server's own words
+// (nous/goals/commands.py WORDS). Refresh it when the route's answer changes.
+export const DESCRIPTION =
+  "This goal's tasks can run any command on the server Nous runs on, as the same user Nous runs as, and can start coding jobs. Nous does not pass its database login, model keys or chat tokens to those commands, but a command can read them from the running server, and can read and change Nous's files, settings and data. The code-host token is passed to them. Nous checks the end time before each tool call. A command already running at that time, anything it left running, and anything it changed stay as they are.";
+export const COMMANDS = (over: Partial<CommandsOptions> = {}): CommandsOptions => ({
+  max_hours: 24,
+  sentence: 'allow this goal to run any command for {hours}',
+  hour_one: '{n} hour',
+  hours_many: '{n} hours',
+  words: {
+    checkbox: "Let this goal's tasks run any command until a time I set.",
+    hours: 'Hours from approval',
+    description: DESCRIPTION,
+    heading: 'May run any command',
+    off: 'Off',
+    set: 'Set: {hours} from approval.',
+    on: 'On until {until} UTC.',
+    ended: 'Ended: {reason}',
+    return: 'Return to contained',
+    return_note:
+      'Takes effect at the next tool call. A command already running, anything it left running, and anything it changed stay as they are. Use Stop now for the session.',
+    stops: 'A lock or Not allowed on bash under Limits and tools stops its commands.',
+    approve: "Approving starts its time: this goal's tasks may then run any command for {hours}.",
+    banner: '{ref} may run any command until {until} UTC.',
+  },
+  ...over,
+});
+/** A goal's `commands` while it may run any command until 2026-11-15 20:00 UTC, its tasks running any command now. */
+export const COMMANDS_ON = {
+  state: 'on' as const,
+  says: 'On until 2026-11-15 20:00 UTC.',
+  usable: true,
+  not_usable_why: null,
+  approve: null,
+};
+/** GET /goals/commands with one goal in the mode. */
+export const COMMANDS_NOW = (over: Partial<GoalCommandsNow> = {}): GoalCommandsNow => ({
+  enabled: true,
+  allowed: true,
+  active: [
+    { ref: 'G-0003', title: 'Ship the fix', until: '2026-11-15T20:00:00+00:00', says: 'G-0003 may run any command until 2026-11-15 20:00 UTC.' },
+  ],
   ...over,
 });
 

@@ -8,7 +8,7 @@ import { fmtUtc } from './harness';
 export type GoalState = 'draft' | 'active' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PauseReason = 'owner' | 'budget' | 'stalled' | 'waiting_for_owner' | 'error' | 'deadline';
 /** The owner's actions on a goal, in the order the server lists them: each is the last segment of its route. */
-export const ACTIONS = ['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel'] as const;
+export const ACTIONS = ['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel', 'contained'] as const;
 export type Action = typeof ACTIONS[number];
 export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 
@@ -68,6 +68,9 @@ export interface GoalDetail extends GoalRow {
   quiet_hours_ok: boolean;
   stall_limit: number;
   mode_until: string | null;
+  /** A goal that may run any command: the hours chosen at creation (null for a contained goal). */
+  mode_hours: number | null;
+  commands: GoalCommands;
   approved_at: string | null;
   finished_at: string | null;
   created_at: string | null;
@@ -81,6 +84,35 @@ export interface GoalDetail extends GoalRow {
   actions: Action[];
   resume_blocked: 'budget' | 'deadline' | null;
   spend_note: string;
+}
+
+/** Whether a goal may run any command, as its page shows it (the server's words): `off`, `set` (chosen at creation,
+ * its time starts at approval), `on` (until `mode_until`) or `ended`; whether its tasks run any command now and why
+ * not; and for such a draft what approving it starts. */
+export interface GoalCommands {
+  state: 'off' | 'set' | 'on' | 'ended';
+  says: string;
+  usable: boolean;
+  not_usable_why: string | null;
+  approve: string | null;
+}
+
+/** The create form's part for a goal that may run any command (GET /goals/options `commands`, with that flag on):
+ * the host's ceiling, the sentence to type with `{hours}` in it (filled with `hour_one` or `hours_many`, each with
+ * `{n}`), and the words of the form and of the goal's page. */
+export interface CommandsOptions {
+  max_hours: number;
+  sentence: string;
+  hour_one: string;
+  hours_many: string;
+  words: Record<string, string>;
+}
+
+/** GET /goals/commands: the goals whose tasks may run any command now, for the banner. */
+export interface GoalCommandsNow {
+  enabled: boolean;
+  allowed: boolean;
+  active: { ref: string; title: string; until: string; says: string }[];
 }
 
 /** `total`: how many goals match the filter (the list holds the newest of them). */
@@ -115,6 +147,8 @@ export interface GoalOptions {
   spend_note?: string;
   /** F115 per-goal tools, with that flag on: what a new goal may be allowed when it is created. */
   tools?: NewGoalTools;
+  /** With goals that may run any command: the create form's part. */
+  commands?: CommandsOptions;
 }
 
 /** What a new goal may be allowed (GET /goals/options `tools`): the same rows as a goal's own, and the one question
@@ -139,6 +173,8 @@ export interface CreateBody {
   origin_channel?: string;
   /** F115: the tools the new goal may use without asking, each as PUT /goals/{ref}/tools/{tool} takes it. */
   tools?: NewGoalTool[];
+  /** Its tasks may run any command for `hours` from its approval; `confirm` is the sentence the owner typed. */
+  commands?: { hours: number; confirm: string };
 }
 
 export interface NewGoalTool { tool: string; confirm: true; identity?: string }
@@ -172,6 +208,29 @@ export const createGoal = (body: CreateBody) =>
   timed((signal) => apiRequest<GoalDetail | GoalMade>(BASE, 'POST', body, signal));
 export const goalAction = (ref: string, action: Action, body?: object) =>
   timed((signal) => apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body, signal));
+export const goalCommandsNow = (signal?: AbortSignal) =>
+  apiRequest<GoalCommandsNow>(`${BASE}/commands`, 'GET', undefined, signal);
+
+// ── A goal that may run any command ─────────────────────────────────────────────
+// Every sentence comes from the server (GET /goals/options `commands.words`, a goal's `commands.says`).
+
+/** The sentence the owner types to allow `hours` hours, built from the server's template. */
+export function commandsSentence(words: CommandsOptions, hours: number): string {
+  const unit = (hours === 1 ? words.hour_one : words.hours_many).replace('{n}', String(hours));
+  return words.sentence.replace('{hours}', unit);
+}
+
+/** The most hours a new goal may run any command: the host's ceiling, and its deadline. */
+export const commandsMostHours = (words: CommandsOptions, deadlineDays: number) =>
+  Math.max(0, Math.min(words.max_hours, deadlineDays * 24));
+
+/** What is wrong with the hours and the typed sentence, in words; null when they can be sent. */
+export function commandsProblem(words: CommandsOptions, hours: number, typed: string, deadlineDays: number): string | null {
+  const most = commandsMostHours(words, deadlineDays);
+  if (!Number.isInteger(hours) || hours < 1 || hours > most) return `Hours must be a whole number from 1 to ${most}.`;
+  if (typed.trim() !== commandsSentence(words, hours)) return 'Type the sentence exactly to allow it.';
+  return null;
+}
 
 // ── The tools a goal may use without asking (F115) ─────────────────────────────
 // GET /goals/{ref}/tools, PUT and DELETE /goals/{ref}/tools/{tool}. Every sentence of this section comes from the
@@ -324,6 +383,8 @@ export const NO_ANSWER_TEXT = 'No answer came back. Check the goal before trying
 export const NO_CHANNEL_TEXT =
   'This goal has nowhere to ask you questions, so it cannot be approved. Set a default chat on the server, or cancel it and create it again with a channel.';
 export const DRAFT_NOTE = 'Nothing runs until you approve it.';
+/** A goal's mode in words. */
+export const MODE_WORDS: Record<string, string> = { contained: 'Contained', commands: 'May run any command' };
 export const CHANNEL_HINT = 'Questions and reports go here, as telegram:<chat id>.';
 
 const PAUSED: Record<PauseReason, { text: string; tone: Tone }> = {
@@ -371,6 +432,7 @@ export const ACTION_TEXT: Record<Action, { label: string; spends: boolean; ends:
   deadline: { label: 'Extend deadline', spends: true, ends: false, done: 'Deadline extended.' },
   note: { label: 'Add note', spends: false, ends: false, done: 'Added. The next session reads it.' },
   cancel: { label: 'Cancel goal', spends: false, ends: true, done: 'Cancelled.' },
+  contained: { label: 'Return to contained', spends: false, ends: false, done: 'Returned to contained.' },
 };
 
 /** Whether an action asks for a sentence and a Yes before it is sent. */
@@ -387,13 +449,17 @@ export const formatNumber = (n: number) => n.toLocaleString('en-US');
 /** What the owner is told before an action, with the goal's own numbers. `input` holds a budget or deadline change. */
 export function confirmText(
   action: Action,
-  goal: Pick<GoalDetail, 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at' | 'open_session' | 'state'>,
+  goal: Pick<GoalDetail, 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at' | 'open_session' | 'state'> & {
+    commands?: Pick<GoalCommands, 'approve'>;
+  },
   opts: { driverRunning: boolean; total?: number; day?: number; days?: number; now?: number } = { driverRunning: false },
 ): string {
   const ready = opts.driverRunning ? 'This starts the goal.' : 'This marks the goal ready to start.';
   switch (action) {
-    case 'approve':
-      return `${ready} It can work in the background for up to ${goal.deadline_days} days and spend up to ${formatTokens(goal.total_budget)} (${formatNumber(goal.day_budget)} a day). You can pause or stop it at any time.`;
+    case 'approve': {
+      const commands = goal.commands?.approve ? ` ${goal.commands.approve}` : '';
+      return `${ready} It can work in the background for up to ${goal.deadline_days} days and spend up to ${formatTokens(goal.total_budget)} (${formatNumber(goal.day_budget)} a day).${commands} You can pause or stop it at any time.`;
+    }
     case 'run-now':
       return opts.driverRunning
         ? "This starts a session now. It spends tokens from this goal's budget."
@@ -471,7 +537,7 @@ export interface LostChange {
   action: Action;
   /** When it was sent (this browser's clock). */
   at: number;
-  before: Pick<GoalDetail, 'state' | 'pause_reason' | 'pending_request' | 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at'> & {
+  before: Pick<GoalDetail, 'state' | 'pause_reason' | 'pending_request' | 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at' | 'mode'> & {
     /** The newest journal row's seq, and the newest session's number, before the change. */
     top: number;
     lastSession: number;
@@ -497,6 +563,7 @@ export function beforeChange(goal: GoalDetail): LostChange['before'] {
     day_budget: goal.day_budget,
     deadline_days: goal.deadline_days,
     deadline_at: goal.deadline_at,
+    mode: goal.mode,
     top: goal.journal[0]?.seq ?? 0,
     lastSession: goal.sessions.reduce((n, s) => Math.max(n, s.n), 0),
   };
@@ -525,6 +592,8 @@ export function changeLanded(lost: LostChange, goal: GoalDetail): boolean {
       return b.state !== 'cancelled' && goal.state === 'cancelled';
     case 'confirm-done':
       return b.state !== 'done' && goal.state === 'done';
+    case 'contained':
+      return b.mode !== 'contained' && goal.mode === 'contained';
     case 'run-now':
       return (b.pending_request !== 'run_now' && goal.pending_request === 'run_now')
         || goal.sessions.some((s) => s.n > b.lastSession && s.trigger === 'run_now');

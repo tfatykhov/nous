@@ -4,7 +4,7 @@
   import { fmtUtc } from '../../lib/harness';
   import GoalTools from './GoalTools.svelte';
   import {
-    ACTION_TEXT, DRIVER_OFF_TEXT, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
+    ACTION_TEXT, DRIVER_OFF_TEXT, MODE_WORDS, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
     deadlineProblem, typedNumber,
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
@@ -14,7 +14,9 @@
   // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
   // (GoalTools, shown only while the server has per-goal tools on), spend, plan, sessions and journal, and the note
   // box. The buttons are exactly the server's `actions`; an action that spends tokens or ends something says so
-  // in a sentence and waits for a Yes. Every text a session wrote is a text node. Ids of this goal's controls are
+  // in a sentence and waits for a Yes. Whether the goal may run any command has a card of its own, with the server's
+  // words and its one later change, Return to contained, which asks nothing first (it narrows what the goal can do).
+  // Every text a session wrote is a text node. Ids of this goal's controls are
   // `goal-<letter>.<ref>[.<action>]`: a ref has no ".", so none can take another's.
   let {
     goal,
@@ -46,7 +48,11 @@
 
   let driverRunning = $derived(options.driver_running === true);
   let word = $derived(stateWord(goal, driverRunning));
-  let buttons = $derived(goal.actions.filter((a) => a !== 'note'));
+  let buttons = $derived(goal.actions.filter((a) => a !== 'note' && a !== 'contained'));
+  let modeWords = $derived(options.commands?.words ?? null);
+  let modeShown = $derived(modeWords !== null || goal.commands.state !== 'off');
+  /** The action whose result line is shown: Return to contained's is shown in its own card. */
+  let resultOf = $state<Action | null>(null);
   let openSteps = $derived(goal.plan.filter((s) => !closed(s)));
   let closedSteps = $derived(goal.plan.filter(closed));
 
@@ -127,6 +133,7 @@
     busy = action;
     confirming = null;
     result = null;
+    resultOf = action;
     lost = null;
     let outcome: Note;
     let unanswered = false;
@@ -193,6 +200,7 @@
     deadline: 'Yes, extend the deadline',
     note: 'Yes, add the note',
     cancel: 'Yes, cancel the goal',
+    contained: 'Yes, return to contained',
   };
 
   /** The action that moves a goal forward is drawn filled, the rest outlined. Waiting for the owner, that is Confirm
@@ -284,8 +292,30 @@
         </div>
       </div>
     {/if}
-    {@render line(result)}
+    {#if resultOf !== 'contained'}{@render line(result)}{/if}
   </div>
+
+  {#if modeShown}
+    <div class="card" aria-labelledby="goal-m.{goal.ref}">
+      <h3 id="goal-m.{goal.ref}">{modeWords?.heading ?? MODE_WORDS.commands}</h3>
+      <p class="mode-says" class:mode-on={goal.commands.state === 'on'}>{goal.commands.says}</p>
+      {#if goal.commands.state === 'on' || goal.commands.state === 'set'}
+        {#if modeWords}<p class="hint">{modeWords.description}</p>{/if}
+        {#if goal.commands.not_usable_why}<p class="reason">{goal.commands.not_usable_why}</p>{/if}
+        {#if modeWords}<p class="hint">{modeWords.stops}</p>{/if}
+      {/if}
+      {#if goal.actions.includes('contained')}
+        <div class="actions">
+          <Button id={buttonId('contained')} data-action="contained" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
+            disabled={busy !== null} aria-describedby="goal-n.{goal.ref}" onclick={() => void run('contained')}>
+            {busy === 'contained' ? 'Working' : (modeWords?.return ?? ACTION_TEXT.contained.label)}
+          </Button>
+        </div>
+        {#if modeWords}<p class="hint" id="goal-n.{goal.ref}">{modeWords.return_note}</p>{/if}
+      {/if}
+      {#if resultOf === 'contained'}{@render line(result)}{/if}
+    </div>
+  {/if}
 
   <div class="card">
     <h3>Charter</h3>
@@ -309,7 +339,7 @@
       <dt>Job launches per day</dt><dd>{goal.jobs_per_day}</dd>
       <dt>Quiet hours</dt><dd>{goal.quiet_hours_ok ? 'Sessions may start in quiet hours' : 'No session starts in quiet hours'}</dd>
       <dt>Stall limit</dt><dd>{goal.stall_limit} sessions</dd>
-      <dt>Mode</dt><dd>{goal.mode === 'contained' ? 'Contained' : goal.mode}</dd>
+      <dt>Mode</dt><dd>{MODE_WORDS[goal.mode] ?? goal.mode}</dd>
     </dl>
   </div>
 
@@ -428,6 +458,8 @@
   .when { font-size: 0.75rem; color: var(--muted); }
   .reason { font-size: 0.8125rem; color: var(--muted); margin: 0.5rem 0 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
+  .mode-says { font-size: 0.875rem; margin: 0.375rem 0 0; }
+  .mode-says.mode-on { font-weight: 600; color: var(--warn-text); }
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .confirm { margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
   .confirm p { margin: 0.5rem 0 0; }

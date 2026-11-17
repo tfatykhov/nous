@@ -4,13 +4,16 @@
   import GoalTools from './GoalTools.svelte';
   import {
     CHANNEL_HINT, DRAFT_NOTE, LIMIT_LABEL, PRESET_LABEL, PRESET_NAMES, createBody, createGoal, createProblems, formatNumber, limitFields,
-    createRefusalText, newGoalTools, presetLine, type CreateForm, type GoalOptions, type NumberLimit,
+    commandsMostHours, commandsProblem, commandsSentence, createRefusalText, newGoalTools, presetLine, typedNumber,
+    type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
   } from '../../lib/goals';
 
   // The form that makes a draft (POST /goals). A preset's numbers come from GET /goals/options, never from here;
   // "Customise" starts from the chosen preset. The rules of a custom limit are checked before anything is sent, and
   // the server's own sentence is shown when it refuses. What was typed stays until the draft is made. With per-goal
   // tools on, the tools the goal may use without asking can be chosen here too; Create then asks once for the lot.
+  // With goals that may run any command on, the owner may choose that here, and only here: the hours from approval,
+  // the server's description, and the server's sentence typed exactly; Create stays off until it matches.
   let { options, onCreated }: { options: GoalOptions; onCreated: (ref: string) => void } = $props();
 
   const presets = $derived(PRESET_NAMES.filter((name) => options.presets?.[name]));
@@ -52,11 +55,36 @@
   const pick = $derived(options.tools ?? null);
   const chosenRows = $derived((pick?.available ?? []).filter((o) => chosen.includes(o.tool)));
 
+  const cmd = $derived(options.commands ?? null);
+  let commandsOn = $state(false);
+  /** The hours a new goal starts with: a day, or less where the server allows less. */
+  const startHours = () => String(Math.min(24, options.commands?.max_hours ?? 24));
+  let commandsHours = $state(startHours());
+  let commandsTyped = $state('');
+  /** The deadline the goal would have, in days: the custom one typed, else the chosen size's. */
+  const deadlineDays = $derived(
+    form.custom ? typedNumber(form.limits.deadline_days) : (options.presets?.[form.preset]?.deadline_days ?? 0),
+  );
+  const hours = $derived(typedNumber(commandsHours));
+  const most = $derived(cmd ? commandsMostHours(cmd, Number.isNaN(deadlineDays) ? 0 : deadlineDays) : 0);
+  const sentence = $derived(cmd && Number.isInteger(hours) && hours >= 1 ? commandsSentence(cmd, hours) : null);
+  const commandsWrong = $derived(
+    cmd && commandsOn ? commandsProblem(cmd, hours, commandsTyped, Number.isNaN(deadlineDays) ? 0 : deadlineDays) : null,
+  );
+
+  function body(): CreateBody {
+    const made: CreateBody = createBody(form);
+    const tools = pick && chosen.length ? newGoalTools(chosen, pick.available) : [];
+    if (tools.length) made.tools = tools;
+    if (cmd && commandsOn) made.commands = { hours, confirm: commandsTyped };
+    return made;
+  }
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     tried = true;
     refused = null;
-    if (sending || createProblems(form, options).length) return;
+    if (sending || createProblems(form, options).length || commandsWrong !== null) return;
     if (pick && chosen.length && !confirmingTools) {
       confirmingTools = true;
       await tick();
@@ -71,8 +99,7 @@
     confirmingTools = false;
     sending = true;
     try {
-      const tools = pick && chosen.length ? newGoalTools(chosen, pick.available) : [];
-      const made = await createGoal(tools.length ? { ...createBody(form), tools } : createBody(form));
+      const made = await createGoal(body());
       onCreated(made.ref);
     } catch (err) {
       refused = createRefusalText(err);
@@ -139,6 +166,34 @@
       <GoalTools {pick} bind:chosen disabled={sending} />
     {/if}
 
+    {#if cmd}
+      <div class="commands" role="group" aria-labelledby="goal-new-commands-l">
+        <label class="check" id="goal-new-commands-l">
+          <input id="goal-new-commands" type="checkbox" bind:checked={commandsOn} disabled={sending}
+            aria-controls="goal-new-commands-body" />
+          {cmd.words.checkbox}
+        </label>
+        {#if commandsOn}
+          <div class="commands-body" id="goal-new-commands-body">
+            <p class="description" id="goal-new-commands-desc">{cmd.words.description}</p>
+            <div class="field narrow">
+              <label for="goal-new-hours">{cmd.words.hours}</label>
+              <input id="goal-new-hours" inputmode="numeric" autocomplete="off" bind:value={commandsHours} disabled={sending}
+                aria-describedby="goal-new-hours-hint" />
+              <span class="hint" id="goal-new-hours-hint">1 to {most}</span>
+            </div>
+            <div class="field">
+              <label for="goal-new-sentence">Type this sentence to allow it</label>
+              {#if sentence}<p class="sentence" id="goal-new-sentence-text">{sentence}</p>{/if}
+              <input id="goal-new-sentence" bind:value={commandsTyped} autocomplete="off" spellcheck="false" disabled={sending}
+                aria-describedby="goal-new-sentence-text goal-new-commands-desc" />
+            </div>
+            {#if commandsWrong}<p class="hint" role="status">{commandsWrong}</p>{/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     <div class="field">
       <label for="goal-new-channel">Channel{options.has_default_channel ? ' (optional)' : ''}</label>
       <input id="goal-new-channel" bind:value={form.origin_channel} autocomplete="off" spellcheck="false" maxlength={options.bounds?.channel} disabled={sending}
@@ -154,14 +209,14 @@
         <p id="goal-new-tools-q" tabindex="-1">{pick.confirm}</p>
         <ul class="chosen">{#each chosenRows as row (row.tool)}<li><span class="name">{row.label}</span> {row.says}</li>{/each}</ul>
         <div class="actions">
-          <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending} onclick={() => void send()}>Yes, create</Button>
+          <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending || commandsWrong !== null} onclick={() => void send()}>Yes, create</Button>
           <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending}
             onclick={() => { confirmingTools = false; }}>No</Button>
         </div>
       </div>
     {:else}
       <div class="actions">
-        <Button type="submit" id="goal-new-submit" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending}>
+        <Button type="submit" id="goal-new-submit" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={sending || commandsWrong !== null}>
           {sending ? 'Creating…' : 'Create draft'}
         </Button>
       </div>
@@ -210,6 +265,13 @@
   .confirm .actions { margin-top: 0.5rem; }
   .chosen { margin: 0.375rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; overflow-wrap: anywhere; }
   .chosen .name { font-family: var(--font-mono); font-weight: 600; }
+  .commands { display: flex; flex-direction: column; gap: 0.625rem; max-width: 36rem; padding: 0.75rem 0.875rem;
+    border: 1px solid var(--border); border-radius: var(--card-radius-sm); }
+  .commands .check { grid-column: auto; }
+  .commands-body { display: flex; flex-direction: column; gap: 0.75rem; }
+  .description { margin: 0; font-size: 0.8125rem; line-height: 1.5; color: var(--warn-text); overflow-wrap: anywhere; }
+  .field.narrow { max-width: 12rem; }
+  .sentence { margin: 0; font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
   @media (max-width: 768px) {
     .cards, .limits { grid-template-columns: minmax(0, 1fr); }
     .size, .check, .disclose { min-height: 2.75rem; }
