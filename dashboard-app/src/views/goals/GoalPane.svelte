@@ -51,6 +51,8 @@
   let buttons = $derived(goal.actions.filter((a) => a !== 'note' && a !== 'contained'));
   let modeWords = $derived(options.commands?.words ?? null);
   let modeShown = $derived(modeWords !== null || goal.commands.state !== 'off');
+  // The note names Stop now: shown where Stop now is offered (a goal that can have a session), not on a draft.
+  let returnNote = $derived(modeWords !== null && goal.actions.includes('stop'));
   /** The action whose result line is shown: Return to contained's is shown in its own card. */
   let resultOf = $state<Action | null>(null);
   let openSteps = $derived(goal.plan.filter((s) => !closed(s)));
@@ -307,11 +309,11 @@
       {#if goal.actions.includes('contained')}
         <div class="actions">
           <Button id={buttonId('contained')} data-action="contained" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
-            disabled={busy !== null} aria-describedby="goal-n.{goal.ref}" onclick={() => void run('contained')}>
+            disabled={busy !== null} aria-describedby={returnNote ? `goal-n.${goal.ref}` : undefined} onclick={() => void run('contained')}>
             {busy === 'contained' ? 'Working' : (modeWords?.return ?? ACTION_TEXT.contained.label)}
           </Button>
         </div>
-        {#if modeWords}<p class="hint" id="goal-n.{goal.ref}">{modeWords.return_note}</p>{/if}
+        {#if returnNote && modeWords}<p class="hint" id="goal-n.{goal.ref}">{modeWords.return_note}</p>{/if}
       {/if}
       {#if resultOf === 'contained'}{@render line(result)}{/if}
     </div>
