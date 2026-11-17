@@ -321,9 +321,12 @@ async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_
     chain = GoalChain(w.db, w.env.settings, w.store)
     told = charter.COMMANDS_LINE.split("{until}")[0]  # the line, whatever its end
     assert charter.commands_line(goal.mode_until) in (await chain.turn_context(root.id)).block
-    async with w.db.session() as s:  # the end has come by the database's clock, before any sweep
+    async with w.db.session() as s:  # approved two hours ago, its end has come by the database's clock: no sweep yet
         await s.execute(
-            text("UPDATE brain.goals SET mode_until = clock_timestamp() - interval '1 second' WHERE id = :i"),
+            text(
+                "UPDATE brain.goals SET approved_at = clock_timestamp() - interval '2 hours', "
+                "mode_until = clock_timestamp() - interval '1 second' WHERE id = :i"
+            ),
             {"i": goal.id},
         )
         await s.commit()
