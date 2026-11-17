@@ -12,8 +12,13 @@ import pytest
 from goal_grants_baseline import SAMPLES, TOOLS, contexts, load, workspace
 
 from nous.api import tool_classes, tool_policy
-from nous.api.builtin_tools import _BASH_SCHEMA, _MAX_BASH_TIMEOUT
-from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT, CONTEXT_KINDS, ExecutionContext
+from nous.api.builtin_tools import _BASH_SCHEMA, _DEFAULT_BASH_TIMEOUT, _MAX_BASH_TIMEOUT
+from nous.api.execution_context import (
+    BACKGROUND_BASH_TIMEOUT,
+    CONTEXT_KINDS,
+    SHORT_BACKGROUND_KINDS,
+    ExecutionContext,
+)
 from nous.api.tool_classes import TOOL_CLASSES
 
 ROOT = uuid.UUID("00000000-0000-4000-8000-0000000000a1")
@@ -177,9 +182,33 @@ def test_the_description_gets_the_note_when_it_has_no_lineage_sentence():
     assert tool_policy.commands_bash_description("", build_commands=True) == tool_policy.COMMANDS_BASH_NOTE
 
 
+def timeouts_sentence() -> str:
+    """The bash tool's own timeouts in a goal's task, from its constants."""
+    return (
+        f"One call waits at most {_MAX_BASH_TIMEOUT} seconds. With no timeout given it waits {BACKGROUND_BASH_TIMEOUT} "
+        f"seconds, or {_DEFAULT_BASH_TIMEOUT} in a task whose own time limit is {BACKGROUND_BASH_TIMEOUT} seconds or "
+        "less. Run longer work detached."
+    )
+
+
 def test_the_note_names_the_bash_tools_own_timeouts():
-    note = tool_policy.COMMANDS_BASH_NOTE
-    assert f"at most {_MAX_BASH_TIMEOUT} seconds ({BACKGROUND_BASH_TIMEOUT} if you give no timeout)" in note
+    assert timeouts_sentence() in tool_policy.COMMANDS_BASH_NOTE
+
+
+@pytest.mark.parametrize("kind", sorted(tool_policy.COMMANDS_KINDS))
+def test_a_goal_tasks_default_wait_is_set_by_its_own_time_limit_as_the_sentence_says(kind):
+    def task(turn_timeout):
+        return ExecutionContext(
+            kind=kind,
+            authority="internal_only",
+            intention_id=uuid.uuid4(),
+            root_intention_id=uuid.uuid4(),
+            turn_timeout=turn_timeout,
+        )
+
+    assert task(None).is_background and kind not in SHORT_BACKGROUND_KINDS
+    assert not task(None).is_short_turn and not task(BACKGROUND_BASH_TIMEOUT + 1).is_short_turn  # 120 s
+    assert task(BACKGROUND_BASH_TIMEOUT).is_short_turn  # 30 s
 
 
 def test_every_classified_tool_is_walked():

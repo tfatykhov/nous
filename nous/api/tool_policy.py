@@ -1295,9 +1295,10 @@ def lineage_bash_description(*, build_commands: bool) -> str:
 
 # What bash's description says in a task of a goal that may run any command, in place of the lineage shell's sentence.
 COMMANDS_BASH_NOTE = (
-    "In this goal's tasks bash runs any command, until the goal's end time. One call waits at most 300 seconds (120 "
-    "if you give no timeout): run longer work detached. If a task needs a token, fetch it and use it in the same "
-    "task: text passed to another task is stored."
+    "In this goal's tasks bash runs any command, until the goal's end time. One call waits at most 300 seconds. With "
+    "no timeout given it waits 120 seconds, or 30 in a task whose own time limit is 120 seconds or less. Run longer "
+    "work detached. If a task needs a token, fetch it and use it in the same task: text passed to another task is "
+    "stored."
 )
 
 

@@ -81,9 +81,10 @@ TOOLS_SECTION_CHARS = 1_500  # the section's list at most; what it drops first i
 # A goal that may run any command: what its session's task and its decision turns are told while the mode holds.
 COMMANDS_LINE = (
     "The owner allowed this goal's tasks to run any command until {until} UTC. The bash tool's description lists "
-    "allowlisted commands; that does not apply to this goal's tasks. One call waits at most 300 seconds (120 if you "
-    "give no timeout): run longer work detached. If a task needs a token, fetch it and use it in the same task: text "
-    "passed to another task is stored. Do the work in tasks."
+    "allowlisted commands; that does not apply to this goal's tasks. One call waits at most 300 seconds. With no "
+    "timeout given it waits 120 seconds, or 30 in a task whose own time limit is 120 seconds or less. Run longer work "
+    "detached. If a task needs a token, fetch it and use it in the same task: text passed to another task is stored. "
+    "Do the work in tasks."
 )
 
 

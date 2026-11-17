@@ -15,9 +15,8 @@ import pytest
 from f099_support import env_factory  # noqa: F401
 from goals_support import reset_goal_report_channel  # noqa: F401
 from sqlalchemy import select, text, update
+from test_goal_commands_policy import timeouts_sentence
 
-from nous.api.builtin_tools import _MAX_BASH_TIMEOUT
-from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.config import Settings
 from nous.goals import charter
 from nous.goals import commands as C
@@ -337,9 +336,7 @@ async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_
 
 
 def test_the_line_names_the_bash_tools_own_timeouts():
-    assert f"at most {_MAX_BASH_TIMEOUT} seconds ({BACKGROUND_BASH_TIMEOUT} if you give no timeout)" in (
-        charter.COMMANDS_LINE
-    )
+    assert timeouts_sentence() in charter.COMMANDS_LINE
 
 
 # ---- a restart, and a start after the end -----------------------------------------------------------------------
