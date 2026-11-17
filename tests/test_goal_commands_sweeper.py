@@ -17,6 +17,8 @@ from f099_support import env_factory  # noqa: F401
 from goals_support import reset_goal_report_channel  # noqa: F401
 from sqlalchemy import select, text, update
 
+from nous.autonomy import tool_guard
+from nous.autonomy.tool_guard import ToolGuard
 from nous.config import Settings
 from nous.goals import charter
 from nous.goals import commands as C
@@ -263,6 +265,7 @@ async def test_a_sweep_that_fails_fails_neither_the_start_nor_the_tick(db, monke
 
 
 async def test_the_line_is_given_only_while_the_mode_holds(db):
+    tool_guard.install(ToolGuard())
     store, _ = _world(db)
     goal = await _goal(store)
     now = goal.approved_at
@@ -301,6 +304,7 @@ async def test_the_driver_tells_a_new_session_while_the_mode_holds(db, monkeypat
         return None, task
 
     monkeypatch.setattr("nous.goals.driver.gate_subtask_task", ungated)
+    tool_guard.install(ToolGuard())
     driver = GoalDriver(db, store._settings, None, store, None, modes=sweeper)
     goal = await _goal(store)
     _rejection, task = await driver._gated_task(goal)
@@ -310,6 +314,38 @@ async def test_the_driver_tells_a_new_session_while_the_mode_holds(db, monkeypat
     assert "run any command" not in task
 
 
+TOLD = charter.COMMANDS_LINE.split("{until}")[0]  # the line, whatever its end
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        None,
+        ToolGuard(locked=frozenset({"bash"})),
+        ToolGuard(denied=frozenset({"bash"})),
+        ToolGuard(hold_all=True),
+    ],
+    ids=["no_guard", "host_lock", "owner_not_allowed", "settings_not_read"],
+)
+async def test_while_the_guard_holds_bash_a_new_session_is_not_told_the_line(db, monkeypatch, guard):
+    store, sweeper = _world(db)
+
+    async def ungated(_heart, task):
+        return None, task
+
+    monkeypatch.setattr("nous.goals.driver.gate_subtask_task", ungated)
+    driver = GoalDriver(db, store._settings, None, store, None, modes=sweeper)
+    goal = await _goal(store)
+    tool_guard.install(guard)
+    assert C.not_usable(goal, now=goal.approved_at, settings=store._settings) is not None  # the page says why
+    assert C.charter_until(goal, now=goal.approved_at, settings=store._settings) is None
+    _rejection, task = await driver._gated_task(goal)
+    assert TOLD not in task
+    tool_guard.install(ToolGuard())
+    _rejection, task = await driver._gated_task(goal)
+    assert charter.commands_line(goal.mode_until) in task
+
+
 async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_end(env_factory):  # noqa: F811
     from test_goals_driver import _active, _started, _world
 
@@ -317,9 +353,15 @@ async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_
     commands = C.CommandsRequest(5, C.confirm_sentence(5))
     goal = await _active(w, proposed_by="owner", commands=commands, proof="owner")
     assert goal.mode == C.MODE_COMMANDS
+    tool_guard.install(ToolGuard())
     root, _session = await _started(w, goal)
     chain = GoalChain(w.db, w.env.settings, w.store)
-    told = charter.COMMANDS_LINE.split("{until}")[0]  # the line, whatever its end
+    told = TOLD
+    assert charter.commands_line(goal.mode_until) in (await chain.turn_context(root.id)).block
+    for held in (ToolGuard(locked=frozenset({"bash"})), ToolGuard(denied=frozenset({"bash"}))):
+        tool_guard.install(held)  # a host lock, the owner's Not allowed: as the runner decides
+        assert told not in (await chain.turn_context(root.id)).block
+    tool_guard.install(ToolGuard())
     assert charter.commands_line(goal.mode_until) in (await chain.turn_context(root.id)).block
     async with w.db.session() as s:  # approved two hours ago, its end has come by the database's clock: no sweep yet
         await s.execute(
