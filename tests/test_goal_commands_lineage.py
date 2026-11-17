@@ -228,7 +228,13 @@ async def _shell_turn(make_env, tmp_path, *, which: str) -> str:
         kind=kind, authority="internal_only", session_id="subtask-90", intention_id=uuid.uuid4(), root_intention_id=root
     )
     with patch.dict(os.environ, SYNTHETIC_ENV, clear=True):
-        await env.runner.run_turn("subtask-90", "list the names", is_background=True, is_subtask=True, context=ctx)
+        await env.runner.run_turn(
+            "subtask-90",
+            "list the names",
+            is_background=kind != "interactive",
+            is_subtask=kind in ("subtask", "dag_node"),
+            context=ctx,
+        )
     return _tool_result_text(env.model.calls[1])
 
 
