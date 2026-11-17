@@ -60,6 +60,10 @@
 /tests/test_goal_grant*.py @tfatykhov
 /tests/goal_grants_baseline.py @tfatykhov
 /tests/fixtures/goal_grants_parity_baseline.json @tfatykhov
+# A goal whose tasks may run any command: which turns, the words, and the ends of the mode
+/nous/goals/commands.py @tfatykhov
+/nous/goals/modes.py @tfatykhov
+/tests/test_goal_commands*.py @tfatykhov
 
 # Evaluation sets, their loaders and generators
 /nous_eval/** @tfatykhov
