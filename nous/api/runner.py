@@ -39,7 +39,7 @@ from nous.api.attachments import (
     sanitize_blocks_for_storage,
     validate_attachment,
 )
-from nous.api.builtin_tools import ABSENT, drop_write_fence, register_write_fence
+from nous.api.builtin_tools import ABSENT, bash_waits, drop_write_fence, register_write_fence
 from nous.api.cache_optimizer import CacheBreakDetector
 from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
@@ -896,12 +896,14 @@ class AgentRunner:
             tools = [t for t in tools if not guard.denies(ctx.kind, ctx.session_id, t["name"])]
         if commands:
             # An offered copy, as add_reason_field makes: the dispatcher's schema and its per-frame cache keep theirs.
+            # The waits it states are the ones dispatch runs this turn's bash calls with (``_long_timeout``).
             build_commands = self._settings.f099_lineage_build_commands
+            most, default = bash_waits(long_timeout=not ctx.is_short_turn)
             tools = [
                 {
                     **t,
                     "description": tool_policy.commands_bash_description(
-                        t.get("description", ""), build_commands=build_commands
+                        t.get("description", ""), build_commands=build_commands, most=most, default=default
                     ),
                 }
                 if t["name"] == tool_policy.COMMANDS_TOOL

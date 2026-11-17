@@ -1293,23 +1293,30 @@ def lineage_bash_description(*, build_commands: bool) -> str:
     )
 
 
-# What bash's description says in a task of a goal that may run any command, in place of the lineage shell's sentence.
-COMMANDS_BASH_NOTE = (
-    "In this goal's tasks bash runs any command, until the goal's end time. One call waits at most 300 seconds. With "
-    "no timeout given it waits 120 seconds, or 30 in a task whose own time limit is 120 seconds or less. Run longer "
-    "work detached. If a task needs a token, fetch it and use it in the same task: text passed to another task is "
-    "stored."
+# What bash's description says in a task of a goal that may run any command, in place of the lineage shell's sentence:
+# its first sentence, then the waits of that turn's bash calls (``commands_bash_note``).
+COMMANDS_BASH_LEAD = "In this goal's tasks bash runs any command, until the goal's end time."
+COMMANDS_BASH_NOTE = COMMANDS_BASH_LEAD + (
+    " One call waits at most {most} seconds. With no timeout given it waits {default} seconds. Run longer work "
+    "detached. If a task needs a token, fetch it and use it in the same task: text passed to another task is stored."
 )
 
 
-def commands_bash_description(description: str, *, build_commands: bool) -> str:
+def commands_bash_note(*, most: int, default: int) -> str:
+    """``COMMANDS_BASH_NOTE`` with the turn's waits: ``most`` and ``default`` are ``builtin_tools.bash_waits`` for
+    the turn, the values its bash calls are run with."""
+    return COMMANDS_BASH_NOTE.format(most=most, default=default)
+
+
+def commands_bash_description(description: str, *, build_commands: bool, most: int, default: int) -> str:
     """bash's ``description`` as a task of a goal that may run any command is offered it: the lineage shell's
-    sentence (``lineage_bash_description``) replaced by ``COMMANDS_BASH_NOTE``, or the note appended when the
+    sentence (``lineage_bash_description``) replaced by ``commands_bash_note``, or the note appended when the
     description has no such sentence."""
+    note = commands_bash_note(most=most, default=default)
     lineage = lineage_bash_description(build_commands=build_commands)
     if lineage in description:
-        return description.replace(lineage, COMMANDS_BASH_NOTE)
-    return f"{description} {COMMANDS_BASH_NOTE}" if description else COMMANDS_BASH_NOTE
+        return description.replace(lineage, note)
+    return f"{description} {note}" if description else note
 
 
 def lineage_write_file_description(workspace_dir: str, *, lineage_shell: bool, extra_write_dirs: Sequence[str]) -> str:

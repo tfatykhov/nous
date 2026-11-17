@@ -8,6 +8,7 @@ the decision turn carry the line while the mode holds and are as before otherwis
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import timedelta
 
@@ -15,7 +16,6 @@ import pytest
 from f099_support import env_factory  # noqa: F401
 from goals_support import reset_goal_report_channel  # noqa: F401
 from sqlalchemy import select, text, update
-from test_goal_commands_policy import timeouts_sentence
 
 from nous.config import Settings
 from nous.goals import charter
@@ -338,8 +338,11 @@ async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_
     )
 
 
-def test_the_line_names_the_bash_tools_own_timeouts():
-    assert timeouts_sentence() in charter.COMMANDS_LINE
+def test_the_line_names_no_wait_and_points_at_the_tasks_bash_description():
+    assert not re.search(r"\d", charter.COMMANDS_LINE)  # a task's bash description says its own waits
+    assert "In a task, bash's description says how long one call waits: run longer work detached." in (
+        charter.COMMANDS_LINE
+    )
 
 
 # ---- a restart, and a start after the end -----------------------------------------------------------------------

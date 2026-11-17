@@ -12,13 +12,8 @@ import pytest
 from goal_grants_baseline import SAMPLES, TOOLS, contexts, load, workspace
 
 from nous.api import tool_classes, tool_policy
-from nous.api.builtin_tools import _BASH_SCHEMA, _DEFAULT_BASH_TIMEOUT, _MAX_BASH_TIMEOUT
-from nous.api.execution_context import (
-    BACKGROUND_BASH_TIMEOUT,
-    CONTEXT_KINDS,
-    SHORT_BACKGROUND_KINDS,
-    ExecutionContext,
-)
+from nous.api.builtin_tools import _BASH_SCHEMA, _DEFAULT_BASH_TIMEOUT, _MAX_BASH_TIMEOUT, bash_waits
+from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT, CONTEXT_KINDS, ExecutionContext
 from nous.api.tool_classes import TOOL_CLASSES
 
 ROOT = uuid.UUID("00000000-0000-4000-8000-0000000000a1")
@@ -169,46 +164,30 @@ def test_no_bash_command_is_rated_beyond_a_tasks_levels():
 def test_the_description_swaps_the_lineage_sentence_for_the_note(build_commands):
     lineage = tool_policy.lineage_bash_description(build_commands=build_commands)
     described = f"{_BASH_SCHEMA['description']} {lineage}"
-    swapped = tool_policy.commands_bash_description(described, build_commands=build_commands)
-    assert swapped == f"{_BASH_SCHEMA['description']} {tool_policy.COMMANDS_BASH_NOTE}"
+    swapped = tool_policy.commands_bash_description(described, build_commands=build_commands, most=300, default=120)
+    assert swapped == f"{_BASH_SCHEMA['description']} {tool_policy.commands_bash_note(most=300, default=120)}"
     assert lineage not in swapped
 
 
 def test_the_description_gets_the_note_when_it_has_no_lineage_sentence():
     plain = _BASH_SCHEMA["description"]
-    assert (
-        tool_policy.commands_bash_description(plain, build_commands=True) == f"{plain} {tool_policy.COMMANDS_BASH_NOTE}"
+    note = tool_policy.commands_bash_note(most=300, default=30)
+    assert tool_policy.commands_bash_description(plain, build_commands=True, most=300, default=30) == f"{plain} {note}"
+    assert tool_policy.commands_bash_description("", build_commands=True, most=300, default=30) == note
+
+
+def test_the_note_states_the_waits_it_is_given():
+    assert tool_policy.commands_bash_note(most=300, default=30) == (
+        "In this goal's tasks bash runs any command, until the goal's end time. One call waits at most 300 seconds. "
+        "With no timeout given it waits 30 seconds. Run longer work detached. If a task needs a token, fetch it and "
+        "use it in the same task: text passed to another task is stored."
     )
-    assert tool_policy.commands_bash_description("", build_commands=True) == tool_policy.COMMANDS_BASH_NOTE
+    assert tool_policy.commands_bash_note(most=300, default=30).startswith(tool_policy.COMMANDS_BASH_LEAD)
 
 
-def timeouts_sentence() -> str:
-    """The bash tool's own timeouts in a goal's task, from its constants."""
-    return (
-        f"One call waits at most {_MAX_BASH_TIMEOUT} seconds. With no timeout given it waits {BACKGROUND_BASH_TIMEOUT} "
-        f"seconds, or {_DEFAULT_BASH_TIMEOUT} in a task whose own time limit is {BACKGROUND_BASH_TIMEOUT} seconds or "
-        "less. Run longer work detached."
-    )
-
-
-def test_the_note_names_the_bash_tools_own_timeouts():
-    assert timeouts_sentence() in tool_policy.COMMANDS_BASH_NOTE
-
-
-@pytest.mark.parametrize("kind", sorted(tool_policy.COMMANDS_KINDS))
-def test_a_goal_tasks_default_wait_is_set_by_its_own_time_limit_as_the_sentence_says(kind):
-    def task(turn_timeout):
-        return ExecutionContext(
-            kind=kind,
-            authority="internal_only",
-            intention_id=uuid.uuid4(),
-            root_intention_id=uuid.uuid4(),
-            turn_timeout=turn_timeout,
-        )
-
-    assert task(None).is_background and kind not in SHORT_BACKGROUND_KINDS
-    assert not task(None).is_short_turn and not task(BACKGROUND_BASH_TIMEOUT + 1).is_short_turn  # 120 s
-    assert task(BACKGROUND_BASH_TIMEOUT).is_short_turn  # 30 s
+def test_bash_waits_are_the_bash_tools_constants():
+    assert bash_waits(long_timeout=True) == (_MAX_BASH_TIMEOUT, BACKGROUND_BASH_TIMEOUT)
+    assert bash_waits(long_timeout=False) == (_MAX_BASH_TIMEOUT, _DEFAULT_BASH_TIMEOUT)
 
 
 def test_every_classified_tool_is_walked():

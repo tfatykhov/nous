@@ -99,9 +99,9 @@ async def test_the_first_task_of_a_session(env_factory, in_mode):  # noqa: F811
     description = _bash_description(runner, first)
     refusal = runner._authorize_tool_call(first, "bash", frozenset({"bash"}), "s", REFUSED)
     if in_mode:
-        assert tool_policy.COMMANDS_BASH_NOTE in description and refusal is None
+        assert tool_policy.COMMANDS_BASH_LEAD in description and refusal is None
     else:
-        assert (description is None or tool_policy.COMMANDS_BASH_NOTE not in description) and refusal is not None
+        assert (description is None or tool_policy.COMMANDS_BASH_LEAD not in description) and refusal is not None
 
 
 @pytest.mark.parametrize("in_mode", [True, False])
@@ -133,10 +133,10 @@ async def test_a_task_a_decision_turn_spawns(env_factory, in_mode):  # noqa: F81
     assert task.intention_id != root.id
     description = _bash_description(runner, task)
     if in_mode:
-        assert tool_policy.COMMANDS_BASH_NOTE in description
+        assert tool_policy.COMMANDS_BASH_LEAD in description
         assert runner._authorize_tool_call(task, "bash", frozenset({"bash"}), "s", REFUSED) is None
     else:
-        assert description is None or tool_policy.COMMANDS_BASH_NOTE not in description
+        assert description is None or tool_policy.COMMANDS_BASH_LEAD not in description
     # The decision turn itself stays narrowed.
     assert runner._authorize_tool_call(decision, "bash", frozenset({"bash"}), "s", REFUSED) is not None
 
@@ -166,10 +166,10 @@ async def test_a_workflow_step_the_orchestrator_launches(env_factory, in_mode): 
     assert (step.kind, step.authority, step.root_intention_id) == ("dag_node", "internal_only", root.id)
     description = _bash_description(runner, step)
     if in_mode:
-        assert tool_policy.COMMANDS_BASH_NOTE in description
+        assert tool_policy.COMMANDS_BASH_LEAD in description
         assert runner._authorize_tool_call(step, "bash", frozenset({"bash"}), "s", REFUSED) is None
     else:
-        assert description is None or tool_policy.COMMANDS_BASH_NOTE not in description
+        assert description is None or tool_policy.COMMANDS_BASH_LEAD not in description
 
 
 # ---- a real command in a real turn (POSIX) ----------------------------------------------------------------------
