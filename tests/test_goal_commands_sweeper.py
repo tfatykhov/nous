@@ -12,6 +12,7 @@ import uuid
 from datetime import timedelta
 
 import pytest
+from f099_support import env_factory  # noqa: F401
 from goals_support import reset_goal_report_channel  # noqa: F401
 from sqlalchemy import select, text, update
 
@@ -20,6 +21,7 @@ from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.config import Settings
 from nous.goals import charter
 from nous.goals import commands as C
+from nous.goals.chain import GoalChain
 from nous.goals.driver import GoalDriver
 from nous.goals.modes import ModeSweeper
 from nous.goals.store import GoalStore
@@ -307,6 +309,31 @@ async def test_the_driver_tells_a_new_session_while_the_mode_holds(db, monkeypat
     contained = await _goal(store, hours=None)
     _rejection, task = await driver._gated_task(contained)
     assert "run any command" not in task
+
+
+async def test_a_decision_turn_of_a_goal_in_the_mode_carries_the_line_until_the_end(env_factory):  # noqa: F811
+    from test_goals_driver import _active, _started, _world
+
+    w = await _world(env_factory, **ON)
+    commands = C.CommandsRequest(5, C.confirm_sentence(5))
+    goal = await _active(w, proposed_by="owner", commands=commands, proof="owner")
+    assert goal.mode == C.MODE_COMMANDS
+    root, _session = await _started(w, goal)
+    chain = GoalChain(w.db, w.env.settings, w.store)
+    told = charter.COMMANDS_LINE.split("{until}")[0]  # the line, whatever its end
+    assert charter.commands_line(goal.mode_until) in (await chain.turn_context(root.id)).block
+    async with w.db.session() as s:  # the end has come by the database's clock, before any sweep
+        await s.execute(
+            text("UPDATE brain.goals SET mode_until = clock_timestamp() - interval '1 second' WHERE id = :i"),
+            {"i": goal.id},
+        )
+        await s.commit()
+    assert told not in (await chain.turn_context(root.id)).block
+    other = await _world(env_factory, **ON)  # a world of its own: the limit on open sessions holds a second start
+    contained_root, _session = await _started(other, await _active(other))
+    assert (
+        told not in (await GoalChain(other.db, other.env.settings, other.store).turn_context(contained_root.id)).block
+    )
 
 
 def test_the_line_names_the_bash_tools_own_timeouts():

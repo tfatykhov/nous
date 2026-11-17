@@ -158,6 +158,20 @@ async def test_approval_starts_the_time_and_the_banner_lists_the_goal(db):
     assert one["says"].startswith(f"{created['ref']} may run any command until ") and one["says"].endswith(" UTC.")
 
 
+async def test_a_goal_the_owner_paused_keeps_its_mode_and_is_not_on_the_banner(db):
+    env = _env(db)
+    created = (await _create(env, hours=5)).json()
+    await env.call("POST", f"/goals/{created['ref']}/approve", headers={**PROXY, **JSON})
+    assert [one["ref"] for one in (await env.call("GET", "/goals/commands")).json()["active"]] == [created["ref"]]
+    paused = await env.call("POST", f"/goals/{created['ref']}/pause", headers={**PROXY, **JSON})
+    assert paused.status_code == 200 and paused.json()["state"] == "paused"
+    goal = await env.store.get(uuid.UUID(created["id"]))
+    assert goal.mode == C.MODE_COMMANDS and goal.mode_until is not None  # the pause keeps the mode and its end
+    assert (await env.call("GET", "/goals/commands")).json()["active"] == []
+    await env.call("POST", f"/goals/{created['ref']}/resume", headers={**PROXY, **JSON})
+    assert [one["ref"] for one in (await env.call("GET", "/goals/commands")).json()["active"]] == [created["ref"]]
+
+
 async def test_a_second_approval_into_the_mode_is_refused_in_the_stores_words(db):
     env = _env(db)
     first, second = (await _create(env)).json(), (await _create(env)).json()
