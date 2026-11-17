@@ -545,9 +545,9 @@ async def test_git_push_keeps_the_code_host_token_only_under_the_lift(world):
     assert "GH_REPO" not in runner["env"] and "GITHUB_TOKEN" in runner["env"]
 
 
-async def test_an_end_between_the_authorization_and_the_dispatch_gives_the_command_the_lineage_environment(world):
-    """The dispatcher asks the hook again: once the end has passed, a command already authorized gets what any
-    lineage command gets (a build command: the build environment)."""
+async def test_the_dispatcher_reads_the_hook_when_it_dispatches(world):
+    """The dispatcher reads the commands hook when it dispatches a bash call: after the entry's end, a build command
+    is started with the build environment."""
     w = world
     ctx = _task(w)
     assert w.runner._authorize_tool_call(ctx, "bash", frozenset({"bash"}), "s", {"command": "git push"}) is None
@@ -556,9 +556,9 @@ async def test_an_end_between_the_authorization_and_the_dispatch_gives_the_comma
     assert "GITHUB_TOKEN" not in started["env"]
 
 
-async def test_a_check_made_through_the_tool_carries_no_stamp():
-    """Why the standing-item tools stay out: heartbeat_check_create passes the loader no metadata, so the check it
-    makes has no lineage stamp, and a turn with no stamp is the owner's."""
+async def test_heartbeat_check_create_passes_the_loader_no_metadata():
+    """heartbeat_check_create calls the loader's create_check with no ``metadata`` argument, and
+    ``lineage_from_stamp(None)`` gives the owner's authority."""
     from nous.api.execution_context import lineage_from_stamp
 
     loader = MagicMock()
