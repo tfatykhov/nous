@@ -342,7 +342,7 @@ async def test_the_end_is_kept_on_the_injected_monotonic_clock(db, monkeypatch):
     entry = view.commands_entry(root)
     clock.now = entry.expires_at - 0.5
     assert decide_commands(view, _task(root)) == entry
-    monkeypatch.setattr(time, "time", lambda: 10**12)  # the wall clock jumps: nothing changes
+    monkeypatch.setattr(time, "time", lambda: 10**12)  # time.time jumps: the view reads only its injected clocks
     assert decide_commands(view, _task(root)) == entry
     clock.now = entry.expires_at
     assert decide_commands(view, _task(root)) is None
@@ -457,3 +457,55 @@ def test_an_entry_is_frozen():
     entry = CommandsEntry(uuid.uuid4(), 1, 5.0)
     with pytest.raises(AttributeError):
         entry.expires_at = 10.0  # type: ignore[misc]
+
+
+# ---- a host suspend: the wall clock moves, the monotonic clock does not ------------------------------------------
+
+
+async def _suspended_world(db):
+    store, _view, _clock = await _world(db)
+    mono, wall = Clock(), Clock()
+    wall.now = 1_700_000_000.0
+    view = GoalToolGrants(db, _settings(store.agent_id), clock=mono, wall_clock=wall, commands=True)
+    goal = await _goal(store)
+    root = await _session(db, store, goal)
+    await _mode(db, goal.id)
+    assert await view.refresh()
+    return store, view, mono, wall, goal, root
+
+
+async def test_after_a_suspend_the_mode_lifts_nothing_until_the_next_full_read(db):
+    _store, view, mono, wall, goal, root = await _suspended_world(db)
+    max_age = max(3 * 60, G.MIN_FRESH_SECONDS)
+    entry = view.commands_entry(root)
+    assert decide_commands(view, _task(root)) == entry
+    wall.now += max_age  # within the age: as before
+    assert decide_commands(view, _task(root)) == entry
+    wall.now += 1  # the host slept: the monotonic clock did not move, the entry's end has not come by it
+    assert view.fresh() and mono.now < entry.expires_at
+    assert decide_commands(view, _task(root)) is None
+    assert await view.refresh_goal(goal.id)  # a partial read renews nothing
+    assert decide_commands(view, _task(root)) is None
+    assert await view.refresh()
+    assert decide_commands(view, _task(root)) is not None
+
+
+async def test_a_wall_clock_set_back_lifts_nothing_until_the_next_full_read(db):
+    _store, view, _mono, wall, _goal_row, root = await _suspended_world(db)
+    wall.now -= 1
+    assert decide_commands(view, _task(root)) is None
+    assert await view.refresh()
+    assert decide_commands(view, _task(root)) is not None
+
+
+async def test_a_failed_read_leaves_the_wall_clock_unread(db):
+    _store, view, _mono, _wall, _goal_row, root = await _suspended_world(db)
+
+    class Broken:
+        def session(self):
+            raise ConnectionError("down")
+
+    good, view._db = view._db, Broken()
+    assert await view.refresh() is False
+    assert view._wall_loaded_at is None and not view.commands_fresh()
+    view._db = good

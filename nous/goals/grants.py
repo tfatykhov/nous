@@ -283,6 +283,7 @@ class GoalToolGrants:
         settings: Any,
         *,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         commands: bool = False,
     ) -> None:
         self._db = database
@@ -290,6 +291,10 @@ class GoalToolGrants:
         self._max_age = float(max(3 * int(settings.goals_tick_seconds), MIN_FRESH_SECONDS))
         self._tick_seconds = float(settings.goals_tick_seconds)
         self._clock = clock
+        # The wall clock of the last full read: an entry's end is kept on the monotonic clock, which a suspended host
+        # does not advance, so the commands hook also asks this one (``commands_fresh``).
+        self._wall_clock = wall_clock
+        self._wall_loaded_at: float | None = None
         self._lock = asyncio.Lock()
         self._by_root: dict[UUID, dict[str, Grant]] = {}
         self._commands_on = commands
@@ -308,6 +313,13 @@ class GoalToolGrants:
     def fresh(self) -> bool:
         """Whether the view was fully read within its age, by the injected clock."""
         return self._loaded_at is not None and self._clock() - self._loaded_at <= self._max_age
+
+    def commands_fresh(self) -> bool:
+        """``fresh``, and the last full read within the same age by the wall clock as well: after a host suspend the
+        monotonic clock has not moved, and the commands map is used again only after the next full read."""
+        if not self.fresh() or self._wall_loaded_at is None:
+            return False
+        return 0 <= self._wall_clock() - self._wall_loaded_at <= self._max_age
 
     def lifts(self, ctx: ExecutionContext, tool: str) -> bool:
         """``decide``'s answer, as the runner's hook takes it."""
@@ -441,6 +453,7 @@ class GoalToolGrants:
         self._by_root = {}
         self._commands = {}
         self._loaded_at = None
+        self._wall_loaded_at = None
         logger.warning("F115: the goals' tool grants could not be read; none apply (%s)", type(exc).__name__)
 
     async def _refresh(self, *, root_id: UUID | None = None, goal_id: UUID | None = None) -> bool:
@@ -454,6 +467,7 @@ class GoalToolGrants:
                 self._by_root = found
                 self._commands = commands
                 self._loaded_at = self._clock()
+                self._wall_loaded_at = self._wall_clock()
                 self._used = {key for key in self._used if key[0] in found}
                 return True
             kept = {
