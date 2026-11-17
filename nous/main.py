@@ -655,6 +655,7 @@ def _build_goals(
 
         commands = settings.goal_commands_enabled and dispatcher is not None
         tool_grants = GoalToolGrants(database, settings, commands=commands)
+        tool_grants.hold_commands()  # until the driver's start has reconciled the goals' modes
         runner.set_goal_lift(tool_grants.lifts, tool_grants.note_used)
         if commands:
             _bind_goal_commands(tool_grants, runner)

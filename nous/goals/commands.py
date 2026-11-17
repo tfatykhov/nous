@@ -12,7 +12,9 @@ failing step wins:
 0. the tool guard is installed (``tool_guard.current()``);
 1. the turn is internal_only, of a kind in ``tool_policy.COMMANDS_KINDS``, and names a root (``ctx.root_intention_id``,
    from the lineage stamp; never the turn's own intention);
-2. the view is fresh by its monotonic clock and by the wall clock (``GoalToolGrants.commands_fresh``: its last
+2. the view does not hold the commands (``GoalToolGrants.commands_held``: from its build until the goal driver's
+   start has reconciled the goals' modes with the host's settings), and it is fresh by its monotonic clock and by
+   the wall clock (``GoalToolGrants.commands_fresh``: its last
    full read within the per-goal tools view's age by both, so after a host suspend nothing is lifted until the next
    full read);
 3. the view holds an entry for the turn's root (an open session of an active goal in the mode, as last read), and
@@ -192,6 +194,8 @@ class CommandsEntry:
 
 
 class CommandsView(Protocol):
+    def commands_held(self) -> bool: ...
+
     def commands_fresh(self) -> bool: ...
 
     def commands_entry(self, root_id: UUID) -> CommandsEntry | None: ...
@@ -210,7 +214,7 @@ def decide_commands(view: CommandsView, ctx: ExecutionContext) -> CommandsEntry 
         if ctx.authority != AUTHORITY_INTERNAL or ctx.kind not in tool_policy.COMMANDS_KINDS:
             return None
         root = ctx.root_intention_id
-        if root is None or not view.commands_fresh():
+        if root is None or view.commands_held() or not view.commands_fresh():
             return None
         entry = view.commands_entry(root)
         if entry is None or not view.now() < entry.expires_at or not view.wall_now() < entry.wall_expires_at:

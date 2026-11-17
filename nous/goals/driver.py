@@ -303,6 +303,9 @@ class GoalDriver:
         # The ends of the goals' modes no owner's change makes (main.py): ``at_start`` once in ``start``, and with
         # NOUS_GOAL_COMMANDS_ENABLED on ``expire`` first in every tick. None: none are swept.
         self._modes = modes
+        # With NOUS_GOAL_COMMANDS_ENABLED on, an ``at_start`` that failed: tried again first in every tick until it
+        # succeeds, the view's commands held meanwhile (``_reconcile_modes``).
+        self._reconcile_pending = False
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
@@ -324,7 +327,7 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
-        await self._sweep_modes(at_start=True)
+        await self._reconcile_modes()
         await self._read_grants()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
@@ -369,6 +372,8 @@ class GoalDriver:
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
+            if self._reconcile_pending:
+                await self._reconcile_modes()
             if goal_commands.enabled(self._settings):
                 await self._sweep_modes()
             claimed = await self.claim_reports()
@@ -384,11 +389,29 @@ class GoalDriver:
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
 
-    async def _sweep_modes(self, *, at_start: bool = False) -> None:
+    async def _reconcile_modes(self) -> None:
+        """The start's reconciliation of the goals' modes with the host's settings (``ModeSweeper.at_start``). Once
+        it succeeds the view's commands are released (main.py holds them when it builds the view). With
+        NOUS_GOAL_COMMANDS_ENABLED on, one that fails stays pending: no goal's tasks run any command, and each tick
+        tries it again first, until it succeeds. One warning when it fails, one line when it succeeds after that."""
+        if await self._sweep_modes(at_start=True):
+            if self._reconcile_pending:
+                logger.info("The goals' modes were reconciled with the host's settings: their commands run again")
+            self._reconcile_pending = False
+            if self.tool_grants is not None:
+                self.tool_grants.release_commands()
+        elif goal_commands.enabled(self._settings) and not self._reconcile_pending:
+            self._reconcile_pending = True
+            logger.warning(
+                "The goals' modes were not reconciled at the start: no goal's tasks run any command until a tick does"
+            )
+
+    async def _sweep_modes(self, *, at_start: bool = False) -> bool:
         """The ends of the goals' modes no owner's change makes (``modes``): ``at_start`` once, else ``expire``. A
-        sweep that fails never fails the start or the tick: logged by its class, tried again at the next tick."""
+        sweep that fails never fails the start or the tick: logged by its class, tried again at the next tick.
+        Returns whether it ran (True with no sweeper)."""
         if self._modes is None:
-            return
+            return True
         try:
             if at_start:
                 await self._modes.at_start()
@@ -396,6 +419,8 @@ class GoalDriver:
                 await self._modes.expire()
         except Exception as exc:
             logger.warning("The goals' modes were not swept (%s)", type(exc).__name__)
+            return False
+        return True
 
     async def _read_grants(self, root_id: UUID | None = None, *, goal_id: UUID | None = None) -> None:
         """F115: read the goals' tool grants into the runner's view again (all of them, one session's root, or one

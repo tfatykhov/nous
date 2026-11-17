@@ -296,6 +296,8 @@ class GoalToolGrants:
         # does not advance, so the commands hook also asks this one (``commands_fresh``).
         self._wall_clock = wall_clock
         self._wall_loaded_at: float | None = None
+        # The goals' commands held until the start's reconciliation of their modes has run (``hold_commands``).
+        self._commands_held = False
         self._lock = asyncio.Lock()
         self._by_root: dict[UUID, dict[str, Grant]] = {}
         self._commands_on = commands
@@ -314,6 +316,20 @@ class GoalToolGrants:
     def fresh(self) -> bool:
         """Whether the view was fully read within its age, by the injected clock."""
         return self._loaded_at is not None and self._clock() - self._loaded_at <= self._max_age
+
+    def hold_commands(self) -> None:
+        """Lift no command until ``release_commands``: main.py holds them when it builds the view, and the goal driver
+        releases them once its start's reconciliation of the goals' modes has run (``GoalDriver._reconcile_modes``).
+        Nothing is held without ``commands``."""
+        self._commands_held = self._commands_on
+
+    def release_commands(self) -> None:
+        """End ``hold_commands``."""
+        self._commands_held = False
+
+    def commands_held(self) -> bool:
+        """Whether ``hold_commands`` holds the goals' commands."""
+        return self._commands_held
 
     def commands_fresh(self) -> bool:
         """``fresh``, and the last full read within the same age by the wall clock as well: after a host suspend the

@@ -925,7 +925,7 @@ def test_build_goals_binds_the_hook_to_the_runner_only_with_the_flag(db):
         on, database=db, heart=MagicMock(), continuation_runner=_Continuation(), runner=runner, dispatcher=dispatcher
     )
     view = driver.tool_grants
-    assert view.commands_on is True
+    assert view.commands_on is True and view.commands_held() is True  # until the driver's start reconciles
     [hook] = runner.commands
     assert hook.__self__ is view and hook.__func__ is GoalToolGrants.commands_for
     assert runner.lift == [(view.lifts, view.note_used)]
@@ -935,6 +935,7 @@ def test_build_goals_binds_the_hook_to_the_runner_only_with_the_flag(db):
         off, database=db, heart=MagicMock(), continuation_runner=_Continuation(), runner=runner, dispatcher=dispatcher
     )
     assert driver.tool_grants.commands_on is False and runner.commands == []
+    assert driver.tool_grants.commands_held() is False
 
 
 async def test_shutdown_unbinds_the_hook_and_stops_the_views_loop(db):

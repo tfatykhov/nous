@@ -8,6 +8,7 @@ the decision turn carry the line while the mode holds and are as before otherwis
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import uuid
 from datetime import timedelta
@@ -245,6 +246,112 @@ async def _nothing_due(self):
 
 async def _no_loop(self):
     return None
+
+
+def _quiet_tick(monkeypatch) -> None:
+    """A tick whose steps after the sweeps do nothing, and a driver with no loop."""
+    for name in (
+        "claim_reports",
+        "handle_requests",
+        "close_finished",
+        "catch_stuck",
+        "refresh_sessions",
+        "apply_stop_conditions",
+        "tell_owner_of_pauses",
+    ):
+        monkeypatch.setattr(GoalDriver, name, _nothing)
+    monkeypatch.setattr(GoalDriver, "_start_due", _nothing_due)
+    monkeypatch.setattr(GoalDriver, "_loop", _no_loop)
+
+
+async def test_a_start_whose_reconciliation_fails_lifts_no_command_until_a_tick_reconciles(db, monkeypatch, caplog):
+    from nous.api.execution_context import ExecutionContext
+    from nous.goals.grants import GoalToolGrants
+
+    store, sweeper = _world(db, goal_commands_max_hours=24)
+    goal = await _goal(store, hours=24)
+    root = await _open_session(db, store, goal)
+    object.__setattr__(store._settings, "goal_commands_max_hours", 2)  # lowered since: the end is past the ceiling
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(db, store._settings, commands=True)
+    view.hold_commands()  # as main.py builds it
+    assert await view.refresh()
+    _quiet_tick(monkeypatch)
+    real = ModeSweeper.at_start
+    tries: list[int] = []
+
+    async def at_start(self):
+        tries.append(1)
+        if len(tries) == 1:
+            raise ConnectionError("db at 10.0.0.1 is down")
+        return await real(self)
+
+    monkeypatch.setattr(ModeSweeper, "at_start", at_start)
+    driver = GoalDriver(db, store._settings, None, store, None, tool_grants=view, modes=sweeper)
+    ctx = ExecutionContext(kind="subtask", authority="internal_only", intention_id=root, root_intention_id=root)
+    with caplog.at_level(logging.INFO):
+        await driver.start()
+        assert view.commands_held() and view.commands_entry(root) is not None and view.commands_fresh()
+        assert C.decide_commands(view, ctx) is None  # the hold alone stops it
+        await driver.tick()
+        await driver.stop()
+    assert len(tries) == 2 and not view.commands_held()
+    clamped = await _get(store, goal.id)
+    assert clamped.mode_until < goal.mode_until  # moved to the lower ceiling
+    entry = C.decide_commands(view, ctx)
+    assert entry is not None and entry.expires_at - view.now() <= 2 * 3600  # lifts again, until the clamped end
+    warned = [r for r in caplog.records if "not reconciled at the start" in r.getMessage()]
+    cleared = [r for r in caplog.records if "were reconciled with the host's settings" in r.getMessage()]
+    assert len(warned) == 1 and len(cleared) == 1 and "10.0.0.1" not in caplog.text
+
+
+async def test_a_reconciliation_that_keeps_failing_keeps_the_hold_and_warns_once(db, monkeypatch, caplog):
+    from nous.goals.grants import GoalToolGrants
+
+    store, sweeper = _world(db)
+    view = GoalToolGrants(db, store._settings, commands=True)
+    view.hold_commands()
+    _quiet_tick(monkeypatch)
+
+    async def broken(self):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(ModeSweeper, "at_start", broken)
+    driver = GoalDriver(db, store._settings, None, store, None, tool_grants=view, modes=sweeper)
+    with caplog.at_level(logging.WARNING):
+        await driver.start()
+        await driver.tick()
+        await driver.tick()
+        await driver.stop()
+    assert view.commands_held()
+    assert len([r for r in caplog.records if "not reconciled at the start" in r.getMessage()]) == 1
+
+
+async def test_with_the_flag_off_a_failed_start_sweep_leaves_no_hold_and_no_retry(db, monkeypatch):
+    from nous.goals.grants import GoalToolGrants
+
+    store, sweeper = _world(db, goal_commands_enabled=False)
+    view = GoalToolGrants(db, store._settings)
+    view.hold_commands()
+    assert not view.commands_held()  # nothing is held without commands
+    _quiet_tick(monkeypatch)
+    calls: list[str] = []
+
+    async def at_start(self):
+        calls.append("at_start")
+        raise ConnectionError("down")
+
+    async def expire(self):
+        calls.append("expire")
+        return 0
+
+    monkeypatch.setattr(ModeSweeper, "at_start", at_start)
+    monkeypatch.setattr(ModeSweeper, "expire", expire)
+    driver = GoalDriver(db, store._settings, None, store, None, tool_grants=view, modes=sweeper)
+    await driver.start()
+    await driver.tick()
+    await driver.stop()
+    assert calls == ["at_start"] and driver._reconcile_pending is False and not view.commands_held()
 
 
 async def test_a_sweep_that_fails_fails_neither_the_start_nor_the_tick(db, monkeypatch, caplog):
