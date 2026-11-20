@@ -633,6 +633,7 @@ class CognitiveLayer:
         """
         # CR-4: refresh this session's activity stamp BEFORE sweeping, so an
         # active session is never evicted, then sweep orphaned sessions.
+        _pre_t0 = time.perf_counter()  # F113 voice POC: monotonic phase clocks for TurnContext.pre_turn_phases
         self._session_last_activity[session_id] = time.monotonic()
         self._sweep_stale_sessions()
 
@@ -660,6 +661,7 @@ class CognitiveLayer:
 
         # 008: Check initiation state before frame selection
         _is_initiation = False
+        _frame_select_ms = 0.0
         if self._identity_manager is not None:
             try:
                 _is_initiated = await self._identity_manager.is_initiated(session=session)
@@ -689,6 +691,7 @@ class CognitiveLayer:
                 questions_to_ask=[],
             )
         else:
+            _frame_t0 = time.perf_counter()
             _carried = await self._carried_frame_for(session_id, _first_in_process, session)
             try:
                 frame = await self._frames.select(
@@ -708,6 +711,7 @@ class CognitiveLayer:
             except Exception:
                 logger.warning("Frame selection failed, falling back to conversation")
                 frame = self._frames._default_selection()
+            _frame_select_ms = (time.perf_counter() - _frame_t0) * 1000
 
         # Issue #229: Initialize critic skills (populated only in advised mode)
         _critic_skills: list[str] = []
@@ -724,6 +728,7 @@ class CognitiveLayer:
                 self._session_user_messages[session_id] = user_msgs[-5:]
 
         # F024: Critic Agent pre-turn classification
+        _critic_t0 = time.perf_counter()
         if self._critic and self._settings.critic_enabled and not _is_initiation:
             from nous.cognitive.critic_schemas import RoutingMode
 
@@ -846,6 +851,7 @@ class CognitiveLayer:
             if (self._settings.critic_mode == "advised"
                     and critic_result.skills):
                 _critic_skills = critic_result.skills
+        _critic_ms = (time.perf_counter() - _critic_t0) * 1000
 
         # F110: the final frame (after any critic override) is what the session carries next turn.
         if self._settings.frame_carry_enabled and not _is_initiation:
@@ -941,6 +947,7 @@ class CognitiveLayer:
         if _is_initiation:
             # Skip normal context build — initiation prompt already set
             context_token_estimate = len(system_prompt) // 4
+        _build_t0 = time.perf_counter()
         try:
             if not _is_initiation:
                 build_result = await self._context.build(
@@ -981,6 +988,7 @@ class CognitiveLayer:
             logger.warning("Context build failed, using identity prompt only")
             system_prompt = self._context._identity_prompt or ""
             build_result = None
+        _context_build_ms = (time.perf_counter() - _build_t0) * 1000
 
         # 3b. SUBTASK RESULTS — inject undelivered results into context
         # F098: with the result inbox on, subtask AND DAG results arrive
@@ -1327,6 +1335,7 @@ class CognitiveLayer:
             except Exception:
                 logger.debug("F091: retrieval trace commit failed", exc_info=True)
 
+        _total_ms = (time.perf_counter() - _pre_t0) * 1000
         return TurnContext(
             system_prompt=system_prompt,
             frame=frame,
@@ -1348,6 +1357,16 @@ class CognitiveLayer:
             critic_verdict=_critic_verdict,
             critic_frame=_critic_frame,
             trace_id=new_event_id(),  # F108: the turn's trace (post_turn's turn_completed is its root)
+            pre_turn_ms=round(_total_ms),
+            # The critic is its own key; other_ms is what no named phase covers (the epistemic classifier, the
+            # inbox, censors, deliberation), so the keys always add up to total_ms.
+            pre_turn_phases={
+                "frame_select_ms": round(_frame_select_ms),
+                "critic_ms": round(_critic_ms),
+                "context_build_ms": round(_context_build_ms),
+                "other_ms": max(0, round(_total_ms - _frame_select_ms - _critic_ms - _context_build_ms)),
+                "total_ms": round(_total_ms),
+            },
         )
 
     async def post_turn(
