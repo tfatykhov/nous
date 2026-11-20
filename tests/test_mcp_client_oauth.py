@@ -454,7 +454,7 @@ def _metadata_unavailable(w: World) -> None:
 
 
 def _no_sign_in(w: World) -> None:
-    w.mcp_status = 200
+    w.mcp_status, w.prm = 200, False  # a 2xx server that publishes resource metadata offers sign-in
 
 
 def _not_401(w: World) -> None:
