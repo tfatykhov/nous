@@ -394,11 +394,13 @@ export function headersProblem(rows: readonly HeaderRow[]): string | null {
 export const headersBody = (rows: readonly HeaderRow[]): Record<string, string> =>
   Object.fromEntries(rows.map((r) => [r.name, r.value]));
 
-/** The card's line about the stored key: the header names only, never a value. */
-export function keyLine(auth: McpAuth): string {
+/** The card's line about the stored key: the header names only, never a value. `signInOffered`: the card offers Sign in
+ * (a server may answer without credentials and still offer one), so a server with no credential is said to be not
+ * signed in too. */
+export function keyLine(auth: McpAuth, signInOffered = false): string {
   if (auth.kind === 'headers') return `Key set: ${auth.header_names.join(', ')}`;
   if (auth.kind === 'oauth') return auth.status === 'needs_sign_in' ? 'Needs sign-in: sign in again.' : 'Signed in with OAuth.';
-  return 'No key stored.';
+  return signInOffered ? 'No key stored and not signed in.' : 'No key stored.';
 }
 
 /** The host's limits in effect, in words; empty when neither is set. */

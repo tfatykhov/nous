@@ -856,7 +856,7 @@
             </div>
 
             <div class="key">
-              <p class="key-line">{keyLine(s.auth)}</p>
+              <p class="key-line">{keyLine(s.auth, oauthAvailable && secretsAvailable)}</p>
               {#if keyEdit?.server === s.name}
                 <div class="confirm" role="group" aria-label="New key for {s.name}">
                   {@render headerRows(keyEdit.rows, (i) => `mcp-h.${s.name}.${i}`, (i) => `mcp-v.${s.name}.${i}`, !!inFlight, keyError, () => {})}

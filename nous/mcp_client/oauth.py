@@ -335,10 +335,12 @@ _INITIALIZE = {
 
 
 async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: str | None = None) -> Discovery:
-    """The provider of the MCP server at ``url``: an unauthenticated ``initialize`` must be answered 401; then the
-    protected resource metadata (the URL its ``WWW-Authenticate`` names, else the well-known ones), whose ``resource``
-    must cover ``url``; then the authorization server's metadata, whose issuer must be the one it was looked up for.
-    Without resource metadata, the authorization server is ``url``'s origin. The provider must support S256, the
+    """The provider of the MCP server at ``url``: an unauthenticated ``initialize`` must be answered 401 or 2xx; then
+    the protected resource metadata (after a 401, the URL its ``WWW-Authenticate`` names, else the well-known ones;
+    after a 2xx, the well-known ones only, nothing of the answer read), whose ``resource`` must cover ``url``; then the
+    authorization server's metadata, whose issuer must be the one it was looked up for. Without resource metadata, the
+    authorization server is ``url``'s origin after a 401, and a 2xx server does not ask for sign-in (409): one that
+    answers without credentials offers sign-in only by publishing its metadata. The provider must support S256, the
     ``code`` response type and the ``authorization_code`` grant (the last two when listed). ``scope``: the owner's, else
     the 401's, else the metadata's. Raises ``OAuthProblem``."""
     # The issuer check is in the SDK from 1.30, the floor pyproject.toml requires.
@@ -355,18 +357,20 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
             json=_INITIALIZE,
             headers={"Accept": "application/json, text/event-stream"},
         )
-        if 200 <= status < 300:
-            raise OAuthProblem(409, "this server does not ask for sign-in")
-        if status != 401:
+        optional = 200 <= status < 300  # it answers without credentials: sign-in, if offered, is optional
+        if not optional and status != 401:
             raise OAuthProblem(502, f"the server answered HTTP {status} to a request without credentials, not 401")
-        answer = httpx.Response(401, headers=headers)
+        answer = None if optional else httpx.Response(401, headers=headers)
+        named = extract_resource_metadata_from_www_auth(answer) if answer is not None else None
         found = await _metadata(
             client,
             allow,
-            build_protected_resource_metadata_discovery_urls(extract_resource_metadata_from_www_auth(answer), url),
+            build_protected_resource_metadata_discovery_urls(named, url),
             ProtectedResourceMetadata,
             "the server's resource metadata",
         )
+        if found is None and optional:
+            raise OAuthProblem(409, "this server does not ask for sign-in")
         auth_server: str | None = None
         prm_scopes: list[str] | None = None
         resource = resource_url_from_server_url(url)
@@ -421,7 +425,7 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
                 raise OAuthProblem(502, f"the provider's {what}: the address guard refused it ({exc})") from None
             except Exception as exc:
                 raise OAuthProblem(502, f"the provider's {what} could not be resolved ({error_class(exc)})") from None
-    hint = extract_scope_from_www_auth(answer)
+    hint = extract_scope_from_www_auth(answer) if answer is not None else None
     listed = prm_scopes if prm_scopes is not None else metadata.scopes_supported
     chosen = scope or _scope(hint) or (_scope(" ".join(listed)) if listed else None)
     methods = metadata.token_endpoint_auth_methods_supported

@@ -167,6 +167,50 @@ describe('Integrations: OAuth on a server card', () => {
     expect(within(card).getByRole('group', { name: 'Sign in for alpha' })).toBeTruthy();
   });
 
+  it('a server that answers without a sign-in: not signed in, signs in from its card, signs out to not signed in again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let auth = AUTH();
+    listAnswer = () => [200, LIST([SERVER('alpha', auth)])];
+    handlers['POST /integrations/mcp/oauth/start'] = () => [200, START({ scope: null })];
+    handlers['GET /integrations/mcp/oauth/flows/flow-1'] = () => {
+      auth = AUTH({ kind: 'oauth' }); // stored with the server at once
+      return [200, { status: 'complete', reason: null, stored: true }];
+    };
+    handlers['POST /integrations/mcp/servers/alpha/sign-out'] = () => {
+      auth = AUTH();
+      return [200, { credentials: 'removed', server: null }];
+    };
+    render(Integrations);
+    const card = await screen.findByRole('region', { name: 'alpha' });
+    expect(within(card).getByText('No key stored and not signed in.')).toBeTruthy();
+    expect(within(card).queryByRole('button', { name: 'Sign out' })).toBeNull();
+    await fireEvent.click(within(card).getByRole('button', { name: 'Sign in (OAuth)' }));
+    await fireEvent.click(within(within(card).getByRole('group', { name: 'Sign in for alpha' })).getByRole('button', { name: 'Sign in' }));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((await within(card).findByRole('status')).textContent).toBe('Signed in: the next call to this server uses the new sign-in.');
+    expect(await within(card).findByText('Signed in with OAuth.')).toBeTruthy();
+    await fireEvent.click(within(card).getByRole('button', { name: 'Sign out' }));
+    await fireEvent.click(within(card).getByRole('button', { name: 'Yes, sign out' }));
+    expect((await within(card).findByRole('status')).textContent).toBe('Signed out: calls to this server now go without the sign-in.');
+    expect(await within(card).findByText('No key stored and not signed in.')).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Sign in (OAuth)' })).toBeTruthy();
+    expect(posts()).toEqual([
+      { method: 'POST', url: '/integrations/mcp/oauth/start', body: { name: 'alpha', url: 'https://alpha.example.com/mcp' } },
+      { method: 'POST', url: '/integrations/mcp/servers/alpha/sign-out', body: undefined },
+    ]);
+  });
+
+  it('a server that publishes no sign-in says so when Sign in is pressed', async () => {
+    listAnswer = () => [200, LIST([SERVER('alpha')])];
+    handlers['POST /integrations/mcp/oauth/start'] = () => [409, { error: 'this server does not ask for sign-in' }];
+    render(Integrations);
+    const card = await screen.findByRole('region', { name: 'alpha' });
+    await fireEvent.click(within(card).getByRole('button', { name: 'Sign in (OAuth)' }));
+    await fireEvent.click(within(within(card).getByRole('group', { name: 'Sign in for alpha' })).getByRole('button', { name: 'Sign in' }));
+    expect(await within(card).findByText('This server does not ask for sign-in.')).toBeTruthy();
+    expect(within(card).getByText('No key stored and not signed in.')).toBeTruthy();
+  });
+
   it('Sign in again stores the new sign-in with the server at once', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     listAnswer = () => [200, LIST([SERVER('alpha', AUTH({ kind: 'oauth', status: 'needs_sign_in' }))])];

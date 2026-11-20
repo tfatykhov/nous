@@ -407,4 +407,12 @@ describe('OAuth sign-in (F112 PR 2d)', () => {
     expect(serverStatus(held)).toEqual({ word: 'sign-in provider unreachable', detail: 'Nous tries again within a minute', tone: 'warn' });
     expect(keyLine(held.auth)).toBe('Signed in with OAuth.'); // the sign-in still stands
   });
+
+  it('where the card offers Sign in, a server with no credential is said to be not signed in', () => {
+    expect(keyLine(auth(), true)).toBe('No key stored and not signed in.');
+    expect(keyLine(auth(), false)).toBe('No key stored.');
+    expect(keyLine(auth({ kind: 'oauth' }), true)).toBe('Signed in with OAuth.');
+    expect(keyLine(auth({ kind: 'oauth', status: 'needs_sign_in' }), true)).toBe('Needs sign-in: sign in again.');
+    expect(keyLine(auth({ kind: 'headers', header_names: ['Authorization'] }), true)).toBe('Key set: Authorization');
+  });
 });
