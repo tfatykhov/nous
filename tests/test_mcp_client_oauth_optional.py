@@ -302,9 +302,9 @@ async def test_the_start_route_refuses_a_2xx_server_that_publishes_nothing_with_
     assert env.manager.flows._flows == {}
 
 
-# The provider's metadata as an optional-sign-in server's provider was seen to publish it: dynamic registration, S256,
-# public clients only, no client ID metadata document, nothing else listed.
-OBSERVED_PROVIDER = {
+# A provider that lists only dynamic registration, S256 and public clients: no client ID metadata document, no
+# response types or grants listed.
+PUBLIC_CLIENT_PROVIDER = {
     "issuer": ISSUER,
     "authorization_endpoint": f"{ISSUER}/authorize",
     "token_endpoint": f"{ISSUER}/token",
@@ -383,7 +383,7 @@ async def _in_process(gate: Gate):
 @asynccontextmanager
 async def _optional_env(db: Any, tmp_path: Any):
     """The routes over a manager whose sessions go to the in-process server (which needs no token) and whose OAuth
-    requests go to ``OptionalWorld`` (the server's unauthenticated 200 and its metadata, the observed provider)."""
+    requests go to ``OptionalWorld`` (the server's unauthenticated 200 and its metadata, ``PUBLIC_CLIENT_PROVIDER``)."""
     gate = Gate()
     async with _in_process(gate) as (connect, connects):
         agent = f"mcp-oauth-opt-{uuid.uuid4().hex[:8]}"
@@ -399,7 +399,7 @@ async def _optional_env(db: Any, tmp_path: Any):
             a2ui_public_base_url=BASE,
         )
         world = OptionalWorld()
-        world.as_meta = dict(OBSERVED_PROVIDER)
+        world.as_meta = dict(PUBLIC_CLIENT_PROVIDER)
         d, registry, bus = ToolDispatcher(), McpRegistry(db, agent), base.FakeBus()
         manager = McpClientManager(d, registry, settings, bus, connect=connect, oauth_http=world.client)
         await manager.start()
