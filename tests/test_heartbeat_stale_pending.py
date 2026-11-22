@@ -14,12 +14,16 @@ import dataclasses
 import hashlib
 import re
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
+from nous.config import Settings
 from nous.heart.schemas import EpisodeSummary, FactSummary
 from nous.heartbeat.checks import PENDING_PROTOTYPES, SelfInitiatedCheck
 from nous.heartbeat.pending_filter import PendingFilter
@@ -796,3 +800,48 @@ class TestFingerprintsUnchanged:
         assert survivors
         for finding in survivors:
             assert dataclasses.replace(finding, check_name=CHECK_NAME).fingerprint() == parity[finding.summary]
+
+
+class _CapturingDb:
+    """The fact manager's database as the filter uses it: records each statement and answers every id it binds."""
+
+    def __init__(self) -> None:
+        self.statements: list = []
+
+    @asynccontextmanager
+    async def session(self):
+        yield self
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        params = stmt.compile(dialect=postgresql.dialect()).params
+        ids = next(v for v in params.values() if isinstance(v, list))
+        return [SimpleNamespace(id=i, last_confirmed=None, newer_same_key=False) for i in ids]
+
+
+class TestWiring:
+    """The check builds its filter from the settings and reads the rows through the fact manager's database."""
+
+    async def test_settings_from_the_environment_and_the_fact_managers_database(self, monkeypatch):
+        for layer in ("kind", "supersede"):
+            monkeypatch.delenv(f"NOUS_HEARTBEAT_PENDING_{layer.upper()}_MODE", raising=False)
+        monkeypatch.setenv("NOUS_HEARTBEAT_PENDING_AGE_MODE", "shadow")
+        settings = Settings(_env_file=None)
+        sc = scenario_a(datetime.now(UTC))
+        db = _CapturingDb()
+        sc.heart.facts.db = db
+        sc.heart.facts.agent_id = "agent-marker"
+
+        check = SelfInitiatedCheck(sc.heart, MagicMock(), settings, embeddings=sc.embeddings)
+        result = await check.run()
+
+        assert _as_tuples(result.findings) == sc.expected
+        assert len(db.statements) == 3, "one read per prototype result list"
+        params = db.statements[0].compile(dialect=postgresql.dialect()).params
+        assert "agent-marker" in params.values()
+        assert next(v for v in params.values() if isinstance(v, list)) == [
+            sc.facts["78ccacac"].id,
+            sc.facts["8f248bc2"].id,
+        ]
+        assert result.suppression.shadow_suppressed == {"age_snapshot": 4}
+        assert result.suppression.errors == 0
