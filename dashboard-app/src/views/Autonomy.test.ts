@@ -602,6 +602,59 @@ describe('Autonomy: what a finished job costs', () => {
     expect(section.textContent).toContain('The scorer has not run, so nothing can be counted as checked yet.');
   });
 
+  it('with the numbers off it asks once on load, then never again: not on the timer, Refresh or a new window', async () => {
+    loopBody = { enabled: false };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(Autonomy);
+      await screen.findByText('Scorer running');
+      await waitFor(() => expect(loopUrls).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await waitFor(() => expect(urls.length).toBeGreaterThan(1)); // the scores kept their own poll
+      await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await fireEvent.click(screen.getByRole('button', { name: '30 d' }));
+      await waitFor(() => expect(urls).toContain('/dashboard/autonomy?days=30'));
+      expect(loopUrls).toEqual(['/dashboard/loop-numbers?days=7']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with the numbers on it keeps asking, with the page', async () => {
+    render(Autonomy);
+    await heading();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(loopUrls.length).toBeGreaterThan(1));
+  });
+
+  it('when the panel is not shown the badge reads as the scores alone', async () => {
+    const badge = (c: HTMLElement) => c.querySelector('.stale-badge') as HTMLElement;
+    // the numbers failed: the badge does not name them
+    loopStatus = 400;
+    let view = render(Autonomy);
+    await screen.findByText('Scorer running');
+    await waitFor(() => expect(loopUrls.length).toBeGreaterThan(0));
+    await waitFor(() => expect(badge(view.container).textContent).toMatch(/^\s*updated /));
+    expect(badge(view.container).classList.contains('error')).toBe(false);
+    cleanup();
+    // the numbers are off and the scores fail: the badge is the scores' own, as before the panel existed
+    loopStatus = 200;
+    loopBody = { enabled: false };
+    status = 400;
+    view = render(Autonomy);
+    await screen.findByText('Failed to load autonomy data — retrying…');
+    await waitFor(() => expect(badge(view.container).textContent?.trim()).toBe('error — retrying'));
+  });
+
+  it('when the panel is shown and its numbers fail, the badge names them', async () => {
+    const { container } = render(Autonomy);
+    await heading();
+    loopStatus = 400;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(container.querySelector('.stale-badge')?.textContent).toContain('job costs failed'));
+  });
+
   it('keeps the rest of the page when the numbers fail to load', async () => {
     loopStatus = 400;
     render(Autonomy);

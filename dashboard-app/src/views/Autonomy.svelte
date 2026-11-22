@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { combinePolls } from '../lib/pollBadge';
@@ -24,24 +25,28 @@
       60_000,
     ),
   );
-  // GET /dashboard/loop-numbers: what a finished job costs. A store of its own, so a failure here never blanks the page;
-  // with NOUS_LOOP_NUMBERS_ENABLED off it answers {enabled: false} and the panel is not shown.
+  // GET /dashboard/loop-numbers: what a finished job costs. A store of its own, so a failure here never blanks the page.
+  // With NOUS_LOOP_NUMBERS_ENABLED off it answers {enabled: false}: the panel is not shown and the store asks nothing
+  // more until the page is loaded again.
   const loopStore = usePoll(
     makePollStore<LoopNumbersData>(
       (signal) => apiGet<LoopNumbersData>(`/dashboard/loop-numbers?days=${days}`, { signal }),
       60_000,
     ),
   );
+  const loopOff = $derived($loopStore.data?.enabled === false);
+  const loopShown = $derived($loopStore.data?.enabled === true);
+  $effect(() => { if (loopOff) loopStore.stop(); });
   /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
-  const refreshPage = () => Promise.all([store.refresh(), loopStore.refresh()]);
-  /** One badge for both stores: the oldest update, and which one failed. */
-  const pagePoll = $derived(combinePolls({ scores: $store, 'job costs': $loopStore }));
+  const refreshPage = () => Promise.all([store.refresh(), ...(loopOff ? [] : [loopStore.refresh()])]);
+  /** One badge: the scores', and the job costs' too only while their panel is shown (oldest update, what failed). */
+  const pagePoll = $derived(combinePolls({ scores: $store, ...(loopShown ? { 'job costs': $loopStore } : {}) }));
   let first = true;
   $effect(() => {
     void days;
     if (first) { first = false; return; }
     void store.refresh();
-    void loopStore.refresh();
+    if (!untrack(() => loopOff)) void loopStore.refresh();
   });
 
   // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet. An outcome bar
