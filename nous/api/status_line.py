@@ -4,10 +4,11 @@
 calls are used of the limit, what happens after the last round, and what the task has changed so far (from the
 session's execution ledger). It states facts only, no advice.
 
-It exists in the outgoing request only: the runner adds it as a text block after the tool results of the last user
-message, after that message's cache breakpoint and with no ``cache_control`` of its own, so the cached prefix is the
-same bytes with the setting on or off. The tool loop's message list, the saved conversation, pruning, compaction and
-the claim verifier never see it.
+It exists in the outgoing request only: the runner adds it as a text block after the content of the last user
+message, after that message's cache breakpoint and with no ``cache_control`` of its own, so a cache read still covers
+everything before it. Every line once sent is sent again, unchanged and at its place, on every later call of the same
+run: the history the model saw (thinking blocks are bound to it) is never edited. The tool loop's message list, the
+saved conversation, pruning, compaction and the claim verifier never see it.
 """
 
 from __future__ import annotations
