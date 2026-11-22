@@ -1556,6 +1556,10 @@ class Settings(BaseSettings):
     # goals_enabled, autonomy_settings_enabled and tool_guard_enabled; without them a WARNING and it stays off.
     # Default off.
     goal_tool_grants_enabled: bool = False
+    # The Goals page says what a goal's session is doing now (GET /goals/{ref}/activity, nous/goals/activity.py) and
+    # its sections fold, the viewer's choice kept in the browser. Off: the options carry no `activity` key, the route
+    # answers activity_enabled false and reads no table, and the page is as before. Default off.
+    goal_activity_enabled: bool = False
     # The owner may let one goal's tasks run any command with bash until an end time, chosen only when the goal is
     # created (nous/goals/commands.py). Needs goals_enabled, autonomy_settings_enabled, tool_guard_enabled,
     # goal_tool_grants_enabled, owner_entry_mode=enforce and both owner digests (owner_route_secret_sha256,
