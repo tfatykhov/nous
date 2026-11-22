@@ -89,10 +89,9 @@ describe('what the panel says', () => {
       phase: 'waiting',
       current: {
         kind: 'workflow', name: 'Build the export', first_task: false, status: 'running', started_at: '2026-11-15T11:20:00+00:00',
-        node: { name: 'wait_for_job', type: 'wait', status: 'awaiting_check' },
         waiting_for: { kind: 'job', job_id: 'job-20261115-112000-ab12cd34' },
       },
-      jobs: { launched: 1, last_launch_at: '2026-11-15T11:20:00+00:00' },
+      jobs: { launched: 1, last_launch_at: '2026-11-15T11:20:00+00:00', capped: false },
     })]];
     render(GoalActivity, props());
     expect(await screen.findByText('Waiting for a coding job (job-20261115-112000-ab12cd34) to finish.')).toBeTruthy();
@@ -123,7 +122,7 @@ describe('what the panel says', () => {
     expect(await screen.findByText('No session has run yet.')).toBeTruthy();
     cleanup();
     replies = [[200, activityAnswer({
-      session: { n: 4, open: false, trigger: 'timer', started_at: '2026-11-15T08:00:00+00:00', ended_at: '2026-11-15T09:00:00+00:00' },
+      session: { n: 4, open: false, started_at: '2026-11-15T08:00:00+00:00', ended_at: '2026-11-15T09:00:00+00:00' },
       phase: 'none', current: null, running_count: 0, jobs: null, recent: [],
     })]];
     render(GoalActivity, props({ goal: { ...GOAL, open_session: null } }));
@@ -211,6 +210,23 @@ describe('when the panel reads', () => {
     expect(activityReads()).toBe(2);
   });
 
+  it('after a failed read with no session open, the next tick reads again, and once a read lands the ticks stop', async () => {
+    const idle = { ...GOAL, open_session: null };
+    const none = activityAnswer({ session: null, phase: 'none', current: null, running_count: 0, last_call_at: null, calls: null, jobs: null, recent: [], work_sessions: [] });
+    replies = [[500, { error: 'the request could not be processed' }], [200, none]];
+    const { rerender } = render(GoalActivity, props({ goal: idle }));
+    expect(await screen.findByText('Could not read what the goal is doing.')).toBeTruthy();
+    await landed();
+    expect(activityReads()).toBe(1); // no read again until the page's poll lands
+    await rerender(props({ goal: { ...idle }, tick: 2 }));
+    await waitFor(() => expect(activityReads()).toBe(2));
+    expect(await screen.findByText('No session has run yet.')).toBeTruthy();
+    await landed();
+    await rerender(props({ goal: { ...idle }, tick: 3 }));
+    await landed();
+    expect(activityReads()).toBe(2);
+  });
+
   it('a tick during a read of the same goal starts no second request', async () => {
     const hold = held();
     replies = [hold.reply, [200, activityAnswer()]];
@@ -229,7 +245,7 @@ describe('when the panel reads', () => {
   it('a session that ends during a read is read once that read lands', async () => {
     const hold = held();
     const ended = activityAnswer({
-      session: { n: 4, open: false, trigger: 'timer', started_at: '2026-11-15T11:48:00+00:00', ended_at: '2026-11-15T11:59:00+00:00' },
+      session: { n: 4, open: false, started_at: '2026-11-15T11:48:00+00:00', ended_at: '2026-11-15T11:59:00+00:00' },
       phase: 'none', current: null, running_count: 0, jobs: null, recent: [],
     });
     replies = [hold.reply, [200, ended]];

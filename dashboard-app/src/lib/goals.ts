@@ -997,8 +997,9 @@ export type ActivityPhase = 'none' | 'task' | 'workflow' | 'waiting' | 'approval
 export type WaitingFor = { kind: 'job'; job_id: string } | { kind: 'pr'; number: number } | { kind: 'file' } | { kind: 'other' };
 /** Where a call was made: the chain's decision turns, a task, a workflow step, or other work. */
 export type WorkKind = 'decisions' | 'task' | 'workflow' | 'other';
-export interface ActivityCall { tool: string; at: string; outcome: string; ms: number | null; in: WorkKind }
-export interface ActivitySession { n: number; open: boolean; trigger: 'timer' | 'run_now'; started_at: string; ended_at: string | null }
+/** A call, at the time it ended; `tool` is `other` for a name that is not shaped like a tool's. */
+export interface ActivityCall { tool: string; at: string; outcome: string; in: WorkKind }
+export interface ActivitySession { n: number; open: boolean; started_at: string; ended_at: string | null }
 export interface ActivityCurrent {
   kind: 'task' | 'workflow';
   /** Null for the session's first task (its purpose line only repeats the goal's title). */
@@ -1006,10 +1007,11 @@ export interface ActivityCurrent {
   first_task: boolean;
   status: 'running' | 'pending';
   started_at: string | null;
-  node: { name: string; type: string; status: string } | null;
   waiting_for: WaitingFor | null;
 }
 export interface ActivityCalls { total: number; errors: number; capped: boolean }
+/** Coding jobs the session started; `capped` when more shell calls ran than were read, so `launched` is a least count. */
+export interface ActivityJobs { launched: number; last_launch_at: string | null; capped: boolean }
 export interface GoalActivity {
   enabled: true;
   activity_enabled: true;
@@ -1020,7 +1022,7 @@ export interface GoalActivity {
   running_count: number;
   last_call_at: string | null;
   calls: ActivityCalls | null;
-  jobs: { launched: number; last_launch_at: string | null } | null;
+  jobs: ActivityJobs | null;
   recent: ActivityCall[];
   work_sessions: { id: string; kind: WorkKind }[];
 }
@@ -1110,11 +1112,12 @@ export function quietText(lastCallAt: string, now: number): string {
   return `No tool call for ${spanText(quiet)}. A long command or a coding job can take this long; a call shows here when it ends.`;
 }
 
-/** Coding jobs the session started; '' when none. It never says whether a job still runs. */
-export function jobsText(jobs: { launched: number; last_launch_at: string | null }, now: number): string {
+/** Coding jobs the session started ("at least" when the server read only its newest shell calls); '' when none. It
+ * never says whether a job still runs. */
+export function jobsText(jobs: ActivityJobs, now: number): string {
   if (jobs.launched <= 0) return '';
   const last = jobs.last_launch_at ? ` The last one ${ago(jobs.last_launch_at, now)}.` : '';
-  return `Coding jobs started this session: ${formatNumber(jobs.launched)}.${last}`;
+  return `Coding jobs started this session: ${jobs.capped ? 'at least ' : ''}${formatNumber(jobs.launched)}.${last}`;
 }
 
 /** The newest session once it has ended, in one line. */

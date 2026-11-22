@@ -552,7 +552,7 @@ describe('what a goal is doing now, and the folding page', () => {
   const MIN = 60_000;
   const at = (minutesBefore: number) => new Date(NOW - minutesBefore * MIN).toISOString();
   const current = (over: Partial<goals.ActivityCurrent> = {}): goals.ActivityCurrent => ({
-    kind: 'task', name: 'Sort the photos', first_task: false, status: 'running', started_at: at(12), node: null, waiting_for: null, ...over,
+    kind: 'task', name: 'Sort the photos', first_task: false, status: 'running', started_at: at(12), waiting_for: null, ...over,
   });
   const PHASES: goals.ActivityPhase[] = ['none', 'task', 'workflow', 'waiting', 'approval', 'deciding', 'asking', 'between'];
 
@@ -614,8 +614,11 @@ describe('what a goal is doing now, and the folding page', () => {
     expect(goals.callsText({ total: 1, errors: 1, capped: false })).toBe('1 tool call this session, 1 failed.');
     expect(goals.callsText({ total: 4, errors: 0, capped: false })).toBe('4 tool calls this session.');
     expect(goals.callsText({ total: 2000, errors: 3, capped: true })).toBe('More than 2,000 tool calls this session, at least 3 failed.');
-    expect(goals.jobsText({ launched: 1, last_launch_at: at(40) }, NOW)).toBe('Coding jobs started this session: 1. The last one 40 minutes ago.');
-    expect(goals.jobsText({ launched: 0, last_launch_at: null }, NOW)).toBe('');
+    expect(goals.jobsText({ launched: 1, last_launch_at: at(40), capped: false }, NOW)).toBe('Coding jobs started this session: 1. The last one 40 minutes ago.');
+    expect(goals.jobsText({ launched: 3, last_launch_at: at(40), capped: true }, NOW)).toBe(
+      'Coding jobs started this session: at least 3. The last one 40 minutes ago.',
+    );
+    expect(goals.jobsText({ launched: 0, last_launch_at: null, capped: false }, NOW)).toBe('');
   });
 
   it('the times say how long ago, from the page clock', () => {
@@ -634,7 +637,7 @@ describe('what a goal is doing now, and the folding page', () => {
   });
 
   it('an ended session is one line, with its calls when the log has them', () => {
-    const session = { n: 4, open: false, trigger: 'timer' as const, started_at: at(240), ended_at: at(180) };
+    const session = { n: 4, open: false, started_at: at(240), ended_at: at(180) };
     expect(goals.endedText(session, { total: 31, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 31 tool calls.');
     expect(goals.endedText(session, { total: 1, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 1 tool call.');
     expect(goals.endedText(session, { total: 2000, errors: 0, capped: true }, NOW)).toBe(

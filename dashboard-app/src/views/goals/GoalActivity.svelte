@@ -12,7 +12,8 @@
   // What a goal's session is doing now (GET /goals/{ref}/activity): the current task or workflow, the last tool call,
   // the counts, the newest calls in words and links to the session on the Work screen. It reads when it is shown,
   // when the goal shown, its state, its open session or its last change differ, and, while a session is open, when
-  // the page's own poll lands (`tick`, its last good read): no timer of its own, so a hidden tab or another page reads
+  // the page's own poll lands (`tick`, its last good read), and on that tick too while its last read failed, so a
+  // failed read is tried again with no session open: no timer of its own, so a hidden tab or another page reads
   // nothing. One read at a time: a tick while a read is on its way is dropped; a change of the goal is read once that
   // read lands. A failed read keeps the last answer and says so. Every name is a text node.
   let {
@@ -31,24 +32,26 @@
   const goalState = $derived(goal.state);
   const openSession = $derived(goal.open_session);
   const updatedAt = $derived(goal.updated_at);
-  const pollTick = $derived(openSession !== null ? tick : null);
 
   let answer = $state<GoalActivity | null>(null);
   let failed = $state(false);
+  const pollTick = $derived(openSession !== null || failed ? tick : null);
   /** The server says the panel or goals are off, or the goal is gone: nothing is shown. */
   let off = $state(false);
 
   /** The goal shown now ('' once the panel is gone); read after every await instead of the props. */
   let shown = '';
   let reading: AbortController | null = null;
-  /** What the read on its way was started for, and whether the goal changed since. */
+  /** What the last read was started for (the goal's key and the page's tick then), and whether the goal changed since. */
   let readFor = '';
+  let readTick: number | null = null;
   let changedSince = false;
 
   async function read(forRef: string, key: string) {
     const ac = new AbortController();
     reading = ac;
     readFor = key;
+    readTick = untrack(() => tick);
     changedSince = false;
     try {
       const got = await timed((signal) => getGoalActivity(forRef, signal), ac.signal);
@@ -74,7 +77,7 @@
   $effect(() => {
     const r = ref;
     const key = keyOf();
-    void pollTick;
+    const t = pollTick;
     untrack(() => {
       if (r !== shown) {
         reading?.abort();
@@ -86,6 +89,8 @@
       } else if (reading) {
         if (key !== readFor) changedSince = true;
         return;
+      } else if (key === readFor && (t === null || t === readTick)) {
+        return; // nothing new since the last read (a read that just failed lets the tick through, not a read)
       }
       void read(r, key);
     });
