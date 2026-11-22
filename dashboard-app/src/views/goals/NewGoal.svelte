@@ -5,7 +5,7 @@
   import {
     CHANNEL_HINT, DRAFT_NOTE, LIMIT_LABEL, PRESET_LABEL, PRESET_NAMES, createBody, createGoal, createProblems, formatNumber, limitFields,
     commandsMostHours, commandsProblem, commandsSentence, createRefusalText, newGoalTools, presetLine, typedNumber,
-    HOW_OFTEN_TEXT, dailyHint, type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
+    HOW_OFTEN_TEXT, ONCE_A_DAY_SESSIONS_NOTE, dailyHint, type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
   } from '../../lib/goals';
 
   // The form that makes a draft (POST /goals). A preset's numbers come from GET /goals/options, never from here;
@@ -155,9 +155,11 @@
             {@const range = rangeOf(field)}
             <div class="field">
               <label for="goal-new-{field}">{LIMIT_LABEL[field]}</label>
-              <input id="goal-new-{field}" inputmode="numeric" autocomplete="off" bind:value={form.limits[field]} disabled={sending}
-                aria-describedby="goal-new-{field}-hint" />
-              {#if range}<span class="hint" id="goal-new-{field}-hint">{formatNumber(range.low)} to {formatNumber(range.high)}</span>{/if}
+              <input id="goal-new-{field}" inputmode="numeric" autocomplete="off" bind:value={form.limits[field]}
+                disabled={sending || (field === 'sessions_per_day' && form.daily)} aria-describedby="goal-new-{field}-hint" />
+              {#if field === 'sessions_per_day' && form.daily}
+                <span class="hint" id="goal-new-{field}-hint">{ONCE_A_DAY_SESSIONS_NOTE}</span>
+              {:else if range}<span class="hint" id="goal-new-{field}-hint">{formatNumber(range.low)} to {formatNumber(range.high)}</span>{/if}
             </div>
           {/each}
           <label class="check">
@@ -183,7 +185,7 @@
           <div class="field narrow">
             <label for="goal-new-daily-at">Time of day</label>
             <input id="goal-new-daily-at" type="time" bind:value={form.daily_at} aria-describedby="goal-new-daily-hint" />
-            <span class="hint" id="goal-new-daily-hint">{dailyHint(pacing.zone)}</span>
+            <span class="hint" id="goal-new-daily-hint">{dailyHint(pacing.zone, 'create')}</span>
           </div>
         {/if}
       </fieldset>

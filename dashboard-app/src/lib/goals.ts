@@ -849,15 +849,26 @@ export const presetLine = (limits: Limits) =>
 /** "HH:MM", 00:00 to 23:59: a time of day as the server takes it. */
 export const TIME_OF_DAY = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 export const TIME_PROBLEM = 'Type the time of day as HH:MM, from 00:00 to 23:59.';
-/** What the owner reads before a change of session settings is sent. */
+/** What the owner reads before a change of session settings is sent (`sessionsNote` adds the stall limit's). */
 export const SESSIONS_NOTE =
-  'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now. ' +
-  'If the goal already has that many sessions in a row that finished nothing, it is paused.';
+  'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.';
+/** Said beside a once-a-day goal's sessions per day, which the server does not read for it. */
+export const ONCE_A_DAY_SESSIONS_NOTE = 'Sessions per day does not apply: a goal that works once a day starts one session a day.';
 /** How the server's journal row of such a change begins. */
 const SESSIONS_ROW = 'Session settings: ';
 export const HOW_OFTEN_TEXT = { often: 'As often as its size allows', daily: 'Once a day' } as const;
 
-export const dailyHint = (zone: string) => `Time of day in ${zone}. It starts one session at that time each day.`;
+/** The hint beside a once-a-day time: on the create form (`create`), or on a goal's page (`change`). */
+export function dailyHint(zone: string, where: 'create' | 'change'): string {
+  const then = where === 'create'
+    ? 'Approved after that time, it starts its first session at once.'
+    : 'If that time has passed today and no session ran today, one starts at once.';
+  return `Time of day in ${zone}. It starts one session at that time each day. ${then}`;
+}
+
+/** A goal's sessions per day as its facts show it: for a once-a-day goal, why the number does not count. */
+export const sessionsPerDayText = (goal: Pick<GoalDetail, 'sessions_per_day' | 'daily_at'>) =>
+  goal.daily_at ? 'One, as it works once a day' : String(goal.sessions_per_day);
 
 /** A goal's "How often" in words. */
 export function howOftenText(goal: Pick<GoalDetail, 'daily_at'>, options: GoalOptions): string {
@@ -916,7 +927,8 @@ function numberChanged(form: SessionsForm, start: SessionsForm, field: SessionsN
 /** Only what changed, as the route takes it. */
 export function sessionsBody(form: SessionsForm, start: SessionsForm): SessionsBody {
   const body: SessionsBody = {};
-  if (numberChanged(form, start, 'sessions_per_day')) body.sessions_per_day = typedNumber(form.sessions_per_day);
+  // A once-a-day goal's sessions per day is not read by the server: it is neither sent nor checked.
+  if (!form.daily && numberChanged(form, start, 'sessions_per_day')) body.sessions_per_day = typedNumber(form.sessions_per_day);
   if (numberChanged(form, start, 'gap_minutes')) body.min_interval_seconds = typedNumber(form.gap_minutes) * 60;
   if (numberChanged(form, start, 'jobs_per_day')) body.jobs_per_day = typedNumber(form.jobs_per_day);
   if (form.quiet_hours_ok !== start.quiet_hours_ok) body.quiet_hours_ok = form.quiet_hours_ok;
@@ -941,7 +953,7 @@ export function sessionsProblem(form: SessionsForm, start: SessionsForm, options
     ['stall_limit', 'the stall limit', stall.low, stall.high, ''],
   ];
   for (const [field, words, low, high, unit] of checks) {
-    if (!numberChanged(form, start, field)) continue;
+    if (!numberChanged(form, start, field) || (field === 'sessions_per_day' && form.daily)) continue;
     const value = typedNumber(form[field]);
     if (!Number.isInteger(value)) return capital(`${words} must be a whole number`);
     if (!inRange(value, low, high)) return capital(`${words} must be at least ${formatNumber(low)} and at most ${formatNumber(high)}${unit}`);
@@ -949,4 +961,14 @@ export function sessionsProblem(form: SessionsForm, start: SessionsForm, options
   if (form.daily && !TIME_OF_DAY.test(form.daily_at.trim())) return TIME_PROBLEM;
   if (!Object.keys(sessionsBody(form, start)).length) return 'Change a setting first.';
   return null;
+}
+
+/** The sentence before a change of session settings is sent: `SESSIONS_NOTE`, and when the stall limit is lowered,
+ * that a goal whose newest sessions already reach it is paused (the server's next check pauses it; the change never
+ * does). */
+export function sessionsNote(form: SessionsForm, start: SessionsForm): string {
+  const stall = typedNumber(form.stall_limit);
+  if (!numberChanged(form, start, 'stall_limit') || !(stall < typedNumber(start.stall_limit))) return SESSIONS_NOTE;
+  const newest = stall === 1 ? 'its last session' : `its last ${stall} sessions in a row`;
+  return `${SESSIONS_NOTE} If ${newest} finished nothing, Nous pauses it at its next check.`;
 }

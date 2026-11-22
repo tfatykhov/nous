@@ -406,16 +406,12 @@ describe('goal pacing: how often a goal works, and changing its session settings
     expect(ACTION_TEXT.sessions.label).toBe('Change how it works');
     expect(asksFirst('sessions')).toBe(true);
     expect(confirmText('sessions', goal, { driverRunning: true })).toBe(goals.SESSIONS_NOTE);
-    expect(goals.SESSIONS_NOTE).toBe(
-      'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now. ' +
-        'If the goal already has that many sessions in a row that finished nothing, it is paused.',
-    );
+    expect(goals.SESSIONS_NOTE).toBe('This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.');
   });
 
   it('how often, in words', () => {
     expect(goals.howOftenText({ daily_at: '09:00' }, options)).toBe('Once a day, from 09:00 (America/New_York)');
     expect(goals.howOftenText({ daily_at: null }, options)).toBe('As often as its limits allow');
-    expect(goals.dailyHint('America/New_York')).toBe('Time of day in America/New_York. It starts one session at that time each day.');
   });
 
   it('the form starts from the goal, with the gap in minutes and the default time', () => {
@@ -480,5 +476,37 @@ describe('goal pacing: how often a goal works, and changing its session settings
     expect('daily_at' in createBody(form())).toBe(false);
     expect(createProblems({ ...daily, daily_at: '7:45' }, options)).toEqual(['Type the time of day as HH:MM, from 00:00 to 23:59.']);
     expect(createProblems({ ...daily, daily: false, daily_at: '7:45' }, options)).toEqual([]);
+  });
+});
+
+describe('goal pacing: the review follow-ups', () => {
+  const options = OPTIONS({ pacing: PACING() });
+  const goal = goalDetail({ sessions_per_day: 4, min_interval_seconds: 3600, jobs_per_day: 2, quiet_hours_ok: false, stall_limit: 3, daily_at: null });
+  const start = () => goals.sessionsForm(goal, options);
+
+  it('the hint says a goal approved or changed after its time starts at once', () => {
+    expect(goals.dailyHint('America/New_York', 'create')).toBe('Time of day in America/New_York. It starts one session at that time each day. Approved after that time, it starts its first session at once.');
+    expect(goals.dailyHint('America/New_York', 'change')).toBe('Time of day in America/New_York. It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.');
+  });
+
+  it('the pause sentence is said only when the stall limit is lowered', () => {
+    expect(goals.sessionsNote(start(), start())).toBe(goals.SESSIONS_NOTE);
+    expect(goals.sessionsNote({ ...start(), sessions_per_day: '1' }, start())).toBe(goals.SESSIONS_NOTE);
+    expect(goals.sessionsNote({ ...start(), stall_limit: '5' }, start())).toBe(goals.SESSIONS_NOTE);
+    expect(goals.sessionsNote({ ...start(), stall_limit: '2' }, start())).toBe(
+      `${goals.SESSIONS_NOTE} If its last 2 sessions in a row finished nothing, Nous pauses it at its next check.`,
+    );
+    expect(goals.sessionsNote({ ...start(), stall_limit: '1' }, start())).toBe(
+      `${goals.SESSIONS_NOTE} If its last session finished nothing, Nous pauses it at its next check.`,
+    );
+  });
+
+  it('once a day, sessions per day is not sent or checked, and the facts say why', () => {
+    expect(goals.sessionsBody({ ...start(), daily: true, sessions_per_day: '7' }, start())).toEqual({ daily: true, daily_at: '09:00' });
+    expect(goals.sessionsProblem({ ...start(), daily: true, sessions_per_day: 'x' }, start(), options)).toBeNull();
+    expect(goals.sessionsPerDayText({ sessions_per_day: 4, daily_at: '09:00' })).toBe('One, as it works once a day');
+    expect(goals.sessionsPerDayText({ sessions_per_day: 4, daily_at: null })).toBe('4');
+    expect(goals.sessionsPerDayText({ sessions_per_day: 4 })).toBe('4');
+    expect(goals.ONCE_A_DAY_SESSIONS_NOTE).toBe('Sessions per day does not apply: a goal that works once a day starts one session a day.');
   });
 });

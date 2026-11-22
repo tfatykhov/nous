@@ -9,7 +9,8 @@
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
-    dailyHint, howOftenText, sessionsBody, sessionsForm, sessionsProblem, type SessionsForm,
+    ONCE_A_DAY_SESSIONS_NOTE, dailyHint, howOftenText, sessionsBody, sessionsForm, sessionsNote, sessionsPerDayText,
+    sessionsProblem, type SessionsForm,
   } from '../../lib/goals';
 
   // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
@@ -304,10 +305,12 @@
           <p id={sentenceId()} tabindex="-1" class:wrong={!deadlineReady}>{deadlineReady ? confirmText('deadline', goal, { driverRunning, days: newDays, now }) : deadlineWrong}</p>
         {:else if action === 'sessions'}
           <div class="fields">
-            <div class="field">
-              <label for="goal-p.{goal.ref}">Sessions per day</label>
-              <input id="goal-p.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.sessions_per_day} disabled={busy !== null} />
-            </div>
+            {#if !sessions.daily}
+              <div class="field">
+                <label for="goal-p.{goal.ref}">Sessions per day</label>
+                <input id="goal-p.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.sessions_per_day} disabled={busy !== null} />
+              </div>
+            {/if}
             <div class="field">
               <label for="goal-g.{goal.ref}">Shortest gap between sessions (minutes)</label>
               <input id="goal-g.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.gap_minutes} disabled={busy !== null} />
@@ -339,11 +342,12 @@
               <div class="field narrow">
                 <label for="goal-w.{goal.ref}">Time of day</label>
                 <input id="goal-w.{goal.ref}" type="time" bind:value={sessions.daily_at} aria-describedby="goal-x.{goal.ref}" />
-                {#if zone}<span class="hint" id="goal-x.{goal.ref}">{dailyHint(zone)}</span>{/if}
+                {#if zone}<span class="hint" id="goal-x.{goal.ref}">{dailyHint(zone, 'change')}</span>{/if}
               </div>
+              <p class="hint">{ONCE_A_DAY_SESSIONS_NOTE}</p>
             {/if}
           </fieldset>
-          <p id={sentenceId()} tabindex="-1" class:wrong={!sessionsReady}>{sessionsReady ? confirmText('sessions', goal, { driverRunning }) : sessionsWrong}</p>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!sessionsReady}>{sessionsReady ? sessionsNote(sessions, sessionsStart) : sessionsWrong}</p>
         {:else}
           <p id={sentenceId()} tabindex="-1">{confirmText(action, goal, { driverRunning })}</p>
         {/if}
@@ -398,7 +402,7 @@
       <dt>Day budget</dt><dd>{formatTokens(goal.day_budget)}</dd>
       <dt>Deadline</dt><dd>{goal.deadline_at ? `${fmtUtc(goal.deadline_at)}. ${deadlineText(goal, now)}` : `${goal.deadline_days} days from approval`}</dd>
       {#if goal.daily_at !== undefined}<dt>How often</dt><dd>{howOftenText(goal, options)}</dd>{/if}
-      <dt>Sessions per day</dt><dd>{goal.sessions_per_day}</dd>
+      <dt>Sessions per day</dt><dd>{sessionsPerDayText(goal)}</dd>
       <dt>Shortest gap between sessions</dt><dd>{intervalText(goal.min_interval_seconds)}</dd>
       <dt>Job launches per day</dt><dd>{goal.jobs_per_day}</dd>
       <dt>Quiet hours</dt><dd>{goal.quiet_hours_ok ? 'Sessions may start in quiet hours' : 'No session starts in quiet hours'}</dd>
