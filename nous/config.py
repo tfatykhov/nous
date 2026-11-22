@@ -4468,11 +4468,16 @@ class Settings(BaseSettings):
         flag is off."""
         if not self.goals_pacing_enabled:
             return self
-        from nous.goals.pacing import zone
+        # The zone is checked here as nous.goals.pacing.zone reads it (this module does not import the goals package).
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+        try:
+            known = bool(self.goals_timezone) and ZoneInfo(self.goals_timezone) is not None
+        except (ZoneInfoNotFoundError, ValueError):
+            known = False
         needed = {
             "NOUS_GOALS_ENABLED=true": self.goals_enabled,
-            "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)": zone(self) is not None,
+            "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)": known,
         }
         missing = [name for name, on in needed.items() if not on]
         if missing:
