@@ -70,6 +70,7 @@ nous/
 │   │   ├── monitor.py          # Post-turn self-assessment
 │   │   ├── usage_tracker.py    # Context usage feedback loop
 │   │   ├── promise_gate.py     # F111: turn-close promise gate — PromiseDetector (stage 1), BackingResolver (artifact ids), PromiseGate
+│   │   ├── finish_checks.py    # F113 fixed finish checks (pure): named_file_missing, effects_all_failed, evaluate (clean/flagged/not_checked), record_of, finish_check_counts
 │   │   ├── promise_classifier.py # F111 PR B1: stage 2 — one Anthropic call per gate row's sentence, ClassifierScheduler (background, capped, drained)
 │   │   └── schemas.py          # TurnContext, TurnResult, CarriedFrame (F110 carried frame), etc.
 │   ├── handlers/               # Event bus handlers
