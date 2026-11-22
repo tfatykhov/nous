@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, false, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
@@ -40,7 +41,7 @@ from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
-from nous.goals import charter, owner_message, roots, spend
+from nous.goals import charter, owner_message, pacing, roots, spend
 from nous.goals import commands as goal_commands
 from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, WAITING_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
@@ -114,6 +115,7 @@ HELD_WORDS: dict[str, str] = {
     "budget": "the total budget is spent",
     "day_budget": "today's budget is spent",
     "day_sessions": "today's sessions are used up",
+    "paced": "it is not yet the time of day set for it",
     "quiet": "it is quiet hours",
     "jobs": "today's job launches are used up",
     "sessions": "the most goal sessions allowed at once are open",
@@ -598,9 +600,10 @@ class GoalDriver:
                     await self._clear_request(s, goal_id, "run_now", request_at)
                     self._journal(s, goal_id, "state", _not_started(held), actor="harness")
                     await s.commit()
-                elif held in ("day_budget", "day_sessions"):
-                    # Only the next UTC day frees these; the goal lock is held, so the wake read is still the wake.
-                    await self._wake_next_day(s, goal_id, seen, now)
+                elif held in ("day_budget", "day_sessions", pacing.PACED):
+                    # Only the next UTC day frees these, or for a goal paced once a day its time of day (today's or
+                    # tomorrow's); the goal lock is held, so the wake read is still the wake.
+                    await self._wake_next_day(s, goal_id, seen, now, target=self._paced_wake(goal, held, now))
                     await s.commit()
                 if not open_work:
                     return _Start(held=held)
@@ -678,12 +681,13 @@ class GoalDriver:
     async def _held_by_limits(self, s: AsyncSession, goal: Goal, now: datetime, *, trigger: str) -> str | None:
         """The first limit that holds a start of ``goal`` at ``now`` (a ``HELD_WORDS`` key), else None, read in
         the start's transaction under the goal locks: the deadline, the total budget, the day's budget (spend counts
-        for the UTC day its session started), the day's sessions (not for a run-now), quiet hours (unless the goal
-        may run then; not for a run-now), the day's job launches (when the tool-call log is on; a cap of 0 holds like
-        a cap of 1, once one launch is counted: a launch inside a session cannot be stopped, only the next start
-        held), and the sessions open across all goals. The comparisons are the store's: a deadline at ``now``
-        has passed, a budget spent to the token is spent. Spend can rise after this read (a refresh writes it): a
-        chain can overshoot its goal by at most its own token limit."""
+        for the UTC day its session started), the day's sessions (not for a run-now: ``sessions_per_day`` on the UTC
+        day, or for a goal paced once a day, one a day of the pacing zone and not before its time, ``pacing.hold``),
+        quiet hours (unless the goal may run then; not for a run-now), the day's job launches (when the tool-call log
+        is on; a cap of 0 holds like a cap of 1, once one launch is counted: a launch inside a session cannot be
+        stopped, only the next start held), and the sessions open across all goals. The comparisons are the store's:
+        a deadline at ``now`` has passed, a budget spent to the token is spent. Spend can rise after this read (a
+        refresh writes it): a chain can overshoot its goal by at most its own token limit."""
         if _deadline_passed(goal, now):
             return "deadline"
         total, today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
@@ -692,9 +696,18 @@ class GoalDriver:
         if _budget_spent(today, goal.day_budget):
             return "day_budget"
         if trigger != "run_now":
-            started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now)
-            if started >= goal.sessions_per_day:
-                return "day_sessions"
+            tz = self._pace_zone(goal)
+            if tz is not None:
+                # Goal pacing: one session a local day, not before its time; sessions_per_day is not read.
+                since = pacing.day_start(now, tz)
+                started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now, since=since)
+                held = pacing.hold(now, tz, goal.daily_at_minute, started)
+                if held is not None:
+                    return held
+            else:
+                started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now)
+                if started >= goal.sessions_per_day:
+                    return "day_sessions"
         if not goal.quiet_hours_ok and trigger != "run_now":
             from nous.heartbeat.quiet_hours import quiet_hours_end  # the heartbeat package is heavy to import
 
@@ -710,8 +723,24 @@ class GoalDriver:
             return "sessions"
         return None
 
-    async def _wake_next_day(self, s: AsyncSession, goal_id: UUID, seen: datetime | None, now: datetime) -> None:
-        """An active goal's wake to the start of the next UTC day after ``now``, while it is still ``seen``."""
+    def _pace_zone(self, goal: Goal) -> ZoneInfo | None:
+        """The zone of a goal paced once a day (goal pacing on and its time set), else None."""
+        tz = pacing.zone(self._settings)
+        return tz if tz is not None and goal.daily_at_minute is not None else None
+
+    def _paced_wake(self, goal: Goal, held: str, now: datetime) -> datetime | None:
+        """Where a hold of a paced goal moves its wake (its time of day, today's or tomorrow's), else None."""
+        tz = self._pace_zone(goal)
+        if tz is None or held not in (pacing.PACED, pacing.DAY_SESSIONS):
+            return None
+        return pacing.wake_after_hold(held, now, tz, goal.daily_at_minute)
+
+    async def _wake_next_day(
+        self, s: AsyncSession, goal_id: UUID, seen: datetime | None, now: datetime, *, target: datetime | None = None
+    ) -> None:
+        """An active goal's wake to the start of the next UTC day after ``now`` (or to ``target``), while it is still
+        ``seen``."""
+        at = spend.day_start(now) + timedelta(days=1) if target is None else target
         await s.execute(
             update(Goal)
             .where(
@@ -720,7 +749,7 @@ class GoalDriver:
                 Goal.state == "active",
                 Goal.next_wake_at.is_not_distinct_from(seen),
             )
-            .values(next_wake_at=spend.day_start(now) + timedelta(days=1), updated_at=func.clock_timestamp())
+            .values(next_wake_at=at, updated_at=func.clock_timestamp())
             .execution_options(synchronize_session=False)
         )
 

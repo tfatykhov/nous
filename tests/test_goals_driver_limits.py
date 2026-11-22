@@ -11,6 +11,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from f099_dashboard_support import put_intention
@@ -48,7 +49,7 @@ from nous.brain import continuation
 from nous.cognitive.ledger_store import detail_text
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.goals import driver as driver_module
-from nous.goals import roots, spend
+from nous.goals import pacing, roots, spend
 from nous.goals.driver import GoalDriver
 from nous.goals.store import GoalRefused
 from nous.handlers.continuation_runner import ContinuationRunner
@@ -1647,6 +1648,120 @@ async def test_the_refresh_updates_its_session_rows_in_id_order(env_factory):  #
     finally:
         event.remove(engine, "before_cursor_execute", seen)
     assert updated == sorted(ids)
+
+
+# ---- once a day (goal pacing) ------------------------------------------------------------------------------------
+
+
+async def _paced(env_factory, **settings) -> tuple[SimpleNamespace, ZoneInfo, datetime]:  # noqa: F811
+    """A world with goal pacing on, in a whole-hour zone where it is now about noon (``Etc/GMT-N`` is N hours AHEAD
+    of UTC), so a time an hour later or earlier today never crosses a local midnight; its zone and local now."""
+    probe = await _world(env_factory)
+    offset = 12 - (await _db_now(probe)).hour
+    name = "Etc/GMT" if offset == 0 else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+    w = await _world(env_factory, goals_pacing_enabled=True, goals_timezone=name, **settings)
+    assert w.env.settings.goals_pacing_enabled is True
+    zone = ZoneInfo(name)
+    local = (await _db_now(w)).astimezone(zone)
+    assert 11 <= local.hour <= 13, (name, local)
+    return w, zone, local
+
+
+def _minute(local: datetime, *, hours: float) -> int:
+    """The minute of the day ``hours`` from ``local``."""
+    at = local + timedelta(hours=hours)
+    return at.hour * 60 + at.minute
+
+
+def _slot(zone: ZoneInfo, local: datetime, minute: int, *, days: int = 0) -> datetime:
+    return pacing.slot(local.date() + timedelta(days=days), minute, zone)
+
+
+async def test_a_paced_goal_waits_for_its_time_of_day(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    minute = _minute(local, hours=1)
+    await _set_goal(w, goal, daily_at_minute=minute, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, minute)
+    assert await _sessions(w, goal) == []
+    assert not [r for r in await _harness(w, goal) if "not started" in r.text]  # a timer hold leaves no row
+
+
+async def test_a_paced_goal_starts_once_its_time_has_passed(env_factory):  # noqa: F811
+    w, _zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, daily_at_minute=_minute(local, hours=-1), next_wake_at=func.clock_timestamp())
+    assert len((await w.driver.tick()).started) == 1
+    assert [s.trigger for s in await _sessions(w, goal)] == ["timer"]
+
+
+async def test_a_paced_goal_starts_one_session_a_day_whatever_its_sessions_per_day(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w, preset="medium")
+    assert goal.sessions_per_day == 4
+    minute = _minute(local, hours=-1)
+    await _set_goal(w, goal, daily_at_minute=minute)
+    await _closed(w, goal, ["step_closed"])  # today's session
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, minute, days=1)
+
+
+async def test_a_session_of_the_local_day_before_does_not_hold_todays(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    yesterday = pacing.day_start(local, zone) - timedelta(minutes=5)
+    await _closed(w, goal, ["step_closed"], started_at=yesterday, ended_at=yesterday)
+    await _set_goal(w, goal, daily_at_minute=_minute(local, hours=-1), next_wake_at=func.clock_timestamp())
+    assert len((await w.driver.tick()).started) == 1
+
+
+async def test_run_now_before_the_time_starts_and_uses_up_the_day(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    minute = _minute(local, hours=1)
+    await _set_goal(w, goal, daily_at_minute=minute, next_wake_at=func.clock_timestamp() + timedelta(hours=3))
+    await w.store.request_run_now(goal.id, actor="host")
+    assert len((await w.driver.tick()).started) == 1  # the owner's run-now is not held by the time
+    (session,) = await _sessions(w, goal)
+    assert session.trigger == "run_now"
+    await _finish(w, await w.env.heart.intentions.get_for_source("subtask", session.first_subtask_id))
+    assert (await w.driver.tick()).closed == 1
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()  # today's time comes, and today's session already ran
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, minute, days=1)
+
+
+async def test_a_paced_goal_held_by_its_day_budget_still_wakes_at_the_next_utc_midnight(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    minute = _minute(local, hours=-1)
+    await _set_goal(w, goal, daily_at_minute=minute)
+    await _closed(w, goal, ["step_closed"], spent=goal.day_budget)
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    midnight = await _next_utc_midnight(w)
+    assert midnight != _slot(zone, local, minute, days=1)
+    assert (await _goal(w, goal)).next_wake_at == midnight
+
+
+async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_factory, monkeypatch):  # noqa: F811
+    """The hold's wake is written under the guard every wake write has: a wake changed since it was read stays."""
+    w, _zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, daily_at_minute=_minute(local, hours=1), next_wake_at=func.clock_timestamp())
+    real = driver_module.GoalDriver._held_by_limits
+
+    async def moved_meanwhile(self, s, goal_row, now, *, trigger):
+        held = await real(self, s, goal_row, now, trigger=trigger)
+        await s.execute(update(Goal).where(Goal.id == goal_row.id).values(next_wake_at=now - timedelta(minutes=7)))
+        return held
+
+    monkeypatch.setattr(driver_module.GoalDriver, "_held_by_limits", moved_meanwhile)
+    before = await _db_now(w)
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at < before
 
 
 # ---- a reactivated lineage DAG -----------------------------------------------------------------------------------
