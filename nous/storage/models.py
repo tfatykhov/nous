@@ -629,6 +629,9 @@ class Goal(Base):
         CheckConstraint("mode IN ('contained', 'commands')", name="chk_goals_mode_value"),
         CheckConstraint("mode_hours IS NULL OR mode_hours BETWEEN 1 AND 2160", name="goals_mode_hours_check"),
         CheckConstraint(
+            "daily_at_minute IS NULL OR daily_at_minute BETWEEN 0 AND 1439", name="chk_goals_daily_at_minute"
+        ),
+        CheckConstraint(
             "state IN ('draft', 'active', 'paused', 'done', 'failed', 'cancelled')", name="goals_state_check"
         ),
         CheckConstraint(
@@ -679,6 +682,9 @@ class Goal(Base):
     # is that end, set when the goal is approved.
     mode_hours: Mapped[int | None] = mapped_column(Integer)
     mode_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Goal pacing (migration 120): one session a day, from this minute of the day in NOUS_GOALS_TIMEZONE; NULL runs as
+    # often as the limits allow. Read only with NOUS_GOALS_PACING_ENABLED on.
+    daily_at_minute: Mapped[int | None] = mapped_column(Integer)
     state: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
     pause_reason: Mapped[str | None] = mapped_column(Text)
     plan: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="'[]'::jsonb")
