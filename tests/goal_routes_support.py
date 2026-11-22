@@ -27,6 +27,16 @@ PROXY = {"X-Nous-Proxy-Secret": PROXY_VALUE}
 FORBIDDEN = {"error": "forbidden"}
 NOT_JSON = {"error": "Content-Type must be application/json"}
 CHAN = "telegram:4242"
+# Goal pacing on, in New York, with the goal settings it needs.
+PACING_ON = {
+    "goals_enabled": True,
+    "continuation_enabled": True,
+    "intentions_enabled": True,
+    "result_inbox_enabled": True,
+    "subtask_enabled": True,
+    "goals_pacing_enabled": True,
+    "goals_timezone": "America/New_York",
+}
 
 
 def digest(value: str) -> str:

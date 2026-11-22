@@ -9,7 +9,18 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from goal_routes_support import CHAN, active, add_session, db_now, draft, harness_row, make_env, paused, set_values
+from goal_routes_support import (
+    CHAN,
+    PACING_ON,
+    active,
+    add_session,
+    db_now,
+    draft,
+    harness_row,
+    make_env,
+    paused,
+    set_values,
+)
 from sqlalchemy import func, select
 
 from nous.api.goal_routes import JOURNAL_MAX, masked_channel
@@ -313,3 +324,55 @@ async def test_a_paused_goals_resume_blocked_follows_its_spend_and_deadline(db) 
     await env.store.raise_budget(budget.id, total=budget.total_budget * 2, actor="owner")
     after = (await env.call("GET", f"/goals/{budget.id}")).json()
     assert after["resume_blocked"] is None and "resume" in after["actions"]
+
+
+# ---- goal pacing ----------------------------------------------------------------------------------------------------
+
+OPTION_KEYS = {
+    "enabled", "presets", "ranges", "has_default_channel", "channel_kinds", "bounds", "driver_running", "spend_note",
+}
+
+
+async def test_with_pacing_on_the_detail_has_the_time_and_the_options_the_zone(db) -> None:
+    env = make_env(db, **PACING_ON)
+    paced = await draft(env.store, daily_at_minute=540)
+    plain = await draft(env.store)
+    body = (await env.call("GET", f"/goals/{paced.id}")).json()
+    assert set(body) == DETAIL_KEYS | {"daily_at"} and body["daily_at"] == "09:00"
+    assert list(body).index("daily_at") == list(body).index("stall_limit") + 1
+    assert (await env.call("GET", f"/goals/{plain.id}")).json()["daily_at"] is None
+    options = (await env.call("GET", "/goals/options")).json()
+    assert set(options) == OPTION_KEYS | {"pacing"}
+    assert options["pacing"] == {
+        "zone": "America/New_York",
+        "stall_limit": {"low": 1, "high": 10},
+        "default_at": "09:00",
+    }
+    listed = (await env.call("GET", "/goals")).json()["goals"]
+    assert all(set(row) == ROW_KEYS for row in listed)
+
+
+async def test_with_pacing_on_sessions_is_offered_for_a_draft_an_active_and_a_paused_goal(db) -> None:
+    env = make_env(db, **PACING_ON)
+    goals = [await draft(env.store), await active(env.store), await paused(env.store, "owner")]
+    finished = await draft(env.store)
+    await env.store.cancel(finished.id, actor="owner")
+    for goal in goals:
+        actions = (await env.call("GET", f"/goals/{goal.id}")).json()["actions"]
+        assert actions.index("sessions") == actions.index("budget") + 1, actions
+    assert (await env.call("GET", f"/goals/{finished.id}")).json()["actions"] == []
+
+
+async def test_with_pacing_off_the_answers_are_as_before(db) -> None:
+    env = make_env(db)
+    goal = await active(env.store)
+    await set_values(env.store, goal, daily_at_minute=540)  # a time written by hand is not shown
+    for state in ("active", "paused", "draft"):
+        if state == "paused":
+            goal = await paused(env.store, "owner")
+        if state == "draft":
+            goal = await draft(env.store)
+        body = (await env.call("GET", f"/goals/{goal.id}")).json()
+        assert set(body) == DETAIL_KEYS and "sessions" not in body["actions"], state
+    options = (await env.call("GET", "/goals/options")).json()
+    assert set(options) == OPTION_KEYS

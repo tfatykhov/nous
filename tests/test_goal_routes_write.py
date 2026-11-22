@@ -14,6 +14,7 @@ from goal_routes_support import (
     CHAN,
     OWNER,
     OWNER_VALUE,
+    PACING_ON,
     PROXY,
     active,
     add_session,
@@ -28,6 +29,7 @@ from goal_routes_support import (
     set_values,
 )
 
+from nous.api.goal_routes import PACING_OFF
 from nous.goals.store import GoalRefused, describe, format_short_id
 
 pytestmark = pytest.mark.postgres_only
@@ -478,4 +480,40 @@ async def test_a_long_preset_or_field_name_is_400_and_said_back_only_in_part(db)
     assert unknown.status_code == 400
     assert unknown.json()["error"].endswith(": Extra inputs are not permitted")
     assert len(unknown.json()["error"]) < 100
+    assert (await env.call("GET", "/goals?state=all")).json()["goals"] == []
+
+
+# ---- goal pacing: a goal created to work once a day ----------------------------------------------------------------
+
+
+async def test_create_with_a_time_of_day_makes_a_once_a_day_draft(db) -> None:
+    env = make_env(db, **PACING_ON)
+    response = await env.call("POST", "/goals", json={**NEW, "daily_at": "07:45"})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert (body["daily_at"], body["state"], body["preset"]) == ("07:45", "draft", "small")
+    goal = await env.store.get(body["id"])
+    assert goal.daily_at_minute == 7 * 60 + 45
+    assert [row.text for row in await journal_rows(env.store, goal)] == [
+        "Created as a draft (small limits).",
+        "Once a day from 07:45 (America/New_York).",
+    ]
+    plain = (await env.call("POST", "/goals", json=NEW)).json()
+    assert plain["daily_at"] is None
+
+
+async def test_create_with_a_time_of_day_while_pacing_is_off_is_503_and_creates_nothing(db) -> None:
+    env = make_env(db)
+    response = await env.call("POST", "/goals", json={**NEW, "daily_at": "07:45"})
+    assert (response.status_code, response.json()) == (503, PACING_OFF)
+    assert (await env.call("GET", "/goals?state=all")).json()["goals"] == []
+    assert (await env.call("POST", "/goals", json={**NEW, "daily_at": None})).status_code == 201
+
+
+@pytest.mark.parametrize("bad", ["9:00", "24:00", "07:60", "", "0745", "07:45:00", 465, True])
+async def test_create_with_a_time_of_day_out_of_shape_is_400_naming_it(db, bad) -> None:
+    env = make_env(db, **PACING_ON)
+    response = await env.call("POST", "/goals", json={**NEW, "daily_at": bad})
+    assert response.status_code == 400, response.text
+    assert response.json()["error"].startswith("daily_at: ")
     assert (await env.call("GET", "/goals?state=all")).json()["goals"] == []

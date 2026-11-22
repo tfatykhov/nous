@@ -34,6 +34,13 @@ A goal that may run any command (``nous.goals.commands``, with ``NOUS_GOAL_COMMA
 words only with the flag on; ``GET /goals/commands`` lists the goals that may run any command now, for the screen's
 banner. A goal's detail says the state of its mode (``commands``) and whether its tasks run any command now. Each
 refusal is the store's sentence, as written in ``commands``.
+
+Goal pacing (``nous.goals.pacing``, with ``NOUS_GOALS_PACING_ENABLED`` on): ``POST /goals`` takes ``daily_at``
+(``"HH:MM"``), a goal that works once a day from that time of the configured zone; ``POST /goals/{ref}/sessions``
+changes a goal's session settings (``GoalStore.change_sessions``); a goal's detail says its ``daily_at`` and offers
+``sessions``, and ``GET /goals/options`` carries ``pacing`` (the zone, the stall limit's range, the form's default
+time). With the flag off none of these keys is sent, ``sessions`` is not offered, a create that carries ``daily_at``
+is answered 503 ``PACING_OFF`` and ``POST /goals/{ref}/sessions`` is refused by the store (409).
 """
 
 from __future__ import annotations
@@ -46,7 +53,18 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 from sqlalchemy import func, or_, select
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -59,7 +77,8 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_backgro
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals import commands as goal_commands
-from nous.goals.envelope import _RANGES, PRESETS
+from nous.goals import pacing
+from nous.goals.envelope import _RANGES, PRESETS, STALL_RANGE
 from nous.goals.grants import CREATE_CONFIRM, identity_token, lead_sentence, never_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
@@ -84,6 +103,8 @@ logger = logging.getLogger(__name__)
 
 GOALS_OFF = {"error": "goals are off", "goals_enabled": False}
 GRANTS_OFF = {"error": "Tool grants are off on this server."}
+PACING_OFF = {"error": pacing.CREATE_OFF}
+DEFAULT_AT = "09:00"  # the time the create form offers for a goal that works once a day
 STATES: tuple[str, ...] = ("draft", "active", "paused", "done", "failed", "cancelled")
 FINISHED_STATES: tuple[str, ...] = ("done", "failed", "cancelled")
 # The list's filters: a state, or one of these names (``open`` by default, so a poll never re-reads finished goals).
@@ -108,6 +129,7 @@ ACTIONS: tuple[str, ...] = (
     "pause",
     "stop",
     "budget",
+    "sessions",
     "deadline",
     "note",
     "cancel",
@@ -145,6 +167,16 @@ def _no_nul(value: str) -> str:
 
 # A text field: a string, never coerced, with no NUL (the database's text cannot hold one).
 Text = Annotated[StrictStr, AfterValidator(_no_nul)]
+
+
+def _time_of_day(value: str | None) -> str | None:
+    """A time of day as the owner writes it, ``"HH:MM"`` from 00:00 to 23:59."""
+    if value is not None:
+        try:
+            pacing.parse_at(value)
+        except ValueError:
+            raise ValueError("must be a time of day written HH:MM, from 00:00 to 23:59") from None
+    return value
 
 
 class _Body(BaseModel):
@@ -199,6 +231,7 @@ class CreateGoal(_Body):
     origin_channel: Text | None = Field(default=None, max_length=CHANNEL_MAX_CHARS)
     tools: list[GrantItem] | None = None
     commands: CommandsBody | None = None
+    daily_at: Annotated[Text | None, AfterValidator(_time_of_day)] = Field(default=None, max_length=5)
 
 
 class BudgetChange(_Body):
@@ -206,6 +239,40 @@ class BudgetChange(_Body):
 
     total: StrictInt | None = None
     day: StrictInt | None = None
+
+
+class SessionsChange(_Body):
+    """``POST /goals/{ref}/sessions``: new session settings; any left out (or null) stay as they are. ``daily: true``
+    with ``daily_at`` (``"HH:MM"``) makes the goal work once a day from that time; ``daily: false`` makes it run as
+    often as its limits allow."""
+
+    sessions_per_day: StrictInt | None = None
+    min_interval_seconds: StrictInt | None = None
+    jobs_per_day: StrictInt | None = None
+    quiet_hours_ok: StrictBool | None = None
+    stall_limit: StrictInt | None = None
+    daily: StrictBool | None = None
+    daily_at: Annotated[Text | None, AfterValidator(_time_of_day)] = Field(
+        default=None, max_length=5, validate_default=True
+    )
+
+    @field_validator("daily_at")
+    @classmethod
+    def _with_daily(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """A time goes with ``daily: true``, and ``daily: true`` needs one."""
+        daily = info.data.get("daily")
+        if value is not None and daily is not True:
+            raise ValueError("a time of day goes with daily: true")
+        if value is None and daily is True:
+            raise ValueError("daily: true needs a time of day")
+        return value
+
+    def changes(self) -> dict[str, Any]:
+        """The store's ``changes``: each setting given, and ``daily_at_minute`` when ``daily`` is."""
+        given = self.model_dump(exclude={"daily", "daily_at"}, exclude_none=True)
+        if self.daily is not None:
+            given["daily_at_minute"] = pacing.parse_at(self.daily_at) if self.daily else None
+        return given
 
 
 class DeadlineChange(_Body):
@@ -315,11 +382,14 @@ def _can_extend(goal: Goal, now: datetime) -> bool:
 
 def available_actions(goal: Goal, *, tally: Tally, now: datetime, settings: Any) -> list[str]:
     """The owner's actions ``GoalStore`` accepts for ``goal`` now, in ``ACTIONS`` order. A finished goal has none.
-    ``budget`` and ``note`` are offered for any open goal: the store then refuses only a value that breaks a rule."""
+    ``budget`` and ``note`` are offered for any open goal, and so is ``sessions`` with goal pacing on: the store then
+    refuses only a value that breaks a rule."""
     if goal.state not in LIVE_STATES:
         return []
     session_open = tally.open_session is not None
     offered = {"cancel", "budget", "note"}
+    if pacing.zone(settings) is not None:
+        offered.add("sessions")
     if goal.state == "draft" and owner_channel(settings, goal.origin_channel) is not None:
         offered.add("approve")
     if goal.state == "active":
@@ -346,6 +416,10 @@ def available_actions(goal: Goal, *, tally: Tally, now: datetime, settings: Any)
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _at(minute: int | None) -> str | None:
+    return pacing.format_at(minute) if minute is not None else None
 
 
 def masked_channel(channel: str | None) -> str | None:
@@ -470,6 +544,8 @@ def goal_detail(
         "jobs_per_day": goal.jobs_per_day,
         "quiet_hours_ok": goal.quiet_hours_ok,
         "stall_limit": goal.stall_limit,
+        # Goal pacing, with its flag on: the time of day of a goal that works once a day, or None.
+        **({"daily_at": _at(goal.daily_at_minute)} if pacing.zone(settings) is not None else {}),
         "mode_until": _iso(goal.mode_until),
         "mode_hours": goal.mode_hours,
         "commands": commands_state(goal, now=now, settings=settings, ended=mode_ended),
@@ -814,8 +890,16 @@ def build_goal_routes(
                 **({"tools": new_goal_tools()} if grants_on() else {}),
                 # With goals that may run any command: the form's words, the sentence to type and the ceiling.
                 **({"commands": commands_options()} if goal_commands.enabled(settings) else {}),
+                # Goal pacing, with its flag on: the zone of the days and times, and the forms' bounds and default.
+                **({"pacing": pacing_options()} if pacing.zone(settings) is not None else {}),
             }
         )
+
+    def pacing_options() -> dict[str, Any]:
+        tz = pacing.zone(settings)
+        assert tz is not None
+        low, high = STALL_RANGE
+        return {"zone": tz.key, "stall_limit": {"low": low, "high": high}, "default_at": DEFAULT_AT}
 
     def commands_options() -> dict[str, Any]:
         return {
@@ -889,6 +973,11 @@ def build_goal_routes(
                 return checked
             tools = checked
         extra: dict[str, Any] = {"tools": tools} if tools else {}
+        paced: dict[str, Any] = {}
+        if body.daily_at is not None:
+            if pacing.zone(settings) is None:
+                return JSONResponse(PACING_OFF, status_code=503)
+            paced["daily_at_minute"] = pacing.parse_at(body.daily_at)
         if body.commands is not None:
             extra["commands"] = goal_commands.CommandsRequest(body.commands.hours, body.commands.confirm)
         if extra:
@@ -902,6 +991,7 @@ def build_goal_routes(
                 overrides=body.limits.model_dump(exclude_none=True) if body.limits else None,
                 proposed_by=ACTOR,
                 origin_channel=body.origin_channel,
+                **paced,
                 **extra,
             )
         except GoalRefused as exc:
@@ -943,6 +1033,9 @@ def build_goal_routes(
 
     def budget(store: GoalStore, goal_id: UUID, body: BudgetChange, _proof: str | None) -> Awaitable[Goal]:
         return store.raise_budget(goal_id, total=body.total, day=body.day, actor=ACTOR)
+
+    def sessions(store: GoalStore, goal_id: UUID, body: SessionsChange, _proof: str | None) -> Awaitable[Goal]:
+        return store.change_sessions(goal_id, changes=body.changes(), actor=ACTOR)
 
     # ---- the tools a goal may use without asking (F115) ----------------------------------------------------------
 
@@ -1162,6 +1255,7 @@ def build_goal_routes(
         action("cancel", NoBody, lambda store, gid, _b, _p: store.cancel(gid, actor=ACTOR)),
         action("run-now", NoBody, lambda store, gid, _b, _p: store.request_run_now(gid, actor=ACTOR)),
         action("budget", BudgetChange, budget),
+        action("sessions", SessionsChange, sessions),
         action(
             "deadline", DeadlineChange, lambda store, gid, b, _p: store.extend_deadline(gid, days=b.days, actor=ACTOR)
         ),
