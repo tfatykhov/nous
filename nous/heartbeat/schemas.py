@@ -40,6 +40,48 @@ class Finding:
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+# Entries each item list of a SuppressionReport keeps (its counts are always complete).
+SUPPRESSION_ITEMS_CAP = 20
+
+
+@dataclass
+class SuppressionReport:
+    """F116: what the self-initiated check's filters hid (``suppressed``) or recorded in shadow mode
+    (``shadow_suppressed``) in one run, or summed over a tick.
+
+    Counts are by reason and complete. Each item is ``{"fingerprint", "kind", "id", "reason"}``, with the
+    fingerprint of the finding the item would have raised: ids and hashes, never text. Each list keeps its first
+    ``SUPPRESSION_ITEMS_CAP`` entries. ``errors`` counts what a filter could not evaluate (those items surfaced).
+    """
+
+    suppressed: dict[str, int] = field(default_factory=dict)
+    shadow_suppressed: dict[str, int] = field(default_factory=dict)
+    items: list[dict[str, str]] = field(default_factory=list)
+    shadow_items: list[dict[str, str]] = field(default_factory=list)
+    errors: int = 0
+
+    def add(self, reason: str, *, shadow: bool, fingerprint: str, kind: str, item_id: str) -> None:
+        """Count one hidden (or, with ``shadow``, recorded) item."""
+        counts, items = (self.shadow_suppressed, self.shadow_items) if shadow else (self.suppressed, self.items)
+        counts[reason] = counts.get(reason, 0) + 1
+        if len(items) < SUPPRESSION_ITEMS_CAP:
+            items.append({"fingerprint": fingerprint, "kind": kind, "id": item_id, "reason": reason})
+
+    def merge(self, other: SuppressionReport) -> None:
+        """Add ``other``'s counts, errors and items to this report (``other`` is not changed)."""
+        for mine, theirs in ((self.suppressed, other.suppressed), (self.shadow_suppressed, other.shadow_suppressed)):
+            for reason, count in theirs.items():
+                mine[reason] = mine.get(reason, 0) + count
+        for mine_items, their_items in ((self.items, other.items), (self.shadow_items, other.shadow_items)):
+            room = SUPPRESSION_ITEMS_CAP - len(mine_items)
+            if room > 0:
+                mine_items.extend(dict(item) for item in their_items[:room])
+        self.errors += other.errors
+
+    def __bool__(self) -> bool:
+        return bool(self.suppressed or self.shadow_suppressed or self.errors)
+
+
 @dataclass
 class CheckResult:
     """Result of running a single check."""
@@ -52,6 +94,8 @@ class CheckResult:
     # execution boundary (race between _tick's snapshot and coroutine start).
     # Callers must not call mark_success() or record stats for skipped results.
     skipped: bool = False
+    # F116: what the self-initiated check's filters hid or recorded this run. None while every filter is off.
+    suppression: SuppressionReport | None = None
 
 
 @dataclass
