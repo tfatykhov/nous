@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
 import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
-import { OPTIONS, PACING, goalDetail, goalRow } from '../lib/testing/goalFixtures';
+import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { Action, GoalDetail } from '../lib/goals';
 
 // F114 goals PR 2: the Goals screen over the /goals routes. The fixtures have the shapes nous/api/goal_routes.py
@@ -1096,5 +1096,45 @@ describe('Goals: a lost change of session settings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await vi.waitFor(() => expect(within(region).getByText('Changed. It applies from the next session.')).toBeTruthy());
     expect(within(region).queryByText('No answer came back. Check the goal before trying again.')).toBeNull();
+describe('Goals: the page with the activity panel off', () => {
+  // Recorded from the page before the folding sections were built: with the server's options as they are (no
+  // `activity`), the goal's page renders exactly these headings, cards and ids, and asks for no activity.
+  it('renders the same headings, cards and ids in the same order, and reads no activity', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await waitFor(() => expect(reads('/goals/G-0001/tools')).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(Array.from(region.querySelectorAll('h3')).map((h) => h.textContent?.trim())).toEqual([
+      'Charter', 'Limits', 'Spend', 'Plan', 'Sessions', 'Journal',
+    ]);
+    expect(region.querySelectorAll('.card').length).toBe(8);
+    expect(Array.from(region.querySelectorAll('[id^="goal-"]')).map((e) => e.id)).toEqual([
+      'goal-h.G-0001', 'goal-a.G-0001.run-now', 'goal-a.G-0001.pause', 'goal-a.G-0001.stop', 'goal-a.G-0001.budget',
+      'goal-a.G-0001.deadline', 'goal-a.G-0001.cancel', 'goal-n.G-0001',
+    ]);
+    expect(calls.some((c) => c.url.split('?')[0].endsWith('/activity'))).toBe(false);
+    expect(region.querySelector('[id^="goal-f."]')).toBeNull();
+  });
+
+  it('with the per-goal tools, the run-any-command card and pacing on, the same holds', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ pacing: PACING(), commands: COMMANDS() })];
+    handlers['GET /goals/G-0001/tools'] = () => [200, goalToolsAnswer()];
+    details['G-0001'] = { ...A, daily_at: null, commands: COMMANDS_ON, mode: 'commands', actions: [...A.actions, 'contained'] };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await within(region).findByRole('heading', { level: 3, name: 'Tools this goal may use' });
+    expect(Array.from(region.querySelectorAll('h3')).map((h) => h.textContent?.trim())).toEqual([
+      'May run any command', 'Charter', 'Limits', 'Tools this goal may use', 'Spend', 'Plan', 'Sessions', 'Journal',
+    ]);
+    expect(region.querySelectorAll('.card').length).toBe(10);
+    expect(Array.from(region.querySelectorAll('[id^="goal-"]')).map((e) => e.id)).toEqual([
+      'goal-h.G-0001', 'goal-a.G-0001.run-now', 'goal-a.G-0001.pause', 'goal-a.G-0001.stop', 'goal-a.G-0001.budget',
+      'goal-a.G-0001.deadline', 'goal-a.G-0001.cancel', 'goal-m.G-0001', 'goal-a.G-0001.contained', 'goal-n.G-0001',
+      'goal-n.G-0001',
+    ]);
+    expect(calls.some((c) => c.url.split('?')[0].endsWith('/activity'))).toBe(false);
+    expect(region.querySelector('[id^="goal-f."]')).toBeNull();
   });
 });
