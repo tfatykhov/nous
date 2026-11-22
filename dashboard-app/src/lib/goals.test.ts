@@ -7,7 +7,7 @@ import {
   refusalText, resumeLabel, sessionOutcomeWord, spanText, stateWord, type Action, type CreateForm, type GoalDetail, type GoalState, type LostChange, type PauseReason,
 } from './goals';
 import * as goals from './goals';
-import { DETAIL_KEYS, NOW, OPTIONS, PACING, SPEND_NOTE, goalDetail, goalRow } from './testing/goalFixtures';
+import { ACTIVITY_KEYS, DETAIL_KEYS, NOW, OPTIONS, PACING, SPEND_NOTE, activityAnswer, goalDetail, goalRow } from './testing/goalFixtures';
 
 // F114 goals PR 2: the Goals screen's words, rules and requests (no DOM).
 
@@ -548,5 +548,157 @@ describe('a lost change of session settings is confirmed only by the values aske
     expect(changeLanded(lostOf(goal, { stall_limit: 4 }), { ...goal, stall_limit: 4, journal: [row('chain'), ...goal.journal] })).toBe(false);
     expect(changeLanded(lostOf(goal, {}), after(goal, {}))).toBe(false);
     expect(changeLanded(lostOf(goal), after(goal, { stall_limit: 4 }))).toBe(false);
+describe('what a goal is doing now, and the folding page', () => {
+  const MIN = 60_000;
+  const at = (minutesBefore: number) => new Date(NOW - minutesBefore * MIN).toISOString();
+  const current = (over: Partial<goals.ActivityCurrent> = {}): goals.ActivityCurrent => ({
+    kind: 'task', name: 'Sort the photos', first_task: false, status: 'running', started_at: at(12), node: null, waiting_for: null, ...over,
+  });
+  const PHASES: goals.ActivityPhase[] = ['none', 'task', 'workflow', 'waiting', 'approval', 'deciding', 'asking', 'between'];
+
+  it('reads GET /goals/<ref>/activity, the ref encoded', async () => {
+    const fetch = vi.fn(async (_url: string) => new Response(JSON.stringify(activityAnswer()), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    await goals.getGoalActivity('G 1/2');
+    expect(fetch.mock.calls[0][0]).toBe('/goals/G%201%2F2/activity');
+  });
+
+  it('the fixture has every key of a real answer, in order', () => {
+    expect(Object.keys(activityAnswer())).toEqual(ACTIVITY_KEYS);
+  });
+
+  it('every phase, and every kind of wait, has words', () => {
+    for (const phase of PHASES) {
+      const text = goals.phaseText(activityAnswer({ phase, current: phase === 'none' ? null : current() }));
+      expect(text, phase).toMatch(/\S/);
+      expect(text, phase).not.toMatch(GLYPH);
+    }
+    const said = (over: Partial<goals.GoalActivity>) => goals.phaseText(activityAnswer(over));
+    expect(said({ phase: 'task', current: current() })).toBe('Working on a task: Sort the photos');
+    expect(said({ phase: 'task', current: current({ name: null, first_task: true }) })).toBe('Working on its first task of this session.');
+    expect(said({ phase: 'task', current: current({ status: 'pending', started_at: null }) })).toBe('Waiting to start a task: Sort the photos');
+    expect(said({ phase: 'workflow', current: current({ kind: 'workflow', name: 'Build the export' }) })).toBe('Running a workflow: Build the export');
+    expect(said({ phase: 'workflow', current: current({ kind: 'workflow', name: 'Build the export', status: 'pending' }) })).toBe(
+      'Waiting to start a workflow: Build the export',
+    );
+    const waiting = (waiting_for: goals.WaitingFor) => said({ phase: 'waiting', current: current({ kind: 'workflow', waiting_for }) });
+    expect(waiting({ kind: 'job', job_id: 'job-20261122-102031-ab12cd34' })).toBe('Waiting for a coding job (job-20261122-102031-ab12cd34) to finish.');
+    expect(waiting({ kind: 'pr', number: 951 })).toBe('Waiting for pull request 951.');
+    expect(waiting({ kind: 'file' })).toBe('Waiting for a file to appear.');
+    expect(waiting({ kind: 'other' })).toBe('Waiting for a condition.');
+    expect(said({ phase: 'approval', current: current({ kind: 'workflow' }) })).toBe('Waiting for your approval of a workflow step.');
+    expect(said({ phase: 'deciding', current: null })).toBe('Deciding what to do next.');
+    expect(said({ phase: 'asking', current: null })).toBe('Waiting for your answer to a question.');
+    expect(said({ phase: 'between', current: null })).toBe('Between steps.');
+    expect(said({ session: null, phase: 'none', current: null })).toBe('No session has run yet.');
+  });
+
+  it('more than one item running says how many more', () => {
+    expect(goals.phaseText(activityAnswer({ phase: 'task', current: current(), running_count: 3 }))).toBe('Working on a task: Sort the photos and 2 more');
+    expect(goals.phaseText(activityAnswer({ phase: 'task', current: current({ name: null, first_task: true }), running_count: 2 }))).toBe(
+      'Working on its first task of this session and 1 more.',
+    );
+  });
+
+  it('every stored outcome has a word, and an unknown one reads "other"', () => {
+    const words = { ran: 'done', error: 'failed', refused: 'refused', gated: 'held for approval', suppressed: 'skipped', retired: 'retired tool', bad_input: 'bad input', other: 'other' };
+    for (const [outcome, word] of Object.entries(words)) expect(goals.outcomeWord(outcome)).toBe(word);
+    expect(goals.outcomeWord('something-new')).toBe('other');
+    expect(goals.workKindWord('decisions')).toBe('decisions');
+    expect(goals.workLinkLabel('workflow')).toBe('Workflow step');
+    expect(goals.workLinkLabel('something-new')).toBe('Other');
+  });
+
+  it('counts in words, singular and plural, and "more than" when the read was capped', () => {
+    expect(goals.callsText({ total: 31, errors: 2, capped: false })).toBe('31 tool calls this session, 2 failed.');
+    expect(goals.callsText({ total: 1, errors: 1, capped: false })).toBe('1 tool call this session, 1 failed.');
+    expect(goals.callsText({ total: 4, errors: 0, capped: false })).toBe('4 tool calls this session.');
+    expect(goals.callsText({ total: 2000, errors: 3, capped: true })).toBe('More than 2,000 tool calls this session, at least 3 failed.');
+    expect(goals.jobsText({ launched: 1, last_launch_at: at(40) }, NOW)).toBe('Coding jobs started this session: 1. The last one 40 minutes ago.');
+    expect(goals.jobsText({ launched: 0, last_launch_at: null }, NOW)).toBe('');
+  });
+
+  it('the times say how long ago, from the page clock', () => {
+    expect(goals.startedText(at(12), NOW)).toBe('Started 12 minutes ago.');
+    expect(goals.lastCallText(at(4), 'bash', NOW)).toBe('Last tool call 4 minutes ago (bash).');
+    expect(goals.lastCallText(at(4), null, NOW)).toBe('Last tool call 4 minutes ago.');
+    expect(goals.noCallYetText(at(3), NOW)).toBe('No tool call yet in this session. It started 3 minutes ago.');
+  });
+
+  it('the quiet note shows from ten minutes without a call, not at nine', () => {
+    expect(goals.quietText(at(9), NOW)).toBe('');
+    expect(goals.quietText(at(10), NOW)).toBe(
+      'No tool call for 10 minutes. A long command or a coding job can take this long; a call shows here when it ends.',
+    );
+    expect(goals.quietText(at(42), NOW)).toMatch(/^No tool call for 42 minutes\./);
+  });
+
+  it('an ended session is one line, with its calls when the log has them', () => {
+    const session = { n: 4, open: false, trigger: 'timer' as const, started_at: at(240), ended_at: at(180) };
+    expect(goals.endedText(session, { total: 31, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 31 tool calls.');
+    expect(goals.endedText(session, { total: 1, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 1 tool call.');
+    expect(goals.endedText(session, { total: 2000, errors: 0, capped: true }, NOW)).toBe(
+      'Last session (4) ended 3 hours ago after more than 2,000 tool calls.',
+    );
+    expect(goals.endedText(session, null, NOW)).toBe('Last session (4) ended 3 hours ago.');
+  });
+
+  it('the fixed sentences', () => {
+    expect(goals.ACTIVITY_TITLE).toBe('What it is doing now');
+    expect(goals.ACTIVITY_ENDED_TITLE).toBe('Last session');
+    expect(goals.ACTIVITY_LOADING_TEXT).toBe('Reading what it is doing.');
+    expect(goals.ACTIVITY_FAILED_TEXT).toBe('Could not read what the goal is doing.');
+    expect(goals.ACTIVITY_STALE_TEXT).toBe('Could not read what the goal is doing. What is shown is from the last read.');
+    expect(goals.ACTIVITY_LOG_OFF_TEXT).toBe('The tool-call log is off, so individual calls are not listed.');
+    expect(goals.WORK_LINKS_TEXT).toBe('See this session on the Work screen:');
+  });
+
+  it('the two summaries', () => {
+    expect([0, 1, 5].map(goals.toolsSummary)).toEqual(['None allowed', '1 allowed', '5 allowed']);
+    expect([0, 1, 5].map(goals.sessionsSummary)).toEqual(['None yet', '1 so far', '5 so far']);
+  });
+
+  describe('the folds the viewer chose', () => {
+    afterEach(() => {
+      try {
+        localStorage.clear();
+      } catch {
+        // a test stubbed the storage away
+      }
+    });
+
+    it('a stored choice of a known section is read back, and a write keeps the others', () => {
+      localStorage.clear();
+      goals.writeFold('journal', false);
+      goals.writeFold('tools', true);
+      expect(goals.readFolds()).toEqual({ journal: false, tools: true });
+      expect(JSON.parse(localStorage.getItem(goals.FOLD_KEY)!)).toEqual({ journal: false, tools: true });
+    });
+
+    it('no storage, a throwing read, a value that is not JSON or not an object, an unknown section and a value that is not a boolean give no choice', () => {
+      localStorage.clear();
+      expect(goals.readFolds()).toEqual({});
+      for (const raw of ['{not json', '[true]', 'true', 'null', '{"journal": "yes", "nope": true, "plan": 1}']) {
+        localStorage.setItem(goals.FOLD_KEY, raw);
+        expect(goals.readFolds(), raw).toEqual({});
+      }
+      localStorage.setItem(goals.FOLD_KEY, '{"journal": "yes", "spend": false}');
+      expect(goals.readFolds()).toEqual({ spend: false });
+      vi.stubGlobal('localStorage', { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } });
+      expect(goals.readFolds()).toEqual({});
+      vi.stubGlobal('localStorage', undefined);
+      expect(goals.readFolds()).toEqual({});
+    });
+
+    it('a write that the storage refuses is dropped and nothing is thrown', () => {
+      vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => { throw new Error('full'); } });
+      expect(() => goals.writeFold('plan', false)).not.toThrow();
+      vi.stubGlobal('localStorage', undefined);
+      expect(() => goals.writeFold('plan', false)).not.toThrow();
+    });
+
+    it('the defaults: journal, plan and spend open; the rest closed', () => {
+      expect(goals.FOLD_DEFAULTS).toEqual({ journal: true, plan: true, spend: true, sessions: false, charter: false, limits: false, tools: false });
+    });
   });
 });
