@@ -17,7 +17,7 @@ import time
 import unicodedata
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -57,6 +57,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.api.session_referent import ChannelLastReply
 from nous.api.smart_compress import add_cache_key, smart_compress
+from nous.api.status_line import STATUS_LINE_KINDS, render_status_line, with_tail_note
 from nous.api.tool_classes import refuse_denylist
 from nous.autonomy import tool_guard
 from nous.brain.brain import Brain
@@ -2768,6 +2769,7 @@ class AgentRunner:
         model_override: str | None = None,
         tool_choice: dict[str, Any] | None = None,
         call_context: CallContext | None = None,
+        tail_notes: Sequence[tuple[int, str]] | None = None,
     ) -> tuple[dict[str, Any], CallContext | None]:
         """Build Anthropic Messages API request payload, and ``call_context`` with this call's context estimate.
 
@@ -2781,6 +2783,11 @@ class AgentRunner:
         F036: system_prompt may be a dict[str, str] (tier -> text) when
         cache_split_system_prompt is enabled. Builds 3 system blocks with
         optimized cache_control placement.
+
+        Status line (``nous.api.status_line``): ``tail_notes`` is (index in ``messages``, text) of every line this run
+        has sent, each added after the content of its user message in this payload only, with no ``cache_control``.
+        The newest is on the last user message, after its marked block. None when the payload asks for thinking.
+        ``messages`` itself is never changed.
         """
         # Add cache_control to last user message for prompt caching
         cached_messages = list(messages)
@@ -2921,6 +2928,14 @@ class AgentRunner:
                     "budget_tokens": self._settings.thinking_budget,
                 }
 
+        # Status line: each line at its own user message, after the cache breakpoint of the newest. payload["messages"]
+        # is cached_messages, a copy: a replaced entry is a new dict, so the caller's messages stay as they were.
+        if tail_notes and "thinking" not in payload:
+            for index, note in tail_notes:
+                if 0 <= index < len(cached_messages) and cached_messages[index].get("role") == "user":
+                    if cached_messages[index].get("content"):  # an empty content was not marked: nothing to follow
+                        cached_messages[index] = with_tail_note(cached_messages[index], note)
+
         # Effort parameter ("high" is API default, so only send if different)
         # Supported by Sonnet 4.6, Opus 4.6 and Haiku 5+. Legacy Haiku (e.g. Haiku 4.5) does NOT support it.
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
@@ -3001,6 +3016,7 @@ class AgentRunner:
         is_background: bool = False,
         tool_choice: dict[str, Any] | None = None,
         call_context: CallContext | None = None,
+        tail_notes: Sequence[tuple[int, str]] | None = None,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
@@ -3013,6 +3029,8 @@ class AgentRunner:
         terminal tool call on the penultimate turn.
         F108: call_context says who makes the call (``_call_context``); it reaches a client that takes one, with
         this call's context estimate.
+        Status line: ``tail_notes`` (``_build_api_payload_and_context``), passed by ``_tool_loop`` only when it has
+        a line to send.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -3025,6 +3043,7 @@ class AgentRunner:
             model_override=model_override,
             tool_choice=tool_choice,
             call_context=call_context,
+            tail_notes=tail_notes,
         )
         if is_background:
             if self._settings.api_background_streaming_enabled:
@@ -4423,6 +4442,38 @@ class AgentRunner:
             )
         return SingleCall(_with_alias_note(alias_note, dispatched.text), dispatched.is_error, dispatched.send_key)
 
+    def _status_note(
+        self,
+        ctx: ExecutionContext,
+        turns: int,
+        max_turns: int,
+        tool_calls: int,
+        max_tool_calls: int | None,
+        ledger: ExecutionLedger | None,
+        *,
+        thinking_off: bool,
+        forced: bool = False,
+    ) -> str | None:
+        """This round's status line (``nous.api.status_line``), or None: the setting is off, the turn's kind is not
+        one that gets it (``STATUS_LINE_KINDS``), or the request asks for thinking (``thinking_off`` is the loop's,
+        the same test the request builder applies). ``forced``: this call is forced to submit the final report.
+        A line that cannot be written is left out of this round only (a WARNING with the exception's class); the
+        lines sent before it are still sent."""
+        if not self._settings.status_line_enabled or ctx.kind not in STATUS_LINE_KINDS or not thinking_off:
+            return None
+        try:
+            return render_status_line(
+                round_number=turns + 1,
+                max_rounds=max_turns,
+                tool_calls=tool_calls,
+                max_tool_calls=max_tool_calls,
+                ledger=ledger,
+                forced=forced,
+            )
+        except Exception as exc:  # the class only: the text may carry a model-written path
+            logger.warning("Status line: not written this round (%s)", type(exc).__name__)
+            return None
+
     async def _tool_loop(
         self,
         system_prompt: str | dict[str, str],
@@ -4520,6 +4571,9 @@ class AgentRunner:
         turns = 0
         total_tool_calls = 0
         max_turns = self._settings.max_turns
+        # Status line: every line sent this run, as (index in messages, text). Each is sent again, unchanged and at
+        # its place, on every later call of the run: the history the model saw is never edited. Never in messages.
+        sent_notes: list[tuple[int, str]] = []
 
         # F061: detect whether forced tool_choice is safe for this call. Forced
         # tool_choice is incompatible with extended thinking — Anthropic only
@@ -4607,6 +4661,22 @@ class AgentRunner:
             }
             if tool_choice_arg is not None:
                 _call_kwargs["tool_choice"] = tool_choice_arg
+            # Status line: this round's line goes after the last message (the newest user message), the earlier
+            # ones stay where they were sent. Passed only when there is one, as tool_choice above.
+            note = self._status_note(
+                ctx,
+                turns,
+                max_turns,
+                total_tool_calls,
+                max_tool_calls,
+                ledger,
+                thinking_off=thinking_off,
+                forced=tool_choice_arg is not None,
+            )
+            if note is not None:
+                sent_notes.append((len(messages) - 1, note))
+            if sent_notes:
+                _call_kwargs["tail_notes"] = list(sent_notes)
             api_response = await self._call_api(**_call_kwargs, call_context=call_context)
 
             # F035.4: Update context log with response metadata
@@ -5057,6 +5127,7 @@ class AgentRunner:
                     model_override=model_override,
                     is_background=is_background,
                     call_context=call_context,
+                    **({"tail_notes": list(sent_notes)} if sent_notes else {}),  # the lines sent, no new one
                 )
                 if final.usage:
                     total_usage["input_tokens"] += final.usage.get("input_tokens", 0)
@@ -5093,6 +5164,7 @@ class AgentRunner:
                 model_override=model_override,
                 is_background=is_background,
                 call_context=call_context,
+                **({"tail_notes": list(sent_notes)} if sent_notes else {}),  # the lines sent, no new one
             )
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)

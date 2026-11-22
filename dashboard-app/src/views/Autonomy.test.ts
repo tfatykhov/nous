@@ -114,12 +114,46 @@ const STOPPED = () => fixRow({
   detail: { diagnosis: 'the token <b>expired</b>', owner_action: 'renew the token', check: { status: 'completed', outcome: 'completed' } },
 });
 
+// GET /dashboard/loop-numbers (nous/api/loop_numbers_dashboard.py): off unless a test turns it on.
+const loopUnit = (over: Record<string, unknown> = {}) => ({
+  done: 40, not_done: 6, tokens_in: { done: 400_000, not_done: 90_000 }, tokens_out: { done: 40_000, not_done: 6_000 },
+  tokens_per_finished: 13_400, output_per_finished: 1_150, done_tokens: { mean: 11_000, p50: 9_500 },
+  by_final_outcome: { completed: 40, timed_out: 6 },
+  outside_check: { confirmed: 2, unconfirmed: 30, taken_back: 3, unscored: 5, unconfirmed_share: 0.9375, provisional: 30, flagged: 1 },
+  ...over,
+});
+const loopWindow = (over: Record<string, unknown> = {}) => ({
+  from: '2026-11-15T00:00:00+00:00', to: '2026-11-22T00:00:00+00:00', truncated: false,
+  tasks: loopUnit(),
+  workflow_steps: loopUnit({ done: 0, not_done: 2, tokens_per_finished: null, output_per_finished: null,
+    tokens_in: { done: 0, not_done: 7_000 }, tokens_out: { done: 0, not_done: 500 },
+    outside_check: { confirmed: 0, unconfirmed: 0, taken_back: 0, unscored: 0, unconfirmed_share: null, provisional: 0, flagged: 0 } }),
+  goal_sessions: { sessions: 5, sessions_without_step: 2, steps_closed: 4, spent: 200_000, spent_without_step: 30_000,
+    tokens_per_finished: 50_000, outside_check: null },
+  ...over,
+});
+const LOOP_ON = () => ({
+  enabled: true, window_days: 7, counts_cached_input: false, scorer_ran: true, claims_recorded: true,
+  notes: ['tokens_leave_out_cached_input', 'goal_session_tokens_include_tasks_and_workflows'],
+  current: loopWindow(),
+  previous: loopWindow({ tasks: loopUnit({ done: 30, tokens_per_finished: 15_000, output_per_finished: 1_300,
+    tokens_in: { done: 300_000, not_done: 120_000 }, tokens_out: { done: 30_000, not_done: 5_000 },
+    outside_check: { confirmed: 3, unconfirmed: 27, taken_back: 0, unscored: 0, unconfirmed_share: 0.9, provisional: 0, flagged: 0 } }) }),
+});
+
 let body: Record<string, unknown> = FULL();
 let status = 200;
 let urls: string[] = [];
+let loopBody: Record<string, unknown> = { enabled: false };
+let loopStatus = 200;
+let loopUrls: string[] = [];
 
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.startsWith('/dashboard/loop-numbers')) {
+      loopUrls.push(url);
+      return { ok: loopStatus < 400, status: loopStatus, json: async () => loopBody } as Response;
+    }
     if (!url.startsWith('/dashboard/autonomy')) throw new Error(`unexpected ${url}`);
     urls.push(url);
     // A 4xx is not retried by apiGet, so the failure surfaces at once.
@@ -128,7 +162,7 @@ function install() {
 }
 
 describe('Autonomy view', () => {
-  beforeEach(() => { body = FULL(); status = 200; urls = []; install(); });
+  beforeEach(() => { body = FULL(); status = 200; urls = []; loopBody = { enabled: false }; loopStatus = 200; loopUrls = []; install(); });
   // globals: false (vite.config.ts): testing-library cannot register its own cleanup.
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -497,10 +531,144 @@ describe('Autonomy view', () => {
   });
 });
 
+describe('Autonomy: what a finished job costs', () => {
+  beforeEach(() => { body = FULL(); status = 200; urls = []; loopBody = LOOP_ON(); loopStatus = 200; loopUrls = []; install(); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  const heading = async () => (await screen.findByRole('heading', { name: 'What a finished job costs' })).closest('section')!;
+  const panel = async () => { render(Autonomy); return heading(); };
+  const row = (section: HTMLElement, label: string) =>
+    Array.from(section.querySelectorAll('tbody tr')).find((tr) => tr.querySelector('th')?.textContent?.startsWith(label)) as HTMLElement;
+  const cells = (tr: HTMLElement) => Array.from(tr.querySelectorAll('td'));
+
+  it('is not shown when the numbers are off', async () => {
+    loopBody = { enabled: false };
+    render(Autonomy);
+    await screen.findByText('Scorer running');
+    await waitFor(() => expect(loopUrls).toEqual(['/dashboard/loop-numbers?days=7']));
+    expect(screen.queryByRole('heading', { name: 'What a finished job costs' })).toBeNull();
+  });
+
+  it('fetches the same window as the page, and again when it changes', async () => {
+    await panel();
+    expect(loopUrls).toEqual(['/dashboard/loop-numbers?days=7']);
+    await fireEvent.click(screen.getByRole('button', { name: '30 d' }));
+    await waitFor(() => expect(loopUrls).toContain('/dashboard/loop-numbers?days=30'));
+  });
+
+  it('shows three rows, each with the window before beside it', async () => {
+    const section = await panel();
+    const tasks = cells(row(section, 'Tasks'));
+    expect(tasks[0].textContent).toContain('40');
+    expect(tasks[0].textContent).toContain('before: 30');
+    expect(tasks[1].textContent).toContain('13,400');
+    expect(tasks[1].textContent).toContain('before: 15,000');
+    expect(tasks[1].textContent).toContain('output only: 1,150');
+    expect(tasks[2].textContent).toContain('96,000'); // 90,000 in and 6,000 out on work that did not finish
+    expect(tasks[2].textContent).toContain('before: 125,000');
+    expect(tasks[3].textContent).toContain('94%');
+    expect(tasks[3].textContent).toContain('before: 90%');
+    expect(row(section, 'Workflow steps')).toBeTruthy();
+    const goals = cells(row(section, 'Goal sessions'));
+    expect(goals[0].textContent).toContain('4');
+    expect(goals[1].textContent).toContain('50,000');
+    expect(goals[2].textContent).toContain('30,000');
+    expect(section.querySelectorAll('tbody tr').length).toBe(3);
+    expect(section.textContent).not.toMatch(/NaN|undefined|null/);
+  });
+
+  it('shows a dash for a number with nothing to divide, and says a goal session is not measured', async () => {
+    const section = await panel();
+    const steps = cells(row(section, 'Workflow steps'));
+    expect(steps[1].textContent?.trim().startsWith('—')).toBe(true); // no finished step: no cost, not 0
+    expect(steps[3].textContent?.trim().startsWith('—')).toBe(true); // nothing scored: no share, not 0%
+    expect(steps[3].textContent).not.toContain('0%');
+    expect(cells(row(section, 'Goal sessions'))[3].textContent).toContain('Not measured');
+  });
+
+  it('says in plain words what the numbers leave out', async () => {
+    const section = await panel();
+    const text = section.textContent ?? '';
+    expect(text).toContain('Tokens leave out input that was read from or saved to the cache, the same way budgets count.');
+    expect(text).toContain('A job counts as checked only when you graded it, a pull request it opened was merged by someone else, '
+      + 'or your spot checks trust its kind of check. No outside check does not mean the job was wrong.');
+    expect(text).toContain("A goal session's tokens include its tasks and workflows, so the rows overlap. Do not add them.");
+    expect(text).not.toContain('The scorer has not run');
+  });
+
+  it('says when the scorer has not run', async () => {
+    loopBody = { ...LOOP_ON(), scorer_ran: false };
+    const section = await panel();
+    expect(section.textContent).toContain('The scorer has not run, so nothing can be counted as checked yet.');
+  });
+
+  it('with the numbers off it asks once on load, then never again: not on the timer, Refresh or a new window', async () => {
+    loopBody = { enabled: false };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(Autonomy);
+      await screen.findByText('Scorer running');
+      await waitFor(() => expect(loopUrls).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await waitFor(() => expect(urls.length).toBeGreaterThan(1)); // the scores kept their own poll
+      await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await fireEvent.click(screen.getByRole('button', { name: '30 d' }));
+      await waitFor(() => expect(urls).toContain('/dashboard/autonomy?days=30'));
+      expect(loopUrls).toEqual(['/dashboard/loop-numbers?days=7']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with the numbers on it keeps asking, with the page', async () => {
+    render(Autonomy);
+    await heading();
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(loopUrls.length).toBeGreaterThan(1));
+  });
+
+  it('when the panel is not shown the badge reads as the scores alone', async () => {
+    const badge = (c: HTMLElement) => c.querySelector('.stale-badge') as HTMLElement;
+    // the numbers failed: the badge does not name them
+    loopStatus = 400;
+    let view = render(Autonomy);
+    await screen.findByText('Scorer running');
+    await waitFor(() => expect(loopUrls.length).toBeGreaterThan(0));
+    await waitFor(() => expect(badge(view.container).textContent).toMatch(/^\s*updated /));
+    expect(badge(view.container).classList.contains('error')).toBe(false);
+    cleanup();
+    // the numbers are off and the scores fail: the badge is the scores' own, as before the panel existed
+    loopStatus = 200;
+    loopBody = { enabled: false };
+    status = 400;
+    view = render(Autonomy);
+    await screen.findByText('Failed to load autonomy data — retrying…');
+    await waitFor(() => expect(badge(view.container).textContent?.trim()).toBe('error — retrying'));
+  });
+
+  it('when the panel is shown and its numbers fail, the badge names them', async () => {
+    const { container } = render(Autonomy);
+    await heading();
+    loopStatus = 400;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(container.querySelector('.stale-badge')?.textContent).toContain('job costs failed'));
+  });
+
+  it('keeps the rest of the page when the numbers fail to load', async () => {
+    loopStatus = 400;
+    render(Autonomy);
+    await screen.findByText('Scorer running');
+    await waitFor(() => expect(loopUrls.length).toBeGreaterThan(0));
+    expect(screen.queryByRole('heading', { name: 'What a finished job costs' })).toBeNull();
+    expect(screen.queryByText('Failed to load autonomy data — retrying…')).toBeNull();
+  });
+});
+
 // Redesign PR 4: Autonomy on paper. A bar, a legend swatch or a stacked share carries its token as a custom property
 // (`--fill`), which the stylesheet paints: no hex in the script, and the same markup under both looks.
 describe('Autonomy: colours by token', () => {
-  beforeEach(() => { body = FULL(); status = 200; urls = []; install(); });
+  beforeEach(() => { body = FULL(); status = 200; urls = []; loopBody = { enabled: false }; loopStatus = 200; loopUrls = []; install(); });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
   const fillOf = (el: Element | null | undefined) => (el as HTMLElement | null)?.style.getPropertyValue('--fill');

@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
+  import { combinePolls } from '../lib/pollBadge';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { AutonomyData, GuardRecord, GuardReason, GuardSignal, InventoryTool, JobFixRow, ScoreStats, VerifiedShare } from '../lib/types/api';
+  import type { AutonomyData, GuardRecord, GuardReason, GuardSignal, InventoryTool, JobFixRow, LoopNumbersData, ScoreStats, VerifiedShare } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
@@ -11,6 +13,7 @@
   import {
     bars, count, coverageFrom, pct, score, scorerHealth, settledSpan, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
     fixBaseline, fixLatest, fixOutcome, fixState, FIX_TEXTS, FIX_TRIGGER_LABEL, FIX_VERDICT_LABEL,
+    loopRow, tokens, LOOP_UNITS,
   } from '../lib/autonomy';
 
   // GET /dashboard/autonomy: how tasks score, where the owner's attention goes,
@@ -22,13 +25,28 @@
       60_000,
     ),
   );
+  // GET /dashboard/loop-numbers: what a finished job costs. A store of its own, so a failure here never blanks the page.
+  // With NOUS_LOOP_NUMBERS_ENABLED off it answers {enabled: false}: the panel is not shown and the store asks nothing
+  // more until the page is loaded again.
+  const loopStore = usePoll(
+    makePollStore<LoopNumbersData>(
+      (signal) => apiGet<LoopNumbersData>(`/dashboard/loop-numbers?days=${days}`, { signal }),
+      60_000,
+    ),
+  );
+  const loopOff = $derived($loopStore.data?.enabled === false);
+  const loopShown = $derived($loopStore.data?.enabled === true);
+  $effect(() => { if (loopOff) loopStore.stop(); });
   /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
-  const refreshPage = () => store.refresh();
+  const refreshPage = () => Promise.all([store.refresh(), ...(loopOff ? [] : [loopStore.refresh()])]);
+  /** One badge: the scores', and the job costs' too only while their panel is shown (oldest update, what failed). */
+  const pagePoll = $derived(combinePolls({ scores: $store, ...(loopShown ? { 'job costs': $loopStore } : {}) }));
   let first = true;
   $effect(() => {
     void days;
     if (first) { first = false; return; }
     void store.refresh();
+    if (!untrack(() => loopOff)) void loopStore.refresh();
   });
 
   // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet. An outcome bar
@@ -112,8 +130,8 @@
   <div class="head-right">
     <FilterBar label="Window" required bind:value={days}
       options={[{ value: '7', label: '7 d' }, { value: '30', label: '30 d' }, { value: '90', label: '90 d' }]} />
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -211,6 +229,57 @@
       </div>
     </div>
   </section>
+
+  {#if $loopStore.data && $loopStore.data.enabled}
+    {@const ln = $loopStore.data}
+    <section class="panel" aria-labelledby="loop-title">
+      <div class="panel-head">
+        <h2 id="loop-title">What a finished job costs</h2>
+        <span class="small muted">Last {ln.window_days} d · under each number, the {ln.window_days} d before</span>
+      </div>
+      <div class="table-wrap table-scroll">
+        <table class="stats loop">
+          <thead>
+            <tr>
+              <th scope="col"></th><th scope="col">Finished</th><th scope="col">Tokens for each finished one</th>
+              <th scope="col">Spent on work that did not finish</th><th scope="col">Finished with no outside check</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each LOOP_UNITS as [key] (key)}
+              {@const now = loopRow(key, ln.current)}
+              {@const was = loopRow(key, ln.previous)}
+              <tr>
+                <th scope="row">{now.label}{#if !now.measured}<div class="small muted">counted by closed steps</div>{/if}</th>
+                <td>{count(now.finished)}<div class="small muted">before: {count(was.finished)}</div></td>
+                <td>
+                  {tokens(now.cost)}
+                  {#if now.measured}<div class="small muted">output only: {tokens(now.output)}</div>{/if}
+                  <div class="small muted">before: {tokens(was.cost)}</div>
+                </td>
+                <td>{count(now.unfinished)}<div class="small muted">before: {count(was.unfinished)}</div></td>
+                <td>
+                  {#if now.measured}
+                    {pct(now.share)}<div class="small muted">before: {pct(was.share)}</div>
+                  {:else}
+                    <span class="small muted">Not measured</span>
+                  {/if}
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+      <div class="loop-notes small muted">
+        <p>A dash means there was nothing to count that number from: no finished job, or none with a score yet.</p>
+        <p>Tokens leave out input that was read from or saved to the cache, the same way budgets count.</p>
+        <p>A job counts as checked only when you graded it, a pull request it opened was merged by someone else, or your spot checks trust its kind of check. No outside check does not mean the job was wrong.</p>
+        <p>A goal session's tokens include its tasks and workflows, so the rows overlap. Do not add them.</p>
+        {#if !ln.scorer_ran}<p>The scorer has not run, so nothing can be counted as checked yet.</p>{/if}
+        {#if ln.current.truncated || ln.previous.truncated}<p>A window held more rows than are read at once, so only its newest are counted.</p>{/if}
+      </div>
+    </section>
+  {/if}
 
   <section class="panel" aria-labelledby="rollups-title">
     <div class="panel-head">
@@ -637,6 +706,9 @@
   /* Only the all-number tables (.nums): the run-guard and grade tables hold words and pills. */
   .nums td:not(:first-child) { font-stretch: 85%; }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
+  .loop td .small { margin-top: 0.125rem; }
+  .loop-notes { margin-top: 0.75rem; }
+  .loop-notes p { margin: 0.25rem 0 0; }
   .guards { margin-bottom: 1rem; }
   .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }
   .guards td.wrap pre { margin: 0; font-family: var(--font-mono); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere;

@@ -40,6 +40,17 @@ describe('combinePolls', () => {
   });
 });
 
+describe('combinePolls with one store', () => {
+  it('reads as that store alone: its own error, no name', () => {
+    const err = new Error('HTTP 500');
+    const one = combinePolls({ scores: { data: { x: 1 }, error: err, loading: false, lastUpdated: 5 } });
+    expect(one).toEqual({ data: true, error: err, loading: false, lastUpdated: 5, failed: [] });
+    expect(combinePolls({ scores: { data: null, error: null, loading: true, lastUpdated: null } })).toEqual({
+      data: null, error: null, loading: true, lastUpdated: null, failed: [],
+    });
+  });
+});
+
 describe('nameList', () => {
   it('says one, two or more names as a sentence', () => {
     expect([nameList(['a']), nameList(['a', 'b']), nameList(['a', 'b', 'c'])]).toEqual(['a', 'a and b', 'a, b and c']);

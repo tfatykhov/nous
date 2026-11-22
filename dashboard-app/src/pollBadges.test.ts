@@ -21,8 +21,8 @@ const MULTI = VIEWS.filter((f) => storesOf(read(f)).length > 1);
 
 describe('one badge speaks for every store', () => {
   it('finds the screens that read more than one store', () => {
-    expect(MULTI.sort()).toEqual(['views/Consolidation.svelte', 'views/Harness.svelte', 'views/Observability.svelte', 'views/Overview.svelte',
-      'views/Subtasks.svelte', 'views/health/GraphTab.svelte', 'views/health/GrowthTab.svelte']);
+    expect(MULTI.sort()).toEqual(['views/Autonomy.svelte', 'views/Consolidation.svelte', 'views/Harness.svelte', 'views/Observability.svelte',
+      'views/Overview.svelte', 'views/Subtasks.svelte', 'views/health/GraphTab.svelte', 'views/health/GrowthTab.svelte']);
   });
 
   it.each(VIEWS)('%s: one badge', (f) => {

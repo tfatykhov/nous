@@ -12,10 +12,15 @@ export function nameList(names: string[]): string {
  * The poll states a screen reads, named in the owner's words, as one badge state (Codex round 1): data once
  * every store has loaded, loading while any loads, the oldest update (the age of the oldest figures on the page), and
  * an error naming every store whose last refresh failed. A poll store keeps its earlier data when a refresh fails, so
- * without this the page shows old figures beside a fresh "updated".
+ * without this the page shows old figures beside a fresh "updated". One store reads as that store alone (its own
+ * error, no name), as a badge given just that store does: a screen whose second store is not shown passes one.
  */
 export function combinePolls(parts: Record<string, PollState<unknown>>): CombinedPoll {
   const states = Object.entries(parts);
+  if (states.length === 1) {
+    const [[, s]] = states;
+    return { data: s.data !== null ? true : null, error: s.error, loading: s.loading, lastUpdated: s.lastUpdated, failed: [] };
+  }
   const failed = states.filter(([, s]) => s.error).map(([name]) => name);
   const times = states.map(([, s]) => s.lastUpdated);
   return {
