@@ -237,17 +237,27 @@ def effects_all_failed(text: str, evidence: Sequence[Evidence]) -> list[Finding]
 # ---------------------------------------------------------------------------
 
 
+def _whole_sentences(text: str) -> str:
+    """``text`` when it ends within ``MAX_TEXT_CHARS``; otherwise its first ``MAX_TEXT_CHARS`` without the
+    sentence the cut ends inside (a cut path or a cut-off hedge is not read)."""
+    if len(text) <= MAX_TEXT_CHARS:
+        return text
+    cut = text[:MAX_TEXT_CHARS]
+    ends = [m.start() for m in _SENTENCE_END.finditer(cut) if m.start() < len(cut)]
+    return cut[: ends[-1]] if ends else ""
+
+
 def evaluate(text: str, evidence: Sequence[Evidence], workspace_dir: str, exists: Exists) -> FinishVerdict:
-    """Run both checks over the first ``MAX_TEXT_CHARS`` of ``text``.
+    """Run both checks over the first ``MAX_TEXT_CHARS`` of ``text`` (``named_file_missing`` over its whole
+    sentences only).
 
     ``clean`` when neither finds anything, ``flagged`` otherwise. A check that raises makes the
     verdict ``not_checked`` / ``check_error``; the error is logged by its class name only.
     """
-    text = text[:MAX_TEXT_CHARS]
     findings: list[Finding] = []
     try:
-        findings += named_file_missing(text, evidence, workspace_dir, exists)
-        findings += effects_all_failed(text, evidence)
+        findings += named_file_missing(_whole_sentences(text), evidence, workspace_dir, exists)
+        findings += effects_all_failed(text[:MAX_TEXT_CHARS], evidence)
     except Exception as exc:
         logger.warning("F113: a finish check failed (%s)", type(exc).__name__)
         return FinishVerdict("not_checked", why="check_error")

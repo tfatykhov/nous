@@ -250,10 +250,26 @@ def test_a_path_named_twice_is_examined_once():
     assert len(found) == 1
 
 
-def test_a_file_written_by_a_shell_command_and_present_passes():
+def test_a_file_a_shell_command_wrote_below_a_repository_is_not_checked():
+    """bash runs in the workspace root, and a report names a repository's file relative to the repository."""
+    exists = _missing("/ws/out/report.html", "/ws/repo/out/report.html")
+    text = "I generated out/report.html with the build script."
+    evidence = _evidence(_bash("cd /ws/repo && echo '<html>' > out/report.html"))
+    assert fc.named_file_missing(text, evidence, WS, exists) == []
+    assert exists.asked == []
+
+
+def test_an_absolute_file_a_shell_command_wrote_is_found():
+    asked: list[str] = []
+
+    def exists(path: str) -> bool:
+        asked.append(path)
+        return path == "/ws/out/report.html"
+
     text = "I generated /ws/out/report.html with the build script."
     evidence = _evidence(_bash("echo '<html>' > /ws/out/report.html"))
-    assert fc.named_file_missing(text, evidence, WS, _missing()) == []
+    assert fc.named_file_missing(text, evidence, WS, exists) == []
+    assert asked == ["/ws/out/report.html"]
 
 
 def test_the_detail_is_at_most_200_characters():
@@ -392,6 +408,36 @@ def test_findings_are_flagged_with_check_names_in_a_fixed_order():
 def test_evaluate_reads_the_first_4000_characters():
     text = "x" * 4000 + " I created /ws/a.md."
     assert fc.evaluate(text, _evidence(WRITE), WS, _missing("/ws/a.md")) == fc.FinishVerdict("clean")
+
+
+def _filled_to_the_cut(tail: str, cut_after: str) -> str:
+    """Whole filler sentences, then ``tail``, so that the first ``MAX_TEXT_CHARS`` end just after ``cut_after``."""
+    keep = tail[: tail.index(cut_after) + len(cut_after)]
+    room = fc.MAX_TEXT_CHARS - len(keep)
+    filler = ("Filler sentence. " * (room // 17 + 1))[:room]
+    filler = filler[: filler.rindex(". ") + 2].ljust(room)
+    text = filler + tail
+    assert text[: fc.MAX_TEXT_CHARS].endswith(cut_after)
+    return text
+
+
+def test_the_cut_does_not_shorten_a_path_into_another():
+    text = _filled_to_the_cut("I created /ws/reports/summary.md for the owner.", "/ws/reports/summary.m")
+    exists = _missing("/ws/reports/summary.m", "/ws/reports/summary.md")
+    assert fc.evaluate(text, _evidence(WRITE), WS, exists) == fc.FinishVerdict("clean")
+    assert exists.asked == []
+
+
+def test_the_cut_does_not_drop_a_hedge_from_a_sentence():
+    text = _filled_to_the_cut("I created /ws/a.md and then deleted it again.", "/ws/a.md and then ")
+    exists = _missing("/ws/a.md")
+    assert fc.evaluate(text, _evidence(WRITE), WS, exists) == fc.FinishVerdict("clean")
+
+
+def test_a_whole_sentence_before_the_cut_is_still_read():
+    text = _filled_to_the_cut("I created /ws/a.md. More words follow here.", "/ws/a.md. More")
+    exists = _missing("/ws/a.md")
+    assert fc.evaluate(text, _evidence(WRITE), WS, exists).failed == ("named_file_missing",)
 
 
 def test_a_check_that_raises_gives_not_checked(monkeypatch, caplog):
