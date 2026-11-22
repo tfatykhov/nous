@@ -1717,6 +1717,30 @@ async def test_a_session_of_the_local_day_before_does_not_hold_todays(env_factor
     assert len((await w.driver.tick()).started) == 1
 
 
+async def test_a_paced_goals_day_is_the_zones_day_not_the_utc_day(env_factory):  # noqa: F811
+    """A session between the two midnights counts for the zone's day, whichever side of UTC the zone is: one hour ahead
+    of UTC before noon (the session at 23:30Z yesterday is 00:30 today there, and holds today's start), one hour behind
+    after noon (the session at 00:30Z today is 23:30 yesterday there, and does not)."""
+    probe = await _world(env_factory)
+    utc = await _db_now(probe)
+    ahead = utc.hour < 12
+    name = "Etc/GMT-1" if ahead else "Etc/GMT+1"
+    w = await _world(env_factory, goals_pacing_enabled=True, goals_timezone=name)
+    zone = ZoneInfo(name)
+    midnight = datetime(utc.year, utc.month, utc.day, tzinfo=UTC)
+    started = midnight - timedelta(minutes=30) if ahead else midnight + timedelta(minutes=30)
+    goal = await _active(w)
+    await _closed(w, goal, ["step_closed"], started_at=started, ended_at=started)
+    await _set_goal(w, goal, daily_at_minute=0, next_wake_at=func.clock_timestamp())
+    local = (await _db_now(w)).astimezone(zone)
+    assert (pacing.day_start(local, zone) <= started) is ahead
+    if ahead:
+        assert (await w.driver.tick()).started == ()
+        assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, 0, days=1)
+    else:
+        assert len((await w.driver.tick()).started) == 1
+
+
 async def test_run_now_before_the_time_starts_and_uses_up_the_day(env_factory):  # noqa: F811
     w, zone, local = await _paced(env_factory)
     goal = await _active(w)
