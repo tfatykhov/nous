@@ -22,6 +22,7 @@ import pytest
 
 from nous.heart.schemas import EpisodeSummary, FactSummary
 from nous.heartbeat.checks import PENDING_PROTOTYPES, SelfInitiatedCheck
+from nous.heartbeat.pending_filter import PendingFilter
 from nous.heartbeat.schemas import Finding
 
 CHECK_NAME = "self_initiated"
@@ -372,3 +373,426 @@ class TestDefaultOffParity:
         expected = hashlib.sha256(f"self_initiated:facts:{normalized}".encode()).hexdigest()[:16]
         assert len(expected) == 16
         assert first.fingerprint() == expected
+
+
+# ---------------------------------------------------------------------------
+# The filters wired into the check
+# ---------------------------------------------------------------------------
+
+
+class _Rows:
+    """A stand-in for the filter's batched read: no fact was confirmed, ``newer`` have a newer same-key fact."""
+
+    def __init__(self, *, newer: set[str] = frozenset(), fail: bool = False):
+        self.calls: list[list[str]] = []
+        self._newer = newer
+        self._fail = fail
+
+    async def __call__(self, ids: list[str]):
+        self.calls.append(list(ids))
+        if self._fail:
+            raise RuntimeError("database is down")
+        return {i: (None, i in self._newer) for i in ids}
+
+
+def _check(
+    heart: MagicMock, embeddings: MagicMock | None, *, rows: _Rows | None = None, **modes: str
+) -> SelfInitiatedCheck:
+    """The check with the given modes set the way production sets them (settings), the read replaced by ``rows``."""
+    settings = _settings()
+    for layer, mode in modes.items():
+        setattr(settings, f"heartbeat_pending_{layer}_mode", mode)
+    check = SelfInitiatedCheck(heart, MagicMock(), settings, embeddings=embeddings)
+    check._pending = PendingFilter(check._pending.cfg, fetch_rows=rows or _Rows(), check_name=CHECK_NAME)
+    return check
+
+
+def _scenario_check(name: str, *, rows: _Rows | None = None, **modes: str) -> tuple[Scenario, SelfInitiatedCheck]:
+    sc = SCENARIOS[name](datetime.now(UTC))
+    return sc, _check(sc.heart, sc.embeddings, rows=rows, **modes)
+
+
+def _fingerprint(t: tuple) -> str:
+    return _fingerprint_formula(t[0], t[1])
+
+
+ALL_SHADOW = {"kind": "shadow", "age": "shadow", "supersede": "shadow"}
+SHADOW_LAYERS = [{"kind": "shadow"}, {"age": "shadow"}, {"supersede": "shadow"}, ALL_SHADOW]
+# What each scenario records in shadow, per mode set (the person fact of scenario a is skipped before the filter).
+SHADOW_COUNTS = {
+    ("a", "kind"): {"kind_note": 1},
+    ("a", "age"): {"age_snapshot": 4},
+    ("a", "supersede"): {"superseded": 1},
+    ("a", "all"): {"age_snapshot": 4, "kind_note": 1},
+    ("b", "kind"): {"kind_rule": 2},
+    ("b", "age"): {"age_snapshot": 2, "age_fact": 1},
+    ("b", "supersede"): {},
+    ("b", "all"): {"age_snapshot": 2, "kind_rule": 2},
+    ("c", "kind"): {"kind_rule": 1},
+    ("c", "age"): {"age_fact": 1, "age_ongoing": 1},
+    ("c", "supersede"): {},
+    ("c", "all"): {"kind_rule": 1, "age_ongoing": 1},
+}
+
+
+def _label(modes: dict[str, str]) -> str:
+    return "all" if len(modes) == 3 else next(iter(modes))
+
+
+class TestOffRunsNothing:
+    @pytest.mark.parametrize("explicit", [False, True])
+    @pytest.mark.parametrize("name", sorted(SCENARIOS))
+    async def test_no_filter_function_is_called(self, name, explicit, monkeypatch):
+        called: list[str] = []
+
+        def tripwire(fn_name):
+            def fn(*_args, **_kwargs):
+                called.append(fn_name)
+                raise AssertionError(f"{fn_name} called with every mode off")
+
+            return fn
+
+        for fn_name in ("new_ledger", "prefetch", "screen_fact", "screen_episode"):
+            monkeypatch.setattr(PendingFilter, fn_name, tripwire(fn_name))
+        sc = SCENARIOS[name](datetime.now(UTC))
+        settings = _settings()
+        if explicit:
+            for layer in ("kind", "age", "supersede"):
+                setattr(settings, f"heartbeat_pending_{layer}_mode", "off")
+        check = SelfInitiatedCheck(sc.heart, MagicMock(), settings, embeddings=sc.embeddings)
+
+        result = await check.run()
+
+        assert called == []
+        assert check._pending.enabled is False
+        assert _as_tuples(result.findings) == sc.expected
+        assert sc.heart.facts.search.call_args_list == sc.fact_calls
+        assert result.suppression is None
+
+    async def test_a_filter_that_cannot_be_set_up_is_off(self, monkeypatch):
+        def broken(*_args, **_kwargs):
+            raise RuntimeError("bad config")
+
+        monkeypatch.setattr("nous.heartbeat.checks.PendingFilterConfig.from_settings", broken)
+        sc = scenario_a(datetime.now(UTC))
+        settings = _settings()
+        settings.heartbeat_pending_kind_mode = "on"
+        check = SelfInitiatedCheck(sc.heart, MagicMock(), settings, embeddings=sc.embeddings)
+
+        result = await check.run()
+
+        assert check._pending.enabled is False
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression is None
+
+
+class TestShadowNeverChangesOutput:
+    @pytest.mark.parametrize("modes", SHADOW_LAYERS, ids=_label)
+    @pytest.mark.parametrize("name", sorted(SCENARIOS))
+    async def test_findings_and_searches_are_unchanged(self, name, modes):
+        sc, check = _scenario_check(name, **modes)
+
+        result = await check.run()
+
+        assert _as_tuples(result.findings) == sc.expected
+        assert sc.heart.facts.search.call_args_list == sc.fact_calls
+        assert sc.heart.search_episodes.call_args_list == sc.episode_calls
+        assert result.suppression is not None
+        assert result.suppression.shadow_suppressed == SHADOW_COUNTS[(name, _label(modes))]
+        assert result.suppression.suppressed == {} and result.suppression.items == []
+        assert result.suppression.errors == 0
+
+    @pytest.mark.parametrize("name", sorted(SCENARIOS))
+    async def test_the_recorded_fingerprints_are_the_findings(self, name):
+        sc, check = _scenario_check(name, **ALL_SHADOW)
+
+        result = await check.run()
+
+        emitted = {_fingerprint(t) for t in sc.expected}
+        recorded = {item["fingerprint"] for item in result.suppression.shadow_items}
+        assert recorded and recorded <= emitted
+        by_id = {t[4].get("fact_id") or t[4].get("episode_id"): _fingerprint(t) for t in sc.expected}
+        for item in result.suppression.shadow_items:
+            assert by_id[item["id"]] == item["fingerprint"]
+
+    async def test_a_failed_read_in_shadow_changes_nothing(self):
+        sc, check = _scenario_check("a", rows=_Rows(fail=True), **ALL_SHADOW)
+
+        result = await check.run()
+
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression.errors == 1
+        # Only the rules that need no row (the age rule needs last_confirmed; the note and superseded_by do not).
+        assert result.suppression.shadow_suppressed == {"kind_note": 1, "superseded": 1}
+
+
+def _custom(
+    facts_script: dict[str, list], episode_script: dict[str, list] | None = None, *, embedded: bool = True
+) -> tuple[MagicMock, MagicMock | None]:
+    return _heart(facts_script, episode_script or {}), _embeddings() if embedded else None
+
+
+class TestKindFilter:
+    async def test_on_hides_a_note_on_the_embedding_path(self):
+        sc, check = _scenario_check("a", kind="on")
+
+        result = await check.run()
+
+        f = sc.facts
+        assert _as_tuples(result.findings) == [
+            _pending(f["78ccacac"], "embedding"),
+            _pending(f["8f248bc2"], "embedding"),
+            _pending(f["4ecbeeea"], "embedding"),
+            _pending(f["a02b0102"], "embedding"),
+        ]
+        assert result.suppression.suppressed == {"kind_note": 1}
+        assert result.suppression.items[0]["id"] == str(f["55dfa56b"].id)
+
+    async def test_on_hides_rule_facts_on_the_keyword_path(self):
+        sc, check = _scenario_check("b", kind="on")
+
+        result = await check.run()
+
+        assert _as_tuples(result.findings) == [
+            _pending(sc.facts["78ccacac"], "embedding"),
+            _pending(sc.facts["4ecbeeea"], "embedding"),
+            _commitment(sc.episodes["synthetic_ongoing_3d"]),
+        ]
+        assert result.suppression.suppressed == {"kind_rule": 2}
+
+    async def test_on_without_an_embedding_provider_raises_no_fact_finding(self):
+        sc, check = _scenario_check("c", kind="on")
+
+        result = await check.run()
+
+        assert [t for t in _as_tuples(result.findings) if t[0] == "facts"] == []
+        assert result.suppression.suppressed == {"kind_rule": 1}
+
+    async def test_shadow_emits_and_records(self):
+        sc, check = _scenario_check("b", kind="shadow")
+        result = await check.run()
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression.shadow_suppressed == {"kind_rule": 2}
+
+
+class TestAgeFilter:
+    async def test_on_hides_old_status_lines_and_adds_the_digest(self):
+        sc, check = _scenario_check("a", age="on")
+
+        result = await check.run()
+
+        f = sc.facts
+        hidden = [str(f[k].id) for k in ("78ccacac", "8f248bc2", "4ecbeeea", "a02b0102")]
+        assert _as_tuples(result.findings) == [
+            _pending(f["55dfa56b"], "embedding"),
+            (
+                "facts",
+                "Pending items hidden by age cap: 4",
+                "low",
+                False,
+                {"detection": "age_digest", "count": 4, "ids": hidden},
+            ),
+        ]
+        assert result.suppression.suppressed == {"age_snapshot": 4}
+
+    async def test_on_hides_an_old_rule_fact_on_the_keyword_path(self):
+        sc, check = _scenario_check("b", age="on")
+
+        result = await check.run()
+
+        tuples = _as_tuples(result.findings)
+        assert _pending(sc.facts["synthetic_rule_2"], "keyword") not in tuples
+        assert _pending(sc.facts["synthetic_rule_1"], "keyword") in tuples
+        assert result.suppression.suppressed == {"age_snapshot": 2, "age_fact": 1}
+
+    async def test_on_hides_an_old_ongoing_episode(self):
+        sc, check = _scenario_check("c", age="on")
+
+        result = await check.run()
+
+        e, f = sc.episodes, sc.facts
+        assert _as_tuples(result.findings) == [
+            _commitment(e["synthetic_open_3d"]),
+            (
+                "facts",
+                "Pending items hidden by age cap: 2",
+                "low",
+                False,
+                {
+                    "detection": "age_digest",
+                    "count": 2,
+                    "ids": [str(f["synthetic_rule_3"].id), str(e["synthetic_ongoing_60d"].id)],
+                },
+            ),
+        ]
+        assert result.suppression.suppressed == {"age_fact": 1, "age_ongoing": 1}
+
+    async def test_a_failed_read_keeps_every_aged_fact(self):
+        sc, check = _scenario_check("a", rows=_Rows(fail=True), age="on")
+
+        result = await check.run()
+
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression.errors == 1
+        assert result.suppression.suppressed == {}
+
+    async def test_shadow_emits_and_records(self):
+        sc, check = _scenario_check("c", age="shadow")
+        result = await check.run()
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression.shadow_suppressed == {"age_fact": 1, "age_ongoing": 1}
+
+
+class TestSupersedeFilter:
+    async def test_on_hides_a_superseded_fact_on_the_embedding_path(self):
+        sc, check = _scenario_check("a", supersede="on")
+
+        result = await check.run()
+
+        tuples = _as_tuples(result.findings)
+        assert _pending(sc.facts["8f248bc2"], "embedding") not in tuples
+        assert len(tuples) == 4
+        assert result.suppression.suppressed == {"superseded": 1}
+
+    async def test_on_hides_a_superseded_rule_fact_on_the_keyword_path(self):
+        now = datetime.now(UTC)
+        fact = _fact(_synthetic_id(41), "synthetic: TODO archive the logs", now=now, age_days=2, category="rule")
+        fact = fact.model_copy(update={"superseded_by": _synthetic_id(42)})
+        heart, embeddings = _custom({KEYWORD_QUERY: [fact]}, embedded=False)
+
+        off = await _check(heart, embeddings).run()
+        on = await _check(heart, embeddings, supersede="on").run()
+
+        assert _pending(fact, "keyword") in _as_tuples(off.findings)
+        assert _pending(fact, "keyword") not in _as_tuples(on.findings)
+        assert on.suppression.suppressed == {"superseded": 1}
+
+    async def test_a_newer_same_key_fact_is_recorded_but_still_emitted_when_on(self):
+        sc = scenario_a(datetime.now(UTC))
+        target = str(sc.facts["78ccacac"].id)
+        check = _check(sc.heart, sc.embeddings, rows=_Rows(newer={target}), supersede="on")
+
+        result = await check.run()
+
+        assert _pending(sc.facts["78ccacac"], "embedding") in _as_tuples(result.findings)
+        assert result.suppression.shadow_suppressed == {"newer_same_key": 1}
+        assert result.suppression.suppressed == {"superseded": 1}
+
+    async def test_shadow_emits_and_records(self):
+        sc, check = _scenario_check("a", supersede="shadow")
+        result = await check.run()
+        assert _as_tuples(result.findings) == sc.expected
+        assert result.suppression.shadow_suppressed == {"superseded": 1}
+
+
+class TestControls:
+    """Spec 7.6: these surface with every layer on."""
+
+    async def test_the_controls_surface_with_every_layer_on(self):
+        now = datetime.now(UTC)
+        waiting = _fact(_synthetic_id(51), "waiting on Tim to merge #957", now=now, age_days=1, category="technical")
+        task = _fact(
+            _synthetic_id(52),
+            "synthetic: send the invoice to the accountant",
+            now=now,
+            age_days=2,
+            source="user_direct",
+        )
+        dated = _fact(
+            _synthetic_id(53), "synthetic: renew the domain", now=now, age_days=60, source="user_direct"
+        ).model_copy(update={"event_date": now.date() + timedelta(days=5)})
+        ongoing = _episode(_synthetic_id(54), "I'll draft the release notes", now=now, age_days=3, outcome="ongoing")
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [waiting, task, dated]}, {PROMISE_QUERIES[0]: [ongoing]})
+
+        result = await _check(heart, embeddings, kind="on", age="on", supersede="on").run()
+
+        assert _as_tuples(result.findings) == [
+            _pending(waiting, "embedding"),
+            _pending(task, "embedding"),
+            _pending(dated, "embedding"),
+            _commitment(ongoing),
+        ]
+        assert not result.suppression
+
+
+class TestMaxItems:
+    async def test_hidden_facts_take_no_slot(self):
+        now = datetime.now(UTC)
+        rules = [
+            _fact(_synthetic_id(60 + i), f"synthetic: rule {i}", now=now, age_days=1, category="rule") for i in range(3)
+        ]
+        kept = [_fact(_synthetic_id(70 + i), f"synthetic: task {i}", now=now, age_days=1) for i in range(2)]
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [*rules, kept[0]], PENDING_PROTOTYPES[1]: [kept[1]]})
+
+        off = _check(heart, embeddings)
+        off._params["max_pending_items"].value = 2
+        on = _check(heart, embeddings, kind="on")
+        on._params["max_pending_items"].value = 2
+
+        assert _as_tuples((await off.run()).findings) == [_pending(r, "embedding") for r in rules[:2]]
+        assert _as_tuples((await on.run()).findings) == [_pending(k, "embedding") for k in kept]
+
+
+class TestDigest:
+    def _setup(self, now: datetime, kept: int = 1) -> tuple[MagicMock, MagicMock, list[FactSummary]]:
+        old = [_fact(_synthetic_id(80 + i), f"synthetic: status {i}", now=now, age_days=40) for i in range(2)]
+        fresh = [_fact(_synthetic_id(90 + i), f"synthetic: task {i}", now=now, age_days=1) for i in range(kept)]
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [*old, *fresh[:3]], PENDING_PROTOTYPES[1]: fresh[3:]})
+        return heart, embeddings, old
+
+    async def test_once_a_day_after_the_cut(self):
+        heart, embeddings, old = self._setup(datetime.now(UTC))
+        check = _check(heart, embeddings, age="on")
+
+        first = await check.run()
+        second = await check.run()
+        check._last_age_digest = datetime.now(UTC).date() - timedelta(days=1)
+        third = await check.run()
+
+        digest = ("Pending items hidden by age cap: 2", "low", False)
+        firsts = [f for f in first.findings if f.raw_data.get("detection") == "age_digest"]
+        assert len(firsts) == 1 and first.findings[-1] is firsts[0]
+        assert (firsts[0].summary, firsts[0].urgency, firsts[0].needs_action) == digest
+        assert firsts[0].raw_data == {"detection": "age_digest", "count": 2, "ids": [str(o.id) for o in old]}
+        assert [f for f in second.findings if f.raw_data.get("detection") == "age_digest"] == []
+        assert second.suppression.suppressed == {"age_snapshot": 2}, "the items stay hidden"
+        thirds = [f for f in third.findings if f.raw_data.get("detection") == "age_digest"]
+        assert len(thirds) == 1
+        firsts[0].check_name = thirds[0].check_name = CHECK_NAME
+        assert thirds[0].fingerprint() == firsts[0].fingerprint()
+
+    async def test_the_digest_can_make_the_list_one_longer_than_the_cap(self):
+        heart, embeddings, _ = self._setup(datetime.now(UTC), kept=5)
+        result = await _check(heart, embeddings, age="on").run()
+        assert len(result.findings) == 6
+        assert result.findings[-1].summary == "Pending items hidden by age cap: 2"
+
+    async def test_shadow_never_adds_it(self):
+        heart, embeddings, _ = self._setup(datetime.now(UTC))
+        result = await _check(heart, embeddings, age="shadow").run()
+        assert [f for f in result.findings if f.raw_data.get("detection") == "age_digest"] == []
+        assert result.suppression.shadow_suppressed == {"age_snapshot": 2}
+
+    async def test_other_rules_do_not_add_it(self):
+        now = datetime.now(UTC)
+        question = _fact(_synthetic_id(99), "Who owns the deploy?", now=now, age_days=1)
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [question]})
+        result = await _check(heart, embeddings, age="on").run()
+        assert result.findings == [] and result.suppression.suppressed == {"question_form": 1}
+
+
+class TestFingerprintsUnchanged:
+    @pytest.mark.parametrize(
+        ("name", "modes"),
+        [("a", {"kind": "on"}), ("a", {"supersede": "on"}), ("b", {"kind": "on"}), ("c", {"age": "on"})],
+    )
+    async def test_survivors_carry_the_parity_fingerprints(self, name, modes):
+        sc, check = _scenario_check(name, **modes)
+
+        result = await check.run()
+
+        parity = {t[1]: _fingerprint(t) for t in sc.expected}
+        survivors = [f for f in result.findings if f.raw_data.get("detection") != "age_digest"]
+        assert survivors
+        for finding in survivors:
+            assert dataclasses.replace(finding, check_name=CHECK_NAME).fingerprint() == parity[finding.summary]

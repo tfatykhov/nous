@@ -13,7 +13,7 @@ import imaplib
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, get_args
 
 from nous.brain import Brain, continuation
@@ -23,6 +23,7 @@ from nous.heart import Heart
 from nous.heart.result_memory import CHUNK_MARKER
 from nous.heart.result_memory import HEADER as SUBTASK_RESULT_HEADER
 from nous.heart.schemas import EpisodeOutcome
+from nous.heartbeat.pending_filter import Ledger, PendingFilter, PendingFilterConfig
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
 from nous.observability.snapshots import (
@@ -271,6 +272,20 @@ class SelfInitiatedCheck(BaseCheck):
                 increases_findings=True,
             ),
         }
+        # F116: the kind, age and supersession filters, read from the settings once. With every mode off (the
+        # default) run() builds no ledger and calls nothing of the filter.
+        try:
+            self._pending = PendingFilter(
+                PendingFilterConfig.from_settings(settings),
+                db=getattr(heart.facts, "db", None),
+                agent_id=getattr(heart.facts, "agent_id", ""),
+                check_name=self.name,
+            )
+        except Exception:
+            logger.warning("F116: the pending filter could not be set up; every filter mode is off", exc_info=True)
+            self._pending = PendingFilter(PendingFilterConfig())
+        # UTC date of the last "Pending items hidden by age cap" line (kept in memory only).
+        self._last_age_digest: date | None = None
 
     async def _ensure_prototypes(self) -> list[list[float]]:
         """Embed prototype strings on first success, cache result.
@@ -290,8 +305,11 @@ class SelfInitiatedCheck(BaseCheck):
             return []
         return self._prototype_cache
 
-    async def _embedding_search(self) -> list[Finding]:
-        """Search recent facts using cosine similarity against pending prototypes."""
+    async def _embedding_search(self, ledger: Ledger | None = None) -> list[Finding]:
+        """Search recent facts using cosine similarity against pending prototypes.
+
+        ``ledger``: the F116 filters' state for this run (None: every filter mode is off).
+        """
         if self._embeddings is None:
             return []
 
@@ -313,6 +331,8 @@ class SelfInitiatedCheck(BaseCheck):
                     proto_text,
                     limit=5,
                 )
+                if ledger is not None and self._pending.needs_rows:
+                    await self._pending.prefetch(results, ledger)
                 for fact in results:
                     fid = str(fact.id)
                     if fid in seen_fact_ids:
@@ -348,6 +368,9 @@ class SelfInitiatedCheck(BaseCheck):
                             is_pending = score >= threshold
 
                     if is_pending:
+                        # F116: the filters are the last gate; a hidden fact takes no slot.
+                        if ledger is not None and self._pending.screen_fact(fact, ledger).decision == "drop":
+                            continue
                         findings.append(
                             Finding(
                                 source="facts",
@@ -364,8 +387,11 @@ class SelfInitiatedCheck(BaseCheck):
 
         return findings
 
-    async def _promise_scan(self) -> list[Finding]:
-        """Search recent episode summaries for unresolved commitments."""
+    async def _promise_scan(self, ledger: Ledger | None = None) -> list[Finding]:
+        """Search recent episode summaries for unresolved commitments.
+
+        ``ledger``: the F116 filters' state for this run (None: every filter mode is off).
+        """
         findings: list[Finding] = []
         max_items = int(self.get_param_value("max_pending_items"))
         max_stale_hours = float(self.get_param_value("max_stale_age_hours"))
@@ -409,6 +435,9 @@ class SelfInitiatedCheck(BaseCheck):
                         # #369: questions / conversational openers are not
                         # commitments — skip before flagging.
                         if _is_question_form(summary_text) or _is_system_envelope(summary_text):
+                            continue
+                        # F116: the filters are the last gate; a hidden episode takes no slot.
+                        if ledger is not None and self._pending.screen_episode(ep, ledger).decision == "drop":
                             continue
                         findings.append(
                             Finding(
@@ -501,11 +530,13 @@ class SelfInitiatedCheck(BaseCheck):
     async def run(self) -> CheckResult:
         findings: list[Finding] = []
         max_items = int(self.get_param_value("max_pending_items"))
+        # F116: the filters' state for this run; None while every filter mode is off.
+        ledger = self._pending.new_ledger() if self._pending.enabled else None
 
         # 1. Try embedding-based search first (if embeddings available)
         if self._embeddings is not None:
             try:
-                embedding_findings = await self._embedding_search()
+                embedding_findings = await self._embedding_search(ledger=ledger)
                 findings.extend(embedding_findings)
             except Exception:
                 logger.debug("SelfInitiatedCheck: embedding search failed, falling back", exc_info=True)
@@ -518,6 +549,9 @@ class SelfInitiatedCheck(BaseCheck):
                     category="rule",
                     limit=5,
                 )
+                # F116: this search returns rule facts only, so with the kind filter on it hides every result.
+                if ledger is not None and self._pending.needs_rows:
+                    await self._pending.prefetch(pending_facts, ledger)
                 seen_ids = {f.raw_data.get("fact_id") for f in findings}
                 for fact in pending_facts:
                     if len(findings) >= max_items:
@@ -533,6 +567,8 @@ class SelfInitiatedCheck(BaseCheck):
                     if actionable == False:  # noqa: E712 — SQLite 0/1
                         continue
                     if actionable == True or self._looks_like_pending(fact.content):  # noqa: E712
+                        if ledger is not None and self._pending.screen_fact(fact, ledger).decision == "drop":
+                            continue
                         findings.append(
                             Finding(
                                 source="facts",
@@ -548,7 +584,7 @@ class SelfInitiatedCheck(BaseCheck):
         # 3. Promise tracking
         if len(findings) < max_items:
             try:
-                promise_findings = await self._promise_scan()
+                promise_findings = await self._promise_scan(ledger=ledger)
                 remaining = max_items - len(findings)
                 findings.extend(promise_findings[:remaining])
             except Exception:
@@ -583,11 +619,37 @@ class SelfInitiatedCheck(BaseCheck):
 
         # Enforce max limit
         findings = findings[:max_items]
+        if ledger is not None:
+            self._append_age_digest(findings, ledger)
 
         return CheckResult(
             has_updates=bool(findings),
             findings=findings,
+            suppression=ledger.report if ledger is not None else None,
         )
+
+    def _append_age_digest(self, findings: list[Finding], ledger: Ledger) -> None:
+        """F116: with the age filter on, once a UTC day, one low-urgency line counting the items it hid this run.
+
+        Appended after the cut, so it never displaces a finding. The digits of the count normalise away, so the line
+        has one fingerprint every day; needs_action=False keeps it out of the triage turn.
+        """
+        if self._pending.cfg.age != "on" or not ledger.age_hidden:
+            return
+        today = ledger.now.astimezone(UTC).date()
+        if self._last_age_digest == today:
+            return
+        count = len(ledger.age_hidden)
+        findings.append(
+            Finding(
+                source="facts",
+                summary=f"Pending items hidden by age cap: {count}",
+                urgency="low",
+                needs_action=False,
+                raw_data={"detection": "age_digest", "count": count, "ids": ledger.age_hidden[:20]},
+            )
+        )
+        self._last_age_digest = today
 
     @staticmethod
     def _looks_like_pending(content: str) -> bool:
