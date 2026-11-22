@@ -284,7 +284,7 @@ class SelfInitiatedCheck(BaseCheck):
         except Exception:
             logger.warning("F116: the pending filter could not be set up; every filter mode is off", exc_info=True)
             self._pending = PendingFilter(PendingFilterConfig())
-        # UTC date of the last "Pending items hidden by age cap" line (kept in memory only).
+        # UTC date of the last "Pending items hidden by age cap" line a heartbeat tick took (kept in memory only).
         self._last_age_digest: date | None = None
 
     async def _ensure_prototypes(self) -> list[list[float]]:
@@ -629,10 +629,11 @@ class SelfInitiatedCheck(BaseCheck):
         )
 
     def _append_age_digest(self, findings: list[Finding], ledger: Ledger) -> None:
-        """F116: with the age filter on, once a UTC day, one low-urgency line counting the items it hid this run.
+        """F116: with the age filter on, one low-urgency line counting the items it hid this run, until a heartbeat
+        tick has taken that day's line (``age_digest_recorded``).
 
         Appended after the cut, so it never displaces a finding. The digits of the count normalise away, so the line
-        has one fingerprint every day; needs_action=False keeps it out of the triage turn.
+        has one fingerprint every day; needs_action=False keeps it out of the model's triage turn.
         """
         if self._pending.cfg.age != "on" or not ledger.age_hidden:
             return
@@ -646,10 +647,21 @@ class SelfInitiatedCheck(BaseCheck):
                 summary=f"Pending items hidden by age cap: {count}",
                 urgency="low",
                 needs_action=False,
-                raw_data={"detection": "age_digest", "count": count, "ids": ledger.age_hidden[:20]},
+                raw_data={
+                    "detection": "age_digest",
+                    "count": count,
+                    "ids": ledger.age_hidden[:20],
+                    "date": today.isoformat(),
+                },
             )
         )
-        self._last_age_digest = today
+
+    def age_digest_recorded(self, finding: Finding) -> None:
+        """F116: a heartbeat tick took this daily age line; no other line is added that UTC day (kept in memory)."""
+        try:
+            self._last_age_digest = date.fromisoformat(finding.raw_data["date"])
+        except (KeyError, TypeError, ValueError):
+            logger.debug("F116: an age line without a usable date: %r", finding.raw_data)
 
     @staticmethod
     def _looks_like_pending(content: str) -> bool:

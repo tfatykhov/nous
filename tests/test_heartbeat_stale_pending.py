@@ -27,6 +27,8 @@ from nous.config import Settings
 from nous.heart.schemas import EpisodeSummary, FactSummary
 from nous.heartbeat.checks import PENDING_PROTOTYPES, SelfInitiatedCheck
 from nous.heartbeat.pending_filter import PendingFilter
+from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.schemas import Finding
 
 CHECK_NAME = "self_initiated"
@@ -585,6 +587,7 @@ class TestAgeFilter:
 
         result = await check.run()
 
+        now = datetime.now(UTC)
         f = sc.facts
         hidden = [str(f[k].id) for k in ("78ccacac", "8f248bc2", "4ecbeeea", "a02b0102")]
         assert _as_tuples(result.findings) == [
@@ -594,7 +597,7 @@ class TestAgeFilter:
                 "Pending items hidden by age cap: 4",
                 "low",
                 False,
-                {"detection": "age_digest", "count": 4, "ids": hidden},
+                {"detection": "age_digest", "count": 4, "ids": hidden, "date": now.date().isoformat()},
             ),
         ]
         assert result.suppression.suppressed == {"age_snapshot": 4}
@@ -626,6 +629,7 @@ class TestAgeFilter:
                     "detection": "age_digest",
                     "count": 2,
                     "ids": [str(f["synthetic_rule_3"].id), str(e["synthetic_ongoing_60d"].id)],
+                    "date": datetime.now(UTC).date().isoformat(),
                 },
             ),
         ]
@@ -744,26 +748,47 @@ class TestDigest:
         heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [*old, *fresh[:3]], PENDING_PROTOTYPES[1]: fresh[3:]})
         return heart, embeddings, old
 
-    async def test_once_a_day_after_the_cut(self):
+    async def test_after_the_cut_until_a_tick_records_it_then_not_again_that_day(self):
         heart, embeddings, old = self._setup(datetime.now(UTC))
         check = _check(heart, embeddings, age="on")
 
         first = await check.run()
         second = await check.run()
-        check._last_age_digest = datetime.now(UTC).date() - timedelta(days=1)
+        firsts, seconds = _digests(first), _digests(second)
+        check.age_digest_recorded(seconds[0])
         third = await check.run()
+        check._last_age_digest = datetime.now(UTC).date() - timedelta(days=1)
+        fourth = await check.run()
 
-        digest = ("Pending items hidden by age cap: 2", "low", False)
-        firsts = [f for f in first.findings if f.raw_data.get("detection") == "age_digest"]
+        today = datetime.now(UTC).date().isoformat()
         assert len(firsts) == 1 and first.findings[-1] is firsts[0]
-        assert (firsts[0].summary, firsts[0].urgency, firsts[0].needs_action) == digest
-        assert firsts[0].raw_data == {"detection": "age_digest", "count": 2, "ids": [str(o.id) for o in old]}
-        assert [f for f in second.findings if f.raw_data.get("detection") == "age_digest"] == []
-        assert second.suppression.suppressed == {"age_snapshot": 2}, "the items stay hidden"
-        thirds = [f for f in third.findings if f.raw_data.get("detection") == "age_digest"]
-        assert len(thirds) == 1
-        firsts[0].check_name = thirds[0].check_name = CHECK_NAME
-        assert thirds[0].fingerprint() == firsts[0].fingerprint()
+        assert (firsts[0].summary, firsts[0].urgency, firsts[0].needs_action) == (
+            "Pending items hidden by age cap: 2",
+            "low",
+            False,
+        )
+        assert firsts[0].raw_data == {
+            "detection": "age_digest",
+            "count": 2,
+            "ids": [str(o.id) for o in old],
+            "date": today,
+        }
+        assert len(seconds) == 1, "a run whose line no tick took does not use up the day"
+        assert _digests(third) == [], "a tick took today's line"
+        assert third.suppression.suppressed == {"age_snapshot": 2}, "the items stay hidden"
+        fourths = _digests(fourth)
+        assert len(fourths) == 1
+        firsts[0].check_name = fourths[0].check_name = CHECK_NAME
+        assert fourths[0].fingerprint() == firsts[0].fingerprint()
+
+    def test_a_line_from_another_day_does_not_mark_today(self):
+        heart, embeddings, _ = self._setup(datetime.now(UTC))
+        check = _check(heart, embeddings, age="on")
+        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={"date": "2026-01-01"}))
+        assert check._last_age_digest == datetime(2026, 1, 1).date()
+        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={"date": "not a date"}))
+        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={}))
+        assert check._last_age_digest == datetime(2026, 1, 1).date()
 
     async def test_the_digest_can_make_the_list_one_longer_than_the_cap(self):
         heart, embeddings, _ = self._setup(datetime.now(UTC), kept=5)
@@ -774,15 +799,71 @@ class TestDigest:
     async def test_shadow_never_adds_it(self):
         heart, embeddings, _ = self._setup(datetime.now(UTC))
         result = await _check(heart, embeddings, age="shadow").run()
-        assert [f for f in result.findings if f.raw_data.get("detection") == "age_digest"] == []
+        assert _digests(result) == []
         assert result.suppression.shadow_suppressed == {"age_snapshot": 2}
 
-    async def test_other_rules_do_not_add_it(self):
+    async def test_a_hidden_question_is_counted_in_the_line(self):
         now = datetime.now(UTC)
         question = _fact(_synthetic_id(99), "Who owns the deploy?", now=now, age_days=1)
         heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [question]})
         result = await _check(heart, embeddings, age="on").run()
-        assert result.findings == [] and result.suppression.suppressed == {"question_form": 1}
+        assert result.suppression.suppressed == {"question_form": 1}
+        (digest,) = result.findings
+        assert digest.summary == "Pending items hidden by age cap: 1"
+        assert digest.raw_data["ids"] == [str(question.id)]
+
+    async def test_other_layers_do_not_add_it(self):
+        now = datetime.now(UTC)
+        rule = _fact(_synthetic_id(98), "synthetic: reply in plain words", now=now, age_days=40, category="rule")
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [rule]})
+        result = await _check(heart, embeddings, kind="on", age="on").run()
+        assert result.findings == [] and result.suppression.suppressed == {"kind_rule": 1}
+
+
+def _digests(result) -> list[Finding]:
+    return [f for f in result.findings if f.raw_data.get("detection") == "age_digest"]
+
+
+class TestDigestThroughTheRunner:
+    """The day's line is used up when a tick takes it, not by a run started by hand."""
+
+    def _runner(self, check: SelfInitiatedCheck, bus: AsyncMock) -> HeartbeatRunner:
+        registry = CheckRegistry()
+        registry.register(check)
+        runner = HeartbeatRunner(
+            settings=_settings(),
+            registry=registry,
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=bus,
+            http_client=AsyncMock(),
+        )
+        runner._triage = AsyncMock()
+        return runner
+
+    def _summaries(self, bus: AsyncMock) -> list[list[str]]:
+        events = [c.args[0] for c in bus.emit.call_args_list if c.args[0].type == "heartbeat_tick"]
+        return [[f["summary"] for f in e.data["findings"]] for e in events]
+
+    async def test_two_ticks_carry_one_line_and_a_triggered_run_uses_none(self):
+        now = datetime.now(UTC)
+        old = [_fact(_synthetic_id(80 + i), f"synthetic: status {i}", now=now, age_days=40) for i in range(2)]
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: old})
+        check = _check(heart, embeddings, age="on")
+        bus = AsyncMock()
+        runner = self._runner(check, bus)
+        line = "Pending items hidden by age cap: 2"
+
+        triggered = await runner.trigger_check(CHECK_NAME)
+        check.last_run = None  # due again
+        await runner._tick()
+        check.last_run = None
+        await runner._tick()
+
+        assert [f.summary for f in triggered.findings] == [line]
+        assert self._summaries(bus) == [[line], []]
+        assert check._last_age_digest == now.date()
 
 
 class TestFingerprintsUnchanged:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -42,14 +43,22 @@ SNAPSHOT_SOURCE = "enumerative_extractor"
 # A stored actionability verdict at least this confident exempts a fact from the age cap.
 EXEMPT_CONFIDENCE = 0.95
 _KIND_CATEGORIES = frozenset({"rule", "preference", "person"})
-_NOTE_PREFIX = re.compile(r"^\s*(HEARTBEAT FALSE-POSITIVE|Heartbeat triage\b|HEARTBEAT SUPPRESSION)", re.IGNORECASE)
+# A triage or suppression note, in the forms the notes are written in: "HEARTBEAT FALSE-POSITIVE" or "HEARTBEAT
+# SUPPRESSION" in capitals, or "Heartbeat triage" (any case) followed by a date ("Nov 2 2026", "2026-11-02") or by a
+# colon and a quote ('Heartbeat triage: "Pending action: ...'). A task that only starts with these words is not one.
+_MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+_NOTE_PREFIX = re.compile(
+    r"^\s*(?:HEARTBEAT (?:FALSE-POSITIVE|SUPPRESSION)\b"
+    rf"|(?i:heartbeat triage)(?:\s+(?:(?i:{_MONTH})\s+\d{{1,2}}\b|\d{{4}}-\d{{2}}-\d{{2}}\b)|\s*:\s*[\"“']))"
+)
 _NOTE_TAG = "hb-note"
 # The same leading filler the check strips before its question test on episodes (checks.py, _FILLER_PREFIX).
 _FILLER_PREFIX = re.compile(r"^\s*(?:(?:hey|ok|okay)[\s,!.:-]+)+", re.IGNORECASE)
-# Reasons the daily digest line counts.
-AGE_REASONS = frozenset({"age_snapshot", "age_fact", "age_ongoing"})
-# Seconds one batched read of the rows may take. After a failed read no other read runs in that check run.
-READ_TIMEOUT_SECONDS = 2.0
+# Reasons of the age filter (AGE mode). The daily line counts the items they hid.
+AGE_REASONS = frozenset({"question_form", "age_snapshot", "age_fact", "age_ongoing"})
+# Seconds all the batched reads of one check run may take together. Each read gets what is left; once it is spent,
+# or after a failed read, no other read runs in that check run.
+READ_BUDGET_SECONDS = 2.0
 
 # fact id -> (last_confirmed, a newer active fact has the same subject and attribute keys)
 Rows = dict[str, tuple[datetime | None, bool]]
@@ -226,13 +235,14 @@ def _age_reason(c: Candidate, cfg: PendingFilterConfig, now: datetime) -> str | 
             if now - c.started_at > timedelta(hours=cfg.episode_max_age_hours):
                 return "age_ongoing"
         return None
-    if _FILLER_PREFIX.sub("", c.text).strip().endswith("?"):
-        return "question_form"
-    if c.learned_at is None:
-        return None
+    # Exempt from every rule of this layer: an event today or later (UTC), a confident stored verdict.
     if c.event_date is not None and c.event_date >= now.astimezone(UTC).date():
         return None
     if c.actionable_confidence is not None and c.actionable_confidence >= EXEMPT_CONFIDENCE:
+        return None
+    if _FILLER_PREFIX.sub("", c.text).strip().endswith("?"):
+        return "question_form"
+    if c.learned_at is None:
         return None
     snapshot = c.source == SNAPSHOT_SOURCE
     limit = timedelta(hours=cfg.snapshot_ttl_hours if snapshot else cfg.fact_max_age_hours)
@@ -296,6 +306,7 @@ class Ledger:
     rows: Rows = field(default_factory=dict)
     requested: set[str] = field(default_factory=set)  # fact ids a read was attempted for
     age_hidden: list[str] = field(default_factory=list)  # ids hidden by an age rule (the daily digest)
+    read_seconds_left: float = field(default_factory=lambda: READ_BUDGET_SECONDS)
     read_failed: bool = False
     logged_error: bool = False
     logged_read_failure: bool = False
@@ -306,7 +317,7 @@ class PendingFilter:
 
     ``enabled`` is False when every mode is off: the check then builds no ledger and calls nothing here.
     ``needs_rows`` is True when a layer that reads ``last_confirmed`` or the slot keys is not off.
-    ``fetch_rows`` replaces the batched read (tests).
+    ``fetch_rows`` replaces the batched read and ``clock`` the monotonic clock that measures it (tests).
     """
 
     def __init__(
@@ -317,6 +328,7 @@ class PendingFilter:
         agent_id: str = "",
         check_name: str = "self_initiated",
         fetch_rows: FetchRows | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg
         self.enabled = cfg.kind != "off" or cfg.age != "off" or cfg.supersede != "off"
@@ -325,15 +337,17 @@ class PendingFilter:
         self._agent_id = agent_id
         self._check_name = check_name
         self._fetch_rows: FetchRows | None = fetch_rows or (self._read_rows if db is not None else None)
+        self._clock = clock
 
     def new_ledger(self) -> Ledger:
         return Ledger()
 
     async def prefetch(self, facts: Iterable[Any], ledger: Ledger) -> None:
-        """Read ``last_confirmed`` and the same-key flag of one search result list, in one bounded read.
+        """Read ``last_confirmed`` and the same-key flag of one search result list, in one read.
 
-        Never raises (a cancellation passes through). On a failure or a timeout no further read runs this run, the
-        items of the list stay without their row (a rule that needs it does not fire) and one error is counted.
+        The reads of a run share ``READ_BUDGET_SECONDS``: each gets what is left. Never raises (a cancellation passes
+        through). On a failure, a timeout or a spent budget no further read runs this run, the items of the list stay
+        without their row (a rule that needs it does not fire) and one error is counted.
         """
         if not self.needs_rows or ledger.read_failed or self._fetch_rows is None:
             return
@@ -351,7 +365,14 @@ class PendingFilter:
                 ids.append(fid)
             if not ids:
                 return
-            ledger.rows.update(await asyncio.wait_for(self._fetch_rows(ids), READ_TIMEOUT_SECONDS))
+            if ledger.read_seconds_left <= 0:
+                raise TimeoutError("the read budget of this run is spent")
+            started = self._clock()
+            try:
+                rows = await asyncio.wait_for(self._fetch_rows(ids), ledger.read_seconds_left)
+            finally:
+                ledger.read_seconds_left -= self._clock() - started
+            ledger.rows.update(rows)
         except Exception:
             ledger.read_failed = True
             ledger.report.errors += 1

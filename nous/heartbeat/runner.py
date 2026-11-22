@@ -825,6 +825,8 @@ class HeartbeatRunner:
                     all_findings.extend(result.findings)
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
+                    if isinstance(suppression, SuppressionReport):
+                        self._note_age_digest(check, result.findings)
 
                 # F099: last, after the run's own record, the callback candidate and the findings: a cancel from
                 # within the roll-up loses only the increment, and the run is a success (see the arm below).
@@ -942,6 +944,16 @@ class HeartbeatRunner:
             self._pending_totals = totals
         except Exception:
             logger.warning("F116: the pending filter's report of this run could not be recorded", exc_info=True)
+
+    @staticmethod
+    def _note_age_digest(check: BaseCheck, findings: list[Finding]) -> None:
+        """F116: this tick took the check's daily age line; the check adds no other one that day."""
+        try:
+            for f in findings:
+                if f.raw_data.get("detection") == "age_digest":
+                    check.age_digest_recorded(f)  # type: ignore[attr-defined]
+        except Exception:
+            logger.warning("F116: the daily age line of this tick could not be marked as taken", exc_info=True)
 
     async def _emit_tick_event(
         self,

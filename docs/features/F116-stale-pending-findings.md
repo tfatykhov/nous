@@ -82,7 +82,7 @@ Candidate fields: kind (`fact`/`episode`), id, text, category, tags, source, `ac
 
 ### L1. Kind filter (`..._KIND_MODE`)
 - Skip `category in {rule, preference, person}` on both fact paths (extends :324–327 and adds it to the keyword path).
-- Skip facts that are triage or suppression notes: content matches `^\s*(HEARTBEAT FALSE-POSITIVE|Heartbeat triage\b|HEARTBEAT SUPPRESSION)` (case-insensitive) or carries tag `hb-note`. Same prefixes for episode summaries from heartbeat sessions (L5).
+- Skip facts that are triage or suppression notes: content starts with `HEARTBEAT FALSE-POSITIVE` or `HEARTBEAT SUPPRESSION` in capitals, or `Heartbeat triage` in any case followed by a date (`Nov 2 2026`, `2026-11-02`) or by a colon and a quote (`Heartbeat triage: "Pending action: ...`), or carries tag `hb-note`. A task that only starts with these words ("Heartbeat triage: ask the owner ...", "Heartbeat suppression TTL should be raised") is not a note. Same prefixes for episode summaries from heartbeat sessions (L5).
 - **Write time:** add `rule` to `_HARD_NO_CATEGORIES` (`actionability.py:138`); add a Tier-0 rule returning `(False, 1.0, "hard_filter_note")` for the note prefixes. Fixes new facts without relying on read-time filters.
 - **Backfill:** run the existing `nous/handlers/actionability_backfill.py` (dry-run default) for the 78 active rule facts and the 6 notes. Tim reviews the dry-run list first.
 - Keyword fallback (:517–521): today it searches only `category="rule"`. With L1 on it would return nothing useful. Change it to an unfiltered search with L1 applied after, or drop the path; decide at build after reading `facts.search`'s filter options.
@@ -211,18 +211,24 @@ A mode that is not one of the three words is `off`. The settings are read when t
 
 How the code relates to the design above:
 
-1. The search result the check gets carries neither `last_confirmed` nor the slot keys. The filter reads them with one query per search result list (named columns of `heart.facts`, 2 seconds at most). After a failed read no other read runs in that check run, and no item is hidden by a rule that needs the row.
+1. The search result the check gets carries neither `last_confirmed` nor the slot keys. The filter reads them with one query per search result list (named columns of `heart.facts`). The reads of one check run share 2 seconds in all: each read gets what is left, and once it is spent, or after a failed read, no other read runs in that check run and no item is hidden by a rule that needs the row.
 2. No new index: the same-key lookup uses `idx_facts_conflict_slot` (migration 064).
 3. `inactive` is a defensive rule: search returns active facts only and builds each result from the same row.
 4. A newer active fact with the same subject and attribute keys is recorded as `newer_same_key` in shadow only, whatever the mode. The write path keeps two active facts with the same keys and no marker when it judged them compatible (intervals that coexist, a different `event_date`, a relation that is neither an update nor a contradiction, a confidence under 0.8, no classifier answer), and two open tasks about one subject can look like that. A pair linked by `contradiction_of` is not counted.
-5. The question rule on facts is a trailing `?` only (after a leading ok or hey), so a fact such as "What remains: send the invoice" is a task. Episodes keep the check's existing question test.
+5. The question rule on facts is a trailing `?` only (after a leading ok or hey), so a fact such as "What remains: send the invoice" is a task. It is a rule of the AGE mode and shares its exemptions: a question with an `event_date` today or later, or a stored actionability confidence of 0.95 or more, surfaces. Episodes keep the check's existing question test.
 6. With a mode not `off`, a tick whose findings were all hidden still writes its `heartbeat_tick` event, with `findings_count` 0 and no triage.
 7. The report travels on the check's result (`CheckResult.suppression`), not on an attribute of the check: a run started from `POST /heartbeat/check/{name}/trigger` can run beside a tick. The runner adds a tick's reports to the event; the report of a started run is returned with it and not counted.
 8. The counts since start are on the runner (`get_stats()["pending_filter"]` and `GET /heartbeat/status`), not in the finding store, which knows only the findings it ingested.
 
+The daily line (AGE `on`): "Pending items hidden by age cap: N" counts every item the AGE mode hid in that run, questions included (the tick event's `suppressed` has the count by reason), with up to 20 ids and the UTC date in `raw_data`. Each run adds it until a heartbeat tick has taken that day's line; the day is then marked in memory, so a restart can repeat it that day, and a run started from `POST /heartbeat/check/{name}/trigger` returns it without using up the day's line. It then goes through the tick like any finding: the finding store takes it and the triage step routes it, it starts no model turn because `needs_action` is false, and once acknowledged it counts toward the check's accumulation threshold (`NOUS_HEARTBEAT_ESCALATION_ACCUMULATION_THRESHOLD`) and is listed in the daily digest.
+
 The keyword fallback searches rule facts only (`category="rule"` filters both search legs), so with KIND `on` every result of that search is hidden. The call is kept as it is: with KIND `off` or in `shadow` it runs as before and is measured. With KIND `on` and no embedding provider the check raises no fact finding.
 
 The write-time half of L1 (`rule` in `_HARD_NO_CATEGORIES`, the note prefixes) and the L1 backfill come with PR 3, when KIND is turned on: a verdict stored on a fact outlives the setting.
+
+Known limits to measure in shadow:
+
+- A duplicate learn confirms the existing fact (`FactManager._confirm`), which refreshes `last_confirmed`, so a status line that is stated again does not age out.
 
 ## 6. Interaction notes
 - F047 stays the write-time verdict; this feature adds read-time gates and one reason-bearing close path.

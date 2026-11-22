@@ -251,12 +251,32 @@ class TestKindLayer:
             TEXT_55DFA56B,
             TEXT_55DFA56B.lower(),
             '  heartbeat TRIAGE Nov 2 2026: "Pending action: x"',
+            "Heartbeat triage November 12: the backup line is done",
+            "Heartbeat triage 2026-11-02: nothing left to do",
+            'Heartbeat triage: "Pending action: send the invoice" is done',
+            "Heartbeat triage: “Pending action: send the invoice” is done",
             "HEARTBEAT FALSE-POSITIVE: the deploy reminder is done",
+            "HEARTBEAT FALSE-POSITIVE (fact 07a88e08) do not re-flag",
             "HEARTBEAT SUPPRESSION: do not raise the backup line",
         ],
     )
     def test_triage_and_suppression_notes(self, text):
         assert evaluate(_fact(text), _cfg(kind="on"), NOW) == Verdict("drop", "kind_note")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Heartbeat triage: ask the owner which findings to keep",
+            "Heartbeat triage should run less often at night",
+            "Heartbeat triage nightly summary needs a chart",
+            "Heartbeat suppression TTL should be raised to 48 hours",
+            "heartbeat suppression: lower the TTL",
+            "Heartbeat false-positive rate needs a dashboard",
+            "Heartbeat FALSE-POSITIVE count is wrong on the dashboard",
+        ],
+    )
+    def test_a_task_that_starts_with_the_same_words_keeps(self, text):
+        assert evaluate(_fact(text), _cfg(kind="on"), NOW) == KEEP
 
     def test_a_note_by_tag(self):
         c = _fact("synthetic: the upload test is known to be flaky", tags=frozenset({"hb-note"}))
@@ -367,6 +387,25 @@ class TestAgeLayerFacts:
     )
     def test_question_form_is_a_trailing_question_mark(self, text, hidden):
         assert evaluate(_fact(text), _cfg(age="on"), NOW) == (Verdict("drop", "question_form") if hidden else KEEP)
+
+    @pytest.mark.parametrize("offset", [1, 0])
+    def test_a_question_with_an_event_date_today_or_later_keeps(self, offset):
+        c = _fact("Who brings the cake to the party?", event_date=NOW.date() + timedelta(days=offset))
+        assert evaluate(c, _cfg(age="on"), NOW) == KEEP
+
+    def test_a_question_with_a_past_event_date_hides(self):
+        c = _fact("Who brings the cake to the party?", event_date=NOW.date() - timedelta(days=1))
+        assert evaluate(c, _cfg(age="on"), NOW) == Verdict("drop", "question_form")
+
+    @pytest.mark.parametrize(("confidence", "hidden"), [(0.97, False), (0.95, False), (0.9, True)])
+    def test_a_confident_question_keeps(self, confidence, hidden):
+        c = _fact("Can you send the invoice to the accountant?", actionable_confidence=confidence)
+        assert evaluate(c, _cfg(age="on"), NOW) == (Verdict("drop", "question_form") if hidden else KEEP)
+
+    def test_a_question_needs_no_age(self):
+        assert evaluate(_fact("Who owns the deploy?", age_days=None), _cfg(age="on"), NOW) == Verdict(
+            "drop", "question_form"
+        )
 
 
 class TestAgeLayerEpisodes:
@@ -696,7 +735,7 @@ class TestPrefetch:
         if how == "raises":
             rows = _Rows(fail=RuntimeError("database is down"))
         else:
-            monkeypatch.setattr(pending_filter, "READ_TIMEOUT_SECONDS", 0.05)
+            monkeypatch.setattr(pending_filter, "READ_BUDGET_SECONDS", 0.05)
             rows = _Rows(sleep=5)
         f = _filter(rows, age="on")
         ledger = f.new_ledger()
@@ -727,6 +766,83 @@ class TestPrefetch:
         f = _filter(_Rows(fail=asyncio.CancelledError()), age="on")
         with pytest.raises(asyncio.CancelledError):
             await f.prefetch([_summary_fact("x", age_days=1)], f.new_ledger())
+
+
+class _Clock:
+    """A fake monotonic clock: each read advances it by ``step`` seconds."""
+
+    def __init__(self, step: float) -> None:
+        self.now = 100.0
+        self.step = step
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestReadBudget:
+    """All the reads of one run share one budget of READ_BUDGET_SECONDS."""
+
+    def _filter(self, clock: _Clock, monkeypatch) -> tuple[PendingFilter, list[float], list[list[str]]]:
+        timeouts: list[float] = []
+        calls: list[list[str]] = []
+
+        async def wait_for(awaitable, timeout):
+            timeouts.append(timeout)
+            return await awaitable
+
+        async def fetch(ids: list[str]):
+            calls.append(list(ids))
+            clock.now += clock.step
+            return {i: (None, False) for i in ids}
+
+        monkeypatch.setattr(pending_filter, "asyncio", SimpleNamespace(wait_for=wait_for))
+        return PendingFilter(_cfg(age="on"), fetch_rows=fetch, clock=clock), timeouts, calls
+
+    async def test_each_read_gets_what_is_left_and_none_runs_after_it_is_spent(self, monkeypatch, caplog):
+        clock = _Clock(step=0.8)
+        f, timeouts, calls = self._filter(clock, monkeypatch)
+        ledger = f.new_ledger()
+        lists = [[_summary_fact("x", age_days=40, source="user_direct")] for _ in range(4)]
+
+        with caplog.at_level(logging.WARNING, logger="nous.heartbeat.pending_filter"):
+            for facts in lists:
+                await f.prefetch(facts, ledger)
+
+        assert timeouts == pytest.approx([2.0, 1.2, 0.4])
+        assert len(calls) == 3, "no read once the budget is spent"
+        assert ledger.read_failed and ledger.report.errors == 1
+        assert len(_logged(caplog, logging.WARNING)) == 1
+        assert f.screen_fact(lists[0][0], ledger) == Verdict("drop", "age_fact"), "a row read in time is used"
+        assert f.screen_fact(lists[3][0], ledger) == KEEP, "a list read after the budget keeps its items"
+
+    async def test_fast_reads_leave_the_budget_almost_whole(self, monkeypatch):
+        clock = _Clock(step=0.01)
+        f, timeouts, calls = self._filter(clock, monkeypatch)
+        ledger = f.new_ledger()
+        for _ in range(6):
+            await f.prefetch([_summary_fact("x", age_days=1)], ledger)
+        assert len(calls) == 6 and not ledger.read_failed
+        assert timeouts[-1] == pytest.approx(2.0 - 5 * 0.01)
+
+    async def test_a_list_with_nothing_to_read_uses_no_budget(self, monkeypatch):
+        clock = _Clock(step=0.5)
+        f, timeouts, calls = self._filter(clock, monkeypatch)
+        ledger = f.new_ledger()
+        fact = _summary_fact("x", age_days=1)
+        await f.prefetch([fact], ledger)
+        await f.prefetch([fact], ledger)  # already read: no query
+        await f.prefetch([_summary_fact("y", age_days=1)], ledger)
+        assert timeouts == pytest.approx([2.0, 1.5])
+
+    async def test_each_run_has_its_own_budget(self, monkeypatch):
+        clock = _Clock(step=3.0)
+        f, timeouts, calls = self._filter(clock, monkeypatch)
+        first, second = f.new_ledger(), f.new_ledger()
+        await f.prefetch([_summary_fact("x", age_days=1)], first)
+        await f.prefetch([_summary_fact("y", age_days=1)], first)
+        await f.prefetch([_summary_fact("z", age_days=1)], second)
+        assert len(calls) == 2 and first.read_failed and not second.read_failed
+        assert timeouts == pytest.approx([2.0, 2.0])
 
 
 class TestScreen:
