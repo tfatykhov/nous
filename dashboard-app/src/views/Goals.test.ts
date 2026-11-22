@@ -1064,3 +1064,37 @@ describe('Goals: once a day, the review follow-ups', () => {
     expect(within(box).getByText('Time of day in America/New_York. It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.')).toBeTruthy();
   });
 });
+
+describe('Goals: a lost change of session settings', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('stays when a change with other values lands from elsewhere, and is replaced once the values asked for are there', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ pacing: PACING() })];
+    details['G-0001'] = { ...A, daily_at: null, actions: ['run-now', 'pause', 'stop', 'budget', 'sessions', 'deadline', 'note', 'cancel'] };
+    const ownerRow = (seq: number, text: string) =>
+      ({ seq, session_n: null, kind: 'state', actor: 'owner', text, evidence: [], created_at: A.updated_at });
+    handlers['POST /goals/G-0001/sessions'] = () => {
+      // another tab's change lands instead: a stall limit of 6, not the 5 asked for here
+      details['G-0001'] = { ...details['G-0001'], stall_limit: 6, journal: [ownerRow(98, 'Session settings: stall limit 3 -> 6.'), ...A.journal] };
+      return [HANG, null];
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
+    const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
+    await fireEvent.input(within(box).getByLabelText('Pause after this many sessions in a row that finish nothing'), { target: { value: '5' } });
+    await fireEvent.click(within(box).getByRole('button', { name: 'Yes, change how it works' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
+    expect(within(region).queryByText('Changed. It applies from the next session.')).toBeNull();
+    // the change asked for here lands after all
+    details['G-0001'] = { ...details['G-0001'], stall_limit: 5, journal: [ownerRow(99, 'Session settings: stall limit 6 -> 5.'), ...details['G-0001'].journal] };
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.waitFor(() => expect(within(region).getByText('Changed. It applies from the next session.')).toBeTruthy());
+    expect(within(region).queryByText('No answer came back. Check the goal before trying again.')).toBeNull();
+  });
+});

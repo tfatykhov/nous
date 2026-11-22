@@ -10,7 +10,7 @@
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
     ONCE_A_DAY_SESSIONS_NOTE, dailyHint, howOftenText, sessionsBody, sessionsForm, sessionsNote, sessionsPerDayText,
-    sessionsProblem, type SessionsForm,
+    sessionsProblem, type SessionsBody, type SessionsForm,
   } from '../../lib/goals';
 
   // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
@@ -167,7 +167,10 @@
     await onChanged();
     busy = null;
     result = outcome;
-    if (unanswered) lost = { action, at, before, ...(body as { total?: number; day?: number; days?: number } | undefined) };
+    if (unanswered) {
+      const sent = action === 'sessions' ? { sessions: body as SessionsBody } : (body as { total?: number; day?: number; days?: number } | undefined);
+      lost = { action, at, before, ...sent };
+    }
     await tick();
     (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }

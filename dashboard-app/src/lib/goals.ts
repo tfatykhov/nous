@@ -560,11 +560,12 @@ export interface LostChange {
     top: number;
     lastSession: number;
   };
-  /** A note's text, a budget's new values, a deadline's added days, as sent. */
+  /** A note's text, a budget's new values, a deadline's added days, the session settings, as sent. */
   text?: string;
   total?: number;
   day?: number;
   days?: number;
+  sessions?: SessionsBody;
 }
 
 const DAY_MS = 86_400_000;
@@ -613,7 +614,9 @@ export function changeLanded(lost: LostChange, goal: GoalDetail): boolean {
     case 'contained':
       return b.mode !== 'contained' && goal.mode === 'contained';
     case 'sessions':
-      return goal.journal.some((row) => row.seq > b.top && row.kind === 'state' && row.actor === 'owner' && row.text.startsWith(SESSIONS_ROW));
+      // The owner's row of a change, and every value this change asked for: a change made elsewhere is not this one.
+      return sessionsHeld(lost.sessions, goal)
+        && goal.journal.some((row) => row.seq > b.top && row.kind === 'state' && row.actor === 'owner' && row.text.startsWith(SESSIONS_ROW));
     case 'run-now':
       return (b.pending_request !== 'run_now' && goal.pending_request === 'run_now')
         || goal.sessions.some((s) => s.n > b.lastSession && s.trigger === 'run_now');
@@ -857,6 +860,17 @@ export const ONCE_A_DAY_SESSIONS_NOTE = 'Sessions per day does not apply: a goal
 /** How the server's journal row of such a change begins. */
 const SESSIONS_ROW = 'Session settings: ';
 export const HOW_OFTEN_TEXT = { often: 'As often as its size allows', daily: 'Once a day' } as const;
+
+/** Whether `goal` holds every session setting `asked` sets; false when it asks for nothing. */
+function sessionsHeld(asked: SessionsBody | undefined, goal: GoalDetail): boolean {
+  if (!asked) return false;
+  const held: boolean[] = [];
+  for (const field of ['sessions_per_day', 'min_interval_seconds', 'jobs_per_day', 'quiet_hours_ok', 'stall_limit'] as const) {
+    if (asked[field] !== undefined) held.push(goal[field] === asked[field]);
+  }
+  if (asked.daily !== undefined) held.push(asked.daily ? goal.daily_at === asked.daily_at : !goal.daily_at);
+  return held.length > 0 && held.every(Boolean);
+}
 
 /** The hint beside a once-a-day time: on the create form (`create`), or on a goal's page (`change`). */
 export function dailyHint(zone: string, where: 'create' | 'change'): string {

@@ -459,7 +459,7 @@ describe('goal pacing: how often a goal works, and changing its session settings
   });
 
   it('a lost answer is replaced on the owner\'s own row of the change', () => {
-    const lost: LostChange = { action: 'sessions', at: NOW, before: beforeChange(goal) };
+    const lost: LostChange = { action: 'sessions', at: NOW, before: beforeChange(goal), sessions: { stall_limit: 3 } };
     const top = goal.journal[0].seq;
     const row = (seq: number, actor: string, text: string) => ({ seq, session_n: null, kind: 'state', actor, text, evidence: [], created_at: null });
     expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'owner', 'Session settings: stall limit 3 -> 4.'), ...goal.journal] })).toBe(true);
@@ -508,5 +508,45 @@ describe('goal pacing: the review follow-ups', () => {
     expect(goals.sessionsPerDayText({ sessions_per_day: 4, daily_at: null })).toBe('4');
     expect(goals.sessionsPerDayText({ sessions_per_day: 4 })).toBe('4');
     expect(goals.ONCE_A_DAY_SESSIONS_NOTE).toBe('Sessions per day does not apply: a goal that works once a day starts one session a day.');
+  });
+});
+
+describe('a lost change of session settings is confirmed only by the values asked for', () => {
+  const goal = goalDetail({ sessions_per_day: 4, min_interval_seconds: 3600, jobs_per_day: 2, quiet_hours_ok: false, stall_limit: 3, daily_at: null });
+  const daily = goalDetail({ ...goal, daily_at: '07:30' });
+  const top = goal.journal[0].seq;
+  const row = (actor = 'owner') =>
+    ({ seq: top + 1, session_n: null, kind: 'state', actor, text: 'Session settings: stall limit 3 -> 4.', evidence: [], created_at: null });
+  const lostOf = (from: GoalDetail, sessions?: goals.SessionsBody): LostChange =>
+    ({ action: 'sessions', at: NOW, before: beforeChange(from), ...(sessions ? { sessions } : {}) });
+  const after = (from: GoalDetail, over: Partial<GoalDetail>) => ({ ...from, ...over, journal: [row(), ...from.journal] });
+
+  it('a newer owner row with the values asked for is proof', () => {
+    expect(changeLanded(lostOf(goal, { stall_limit: 4 }), after(goal, { stall_limit: 4 }))).toBe(true);
+    const all = { sessions_per_day: 1, min_interval_seconds: 600, jobs_per_day: 0, quiet_hours_ok: true, stall_limit: 4 };
+    expect(changeLanded(lostOf(goal, all), after(goal, all))).toBe(true);
+    expect(changeLanded(lostOf(goal, { daily: true, daily_at: '07:30' }), after(goal, { daily_at: '07:30' }))).toBe(true);
+    expect(changeLanded(lostOf(daily, { daily: false }), after(daily, { daily_at: null }))).toBe(true);
+  });
+
+  it('a newer owner row made with other values, from another tab, is not proof', () => {
+    expect(changeLanded(lostOf(goal, { stall_limit: 4 }), after(goal, { stall_limit: 6 }))).toBe(false);
+    expect(changeLanded(lostOf(goal, { daily: true, daily_at: '07:30' }), after(goal, { daily_at: '08:00' }))).toBe(false);
+    expect(changeLanded(lostOf(goal, { daily: true, daily_at: '07:30' }), after(goal, { daily_at: null }))).toBe(false);
+    expect(changeLanded(lostOf(daily, { daily: false }), after(daily, { daily_at: '08:00' }))).toBe(false);
+  });
+
+  it('a partial match is not proof', () => {
+    const asked = { stall_limit: 4, jobs_per_day: 0, daily: true, daily_at: '07:30' };
+    expect(changeLanded(lostOf(goal, asked), after(goal, { stall_limit: 4, jobs_per_day: 2, daily_at: '07:30' }))).toBe(false);
+    expect(changeLanded(lostOf(goal, asked), after(goal, { stall_limit: 4, jobs_per_day: 0, daily_at: null }))).toBe(false);
+    expect(changeLanded(lostOf(goal, asked), after(goal, { stall_limit: 4, jobs_per_day: 0, daily_at: '07:30' }))).toBe(true);
+  });
+
+  it('the values alone, a row by another actor, or nothing asked is not proof', () => {
+    expect(changeLanded(lostOf(goal, { stall_limit: 4 }), { ...goal, stall_limit: 4 })).toBe(false);
+    expect(changeLanded(lostOf(goal, { stall_limit: 4 }), { ...goal, stall_limit: 4, journal: [row('chain'), ...goal.journal] })).toBe(false);
+    expect(changeLanded(lostOf(goal, {}), after(goal, {}))).toBe(false);
+    expect(changeLanded(lostOf(goal), after(goal, { stall_limit: 4 }))).toBe(false);
   });
 });
