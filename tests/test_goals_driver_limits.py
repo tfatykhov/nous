@@ -1842,6 +1842,30 @@ async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_fac
     assert (await _goal(w, goal)).next_wake_at < before
 
 
+async def test_a_change_of_once_a_day_committed_while_a_session_closes_is_the_one_its_close_reads(env_factory):  # noqa: F811
+    """The owner turns once a day off while the goal's session is closing: the change sees the session open and leaves
+    the wake to the close, so the close must read the goal's settings as committed after the change (it waits for the
+    goal row's lock), and its wake is the interval's, not tomorrow's time."""
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    minute = _minute(local, hours=-1)
+    await _set_goal(w, goal, daily_at_minute=minute, next_wake_at=func.clock_timestamp())
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    async with w.db.session() as changing:  # the change holds the goal row, as change_sessions does
+        await changing.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        closing = asyncio.create_task(w.driver.close_finished())
+        await _until_waiters(w, "brain.goals")
+        await changing.execute(update(Goal).where(Goal.id == goal.id).values(daily_at_minute=None))
+        await changing.commit()
+    assert await closing == 1
+    closed = await _session(w, session.id)
+    after = await _goal(w, goal)
+    assert after.daily_at_minute is None
+    assert after.next_wake_at == closed.ended_at + timedelta(seconds=2 * goal.min_interval_seconds)
+    assert after.next_wake_at != _slot(zone, local, minute, days=1)
+
+
 @pytest.mark.parametrize("to", ["as_often_as_allowed", "an_earlier_time"])
 async def test_a_paced_goal_changed_to_start_sooner_is_decided_again_at_the_next_tick(env_factory, to):  # noqa: F811
     w, zone, local = await _paced(env_factory)

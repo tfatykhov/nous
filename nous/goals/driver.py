@@ -1420,7 +1420,13 @@ class GoalDriver:
         ``UNCREATED_AFTER_SECONDS`` it is closed ``interrupted``. Whether the chain has ended is read again inside
         the transaction. The close writes the session's outcome, spend, steps and summary (``WHERE ended_at IS
         NULL``), journals its questions and the owner's answers, moves an active goal's next wake one interval on
-        after a closed step and two otherwise, and journals the end (``_end``). True when it closed the session."""
+        after a closed step and two otherwise, and journals the end (``_end``). True when it closed the session.
+
+        The goal row is taken ``FOR UPDATE`` too, after the session row (the order the goal tools and the ending rows
+        take them; a start and the store's changes lock the goal row and never wait on a session row), before the goal
+        is read, and the clock after it: the wake is written from the goal's settings as committed, so an owner's
+        change of once a day made while the session closes, which saw the session open and left the wake to the close,
+        is the one it reads."""
         async with self._db.session() as s:
             row = (
                 await s.execute(
@@ -1435,10 +1441,12 @@ class GoalDriver:
             ).scalar_one_or_none()
             if row is None:
                 return False
-            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
             goal = (
-                await s.execute(select(Goal).where(Goal.id == row.goal_id, Goal.agent_id == self._agent_id))
+                await s.execute(
+                    select(Goal).where(Goal.id == row.goal_id, Goal.agent_id == self._agent_id).with_for_update()
+                )
             ).scalar_one()
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()  # after both locks
             if row.root_id is None:
                 root_id = (
                     await s.execute(
