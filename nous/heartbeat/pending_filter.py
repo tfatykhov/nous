@@ -10,10 +10,10 @@ or ``on`` (the item is hidden).
 - L3a supersession: a superseded or inactive fact is hidden. A newer active fact with the same subject and attribute
   keys is recorded in shadow only, whatever the mode.
 
-The check calls the filter last, right before it would build a finding, so the filter only counts items that would
-have surfaced. Every failure keeps the item: a mode that does not parse is ``off``, a field of an unexpected type
-does not fire the rule that needs it, an error while evaluating keeps the item and is counted, and a failed read of
-the rows keeps every item a rule would need the row for.
+The check calls the filter last, right before it would build a finding, so the filter only sees items that passed
+every test the check already makes. Every failure keeps the item: a mode that does not parse is ``off``, a field of an
+unexpected type does not fire the rule that needs it, an error while evaluating keeps the item and is counted, and a
+failed read of the rows keeps every item a rule would need the row for.
 """
 
 from __future__ import annotations
