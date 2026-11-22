@@ -1714,6 +1714,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -1798,6 +1799,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "starlette", marker = "extra == 'runtime'", specifier = ">=0.40,<1.0" },
     { name = "tabulate", marker = "extra == 'agent'", specifier = ">=0.9,<1.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
     { name = "uvicorn", marker = "extra == 'runtime'", specifier = ">=0.30,<1.0" },
     { name = "xlrd", marker = "extra == 'agent'", specifier = ">=2.0,<3.0" },
 ]
