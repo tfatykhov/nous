@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
-import { LEAD, NOTES_IDENTITY, OPTIONS, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
+import { LEAD, NOTES_IDENTITY, OPTIONS, PACING, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { GoalOptions } from '../lib/goals';
 
 // F114 goals PR 2: the form that makes a draft (`#/goals/new`), over a stubbed POST /goals. Every value is made up.
@@ -224,5 +224,74 @@ describe('Goals: the create form and the tools a new goal may use (F115)', () =>
     await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
     await waitFor(() => expect(posts().length).toBe(1));
     expect('tools' in (posts()[0].body as object)).toBe(false);
+  });
+});
+
+describe('Goals: the create form and how often a goal works (goal pacing)', () => {
+  it('without pacing there is no choice and the body has no time', async () => {
+    const form = await openForm();
+    expect(within(form).queryByText('How often should it work?')).toBeNull();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect('daily_at' in (posts()[0].body as object)).toBe(false);
+  });
+
+  it('with pacing: after the sizes, as often as the size allows by default, and no time sent then', async () => {
+    options = OPTIONS({ pacing: PACING() });
+    const form = await openForm();
+    const group = within(form).getByRole('group', { name: 'How often should it work?' });
+    expect(form.innerHTML.indexOf('goal-new-preset-small')).toBeLessThan(form.innerHTML.indexOf('goal-new-often'));
+    expect((within(group).getByLabelText('As often as its size allows') as HTMLInputElement).checked).toBe(true);
+    expect(within(group).queryByLabelText('Time of day')).toBeNull();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect('daily_at' in (posts()[0].body as object)).toBe(false);
+  });
+
+  it('once a day starts at 09:00, names the zone, and sends the time chosen', async () => {
+    options = OPTIONS({ pacing: PACING() });
+    const form = await openForm();
+    const group = within(form).getByRole('group', { name: 'How often should it work?' });
+    await fireEvent.click(within(group).getByLabelText('Once a day'));
+    const time = within(group).getByLabelText('Time of day') as HTMLInputElement;
+    expect(time.value).toBe('09:00');
+    expect(within(group).getByText('Time of day in America/New_York. It starts one session at that time each day. Approved after that time, it starts its first session at once.')).toBeTruthy();
+    await fireEvent.input(time, { target: { value: '06:45' } });
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect(posts()[0].body).toMatchObject({ preset: 'small', daily_at: '06:45' });
+  });
+
+  it('an empty time is said before anything is sent', async () => {
+    options = OPTIONS({ pacing: PACING() });
+    const form = await openForm();
+    await fireEvent.click(within(form).getByLabelText('Once a day'));
+    await fireEvent.input(within(form).getByLabelText('Time of day'), { target: { value: '' } });
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    expect(within(within(form).getByRole('alert')).getByText('Type the time of day as HH:MM, from 00:00 to 23:59.')).toBeTruthy();
+    expect(posts()).toEqual([]);
+  });
+});
+
+describe('Goals: the create form, once a day, the review follow-ups', () => {
+  it('custom limits keep sessions per day but do not let it be typed for a once-a-day goal, and say why', async () => {
+    options = OPTIONS({ pacing: PACING() });
+    const form = await openForm();
+    await fireEvent.click(within(form).getByRole('button', { name: 'Customise the limits' }));
+    const perDay = within(form).getByLabelText('Sessions per day') as HTMLInputElement;
+    expect(perDay.disabled).toBe(false);
+    await fireEvent.click(within(form).getByLabelText('Once a day'));
+    expect(perDay.disabled).toBe(true);
+    expect(within(form).getByText('Sessions per day does not apply: a goal that works once a day starts one session a day.')).toBeTruthy();
+    await fireEvent.click(within(form).getByLabelText('As often as its size allows'));
+    expect(perDay.disabled).toBe(false);
   });
 });

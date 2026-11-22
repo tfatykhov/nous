@@ -9,6 +9,8 @@
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
+    ONCE_A_DAY_SESSIONS_NOTE, dailyHint, howOftenText, sessionsBody, sessionsForm, sessionsNote, sessionsPerDayText,
+    sessionsProblem, type SessionsBody, type SessionsForm,
   } from '../../lib/goals';
 
   // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
@@ -16,6 +18,8 @@
   // box. The buttons are exactly the server's `actions`; an action that spends tokens or ends something says so
   // in a sentence and waits for a Yes. Whether the goal may run any command has a card of its own, with the server's
   // words and its one later change, Return to contained, which asks nothing first (it narrows what the goal can do).
+  // With the server's goal pacing on, Change how it works opens the goal's session settings here, as the budget form
+  // does, and sends only what changed.
   // Every text a session wrote is a text node. Ids of this goal's controls are
   // `goal-<letter>.<ref>[.<action>]`: a ref has no ".", so none can take another's.
   let {
@@ -45,6 +49,12 @@
   let days = $state('');
   let noteText = $state('');
   let noteResult = $state<Note | null>(null);
+  const BLANK: SessionsForm = {
+    sessions_per_day: '', gap_minutes: '', jobs_per_day: '', quiet_hours_ok: false, stall_limit: '', daily: false, daily_at: '',
+  };
+  /** Change how it works: the form as typed, and as it started (the goal's settings when the form was opened). */
+  let sessions = $state<SessionsForm>({ ...BLANK });
+  let sessionsStart = $state<SessionsForm>({ ...BLANK });
 
   let driverRunning = $derived(options.driver_running === true);
   let word = $derived(stateWord(goal, driverRunning));
@@ -101,6 +111,9 @@
   let deadlineWrong = $derived(deadlineProblem(newDays, options));
   let budgetReady = $derived(budgetWrong === null);
   let deadlineReady = $derived(deadlineWrong === null);
+  let sessionsWrong = $derived(sessionsProblem(sessions, sessionsStart, options));
+  let sessionsReady = $derived(sessionsWrong === null);
+  let zone = $derived(options.pacing?.zone ?? '');
   const sentenceId = () => `goal-s.${goal.ref}`;
 
   async function press(action: Action) {
@@ -110,6 +123,10 @@
       day = String(goal.day_budget);
     }
     if (action === 'deadline') days = '';
+    if (action === 'sessions') {
+      sessionsStart = sessionsForm(goal, options);
+      sessions = { ...sessionsStart };
+    }
     if (!asksFirst(action)) return run(action);
     confirming = action;
     await tick();
@@ -150,7 +167,10 @@
     await onChanged();
     busy = null;
     result = outcome;
-    if (unanswered) lost = { action, at, before, ...(body as { total?: number; day?: number; days?: number } | undefined) };
+    if (unanswered) {
+      const sent = action === 'sessions' ? { sessions: body as SessionsBody } : (body as { total?: number; day?: number; days?: number } | undefined);
+      lost = { action, at, before, ...sent };
+    }
     await tick();
     (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }
@@ -163,6 +183,7 @@
       return run('budget', body);
     }
     if (action === 'deadline') return run('deadline', { days: newDays });
+    if (action === 'sessions') return run('sessions', sessionsBody(sessions, sessionsStart));
     return run(action);
   }
 
@@ -200,6 +221,7 @@
     pause: 'Yes, pause',
     stop: 'Yes, stop now',
     budget: 'Yes, change the budget',
+    sessions: 'Yes, change how it works',
     deadline: 'Yes, extend the deadline',
     note: 'Yes, add the note',
     cancel: 'Yes, cancel the goal',
@@ -284,12 +306,57 @@
             <input id="goal-e.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={days} disabled={busy !== null} />
           </div>
           <p id={sentenceId()} tabindex="-1" class:wrong={!deadlineReady}>{deadlineReady ? confirmText('deadline', goal, { driverRunning, days: newDays, now }) : deadlineWrong}</p>
+        {:else if action === 'sessions'}
+          <div class="fields">
+            {#if !sessions.daily}
+              <div class="field">
+                <label for="goal-p.{goal.ref}">Sessions per day</label>
+                <input id="goal-p.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.sessions_per_day} disabled={busy !== null} />
+              </div>
+            {/if}
+            <div class="field">
+              <label for="goal-g.{goal.ref}">Shortest gap between sessions (minutes)</label>
+              <input id="goal-g.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.gap_minutes} disabled={busy !== null} />
+            </div>
+            <div class="field">
+              <label for="goal-j.{goal.ref}">Job launches per day</label>
+              <input id="goal-j.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.jobs_per_day} disabled={busy !== null} />
+            </div>
+            <div class="field">
+              <label for="goal-k.{goal.ref}">Pause after this many sessions in a row that finish nothing</label>
+              <input id="goal-k.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.stall_limit} disabled={busy !== null} />
+            </div>
+          </div>
+          <label class="check">
+            <input id="goal-q.{goal.ref}" type="checkbox" bind:checked={sessions.quiet_hours_ok} disabled={busy !== null} />
+            Sessions may start in quiet hours
+          </label>
+          <fieldset class="often" disabled={busy !== null}>
+            <legend>How often</legend>
+            <label class="check">
+              <input type="radio" name="goal-o.{goal.ref}" checked={!sessions.daily} onchange={() => { sessions.daily = false; }} />
+              As often as its limits allow
+            </label>
+            <label class="check">
+              <input type="radio" name="goal-o.{goal.ref}" checked={sessions.daily} onchange={() => { sessions.daily = true; }} />
+              Once a day
+            </label>
+            {#if sessions.daily}
+              <div class="field narrow">
+                <label for="goal-w.{goal.ref}">Time of day</label>
+                <input id="goal-w.{goal.ref}" type="time" bind:value={sessions.daily_at} aria-describedby="goal-x.{goal.ref}" />
+                {#if zone}<span class="hint" id="goal-x.{goal.ref}">{dailyHint(zone, 'change')}</span>{/if}
+              </div>
+              <p class="hint">{ONCE_A_DAY_SESSIONS_NOTE}</p>
+            {/if}
+          </fieldset>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!sessionsReady}>{sessionsReady ? sessionsNote(sessions, sessionsStart) : sessionsWrong}</p>
         {:else}
           <p id={sentenceId()} tabindex="-1">{confirmText(action, goal, { driverRunning })}</p>
         {/if}
         <div class="actions">
           <Button size="sm" class="max-md:min-h-11 max-md:px-4" variant={ACTION_TEXT[action].ends ? 'destructive' : 'default'}
-            disabled={busy !== null || (action === 'budget' && !budgetReady) || (action === 'deadline' && !deadlineReady)}
+            disabled={busy !== null || (action === 'budget' && !budgetReady) || (action === 'deadline' && !deadlineReady) || (action === 'sessions' && !sessionsReady)}
             onclick={() => void yes(action)}>{action === 'resume' && goal.pause_reason === 'waiting_for_owner' ? 'Yes, keep working' : YES[action]}</Button>
           <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void no()}>No</Button>
         </div>
@@ -337,7 +404,8 @@
       <dt>Total budget</dt><dd>{formatTokens(goal.total_budget)}</dd>
       <dt>Day budget</dt><dd>{formatTokens(goal.day_budget)}</dd>
       <dt>Deadline</dt><dd>{goal.deadline_at ? `${fmtUtc(goal.deadline_at)}. ${deadlineText(goal, now)}` : `${goal.deadline_days} days from approval`}</dd>
-      <dt>Sessions per day</dt><dd>{goal.sessions_per_day}</dd>
+      {#if goal.daily_at !== undefined}<dt>How often</dt><dd>{howOftenText(goal, options)}</dd>{/if}
+      <dt>Sessions per day</dt><dd>{sessionsPerDayText(goal)}</dd>
       <dt>Shortest gap between sessions</dt><dd>{intervalText(goal.min_interval_seconds)}</dd>
       <dt>Job launches per day</dt><dd>{goal.jobs_per_day}</dd>
       <dt>Quiet hours</dt><dd>{goal.quiet_hours_ok ? 'Sessions may start in quiet hours' : 'No session starts in quiet hours'}</dd>
@@ -470,6 +538,14 @@
   .confirm p.wrong { color: var(--warn-text); }
   .confirm .actions { margin-top: 0.5rem; }
   .fields { display: flex; gap: 0.5rem 0.75rem; flex-wrap: wrap; }
+  .check { display: inline-flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; font-size: 0.875rem; cursor: pointer; }
+  .check input { width: 1rem; height: 1rem; }
+  .often { display: flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; border: 0; margin: 0.5rem 0 0;
+    padding: 0; min-width: 0; }
+  .often legend { font-size: 0.75rem; font-weight: 600; color: var(--muted); padding: 0; }
+  .often .check { margin-top: 0.25rem; }
+  .often .field { margin-top: 0.375rem; }
+  .field.narrow { max-width: 12rem; flex: 0 1 auto; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; max-width: 36rem; flex: 1 1 12rem; }
   .field label { font-size: 0.75rem; font-weight: 600; color: var(--muted); }
   .field input, .field textarea { padding: 0.5rem 0.625rem; background: var(--surface); border: 1px solid var(--field-border);
@@ -510,5 +586,6 @@
     .facts dd { margin-bottom: 0.375rem; }
     .sessions > li { grid-template-columns: minmax(0, 1fr); }
     .summary summary { line-height: 2.75rem; }
+    .check { min-height: 2.75rem; }
   }
 </style>

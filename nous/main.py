@@ -641,7 +641,10 @@ def _build_goals(
     a ``dispatcher``, the view also reads which goals may run any command, and its ``commands_for`` is bound to the
     runner (``_bind_goal_commands``). The driver gets the sweeper of the goals' modes
     (``nous.goals.modes.ModeSweeper``) either way: with the flag off it only returns every goal to contained when it
-    starts."""
+    starts.
+
+    With ``NOUS_GOALS_PACING_ENABLED`` on as well, one line logs the zone of the once-a-day goals; nothing is built for
+    it (the driver reads ``nous.goals.pacing`` at each start)."""
     if not settings.goals_enabled or continuation_runner is None:
         return None
     from nous.goals.chain import GoalChain, report_channel
@@ -672,6 +675,11 @@ def _build_goals(
         modes=ModeSweeper(database, settings, store),
     )
     continuation_runner.set_goals(goal_driver)
+    from nous.goals.pacing import zone
+
+    pacing_zone = zone(settings)  # goal pacing: None while NOUS_GOALS_PACING_ENABLED is off
+    if pacing_zone is not None:
+        logger.info("Goal pacing: once-a-day goals keep the days and times of %s", pacing_zone.key)
     return goal_driver
 
 

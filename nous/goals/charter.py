@@ -18,6 +18,9 @@ available. Given none, both are as before.
 
 A goal that may run any command: given ``commands_until`` (its end, while it holds), both say after the budget that the
 goal's tasks may run any command until then (``commands_line``). Given none, both are as before.
+
+Goal pacing: given ``pace_line`` (``nous.goals.pacing.pace_line``, for a goal that works once a day), the session's
+first task says it on the line after the budget. Given none, it is as before.
 """
 
 from __future__ import annotations
@@ -155,6 +158,7 @@ def _charter(
     day_spent: int,
     tools: Sequence[ToolLine] | None = None,
     commands_until: Any = None,
+    pace_line: str | None = None,
 ) -> str:
     text = (
         "You are working on a goal the owner approved, in one background session of it.\n\n"
@@ -164,6 +168,8 @@ def _charter(
         "Limits: this session runs under the limits of any background chain. "
         f"{_budget(goal, spent=spent, day_spent=day_spent)}"
     )
+    if pace_line is not None:
+        text = f"{text}\n{pace_line}"
     if commands_until is not None:
         text = f"{text}\n{commands_line(commands_until)}"
     return text if tools is None else f"{text}\n\n{tools_section(tools)}"
@@ -273,10 +279,12 @@ def build_session_task(
     moved: int = 0,
     tools: Sequence[ToolLine] | None = None,
     commands_until: Any = None,
+    pace_line: str | None = None,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
-    ``day_spent`` today), the plan's steps and the journal's entries, newest first, both quoted as data, and what
-    to do in this session. ``journal_rows`` need ``seq``, ``kind``, ``actor``, ``session_n`` and ``text``.
+    ``day_spent`` today) and, for a goal that works once a day, ``pace_line``, the plan's steps and the journal's
+    entries, newest first, both quoted as data, and what to do in this session. ``journal_rows`` need ``seq``,
+    ``kind``, ``actor``, ``session_n`` and ``text``.
 
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
     Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
@@ -285,7 +293,9 @@ def build_session_task(
     from the last back to the second, the owner's two newest entries (the older first), and last the first open
     step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
     cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
-    head = _charter(goal, spent=spent, day_spent=day_spent, tools=tools, commands_until=commands_until)
+    head = _charter(
+        goal, spent=spent, day_spent=day_spent, tools=tools, commands_until=commands_until, pace_line=pace_line
+    )
     return _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
 
 

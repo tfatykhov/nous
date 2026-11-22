@@ -8,7 +8,7 @@ import { fmtUtc } from './harness';
 export type GoalState = 'draft' | 'active' | 'paused' | 'done' | 'failed' | 'cancelled';
 export type PauseReason = 'owner' | 'budget' | 'stalled' | 'waiting_for_owner' | 'error' | 'deadline';
 /** The owner's actions on a goal, in the order the server lists them: each is the last segment of its route. */
-export const ACTIONS = ['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel', 'contained'] as const;
+export const ACTIONS = ['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'sessions', 'deadline', 'note', 'cancel', 'contained'] as const;
 export type Action = typeof ACTIONS[number];
 export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 
@@ -67,6 +67,8 @@ export interface GoalDetail extends GoalRow {
   jobs_per_day: number;
   quiet_hours_ok: boolean;
   stall_limit: number;
+  /** Goal pacing, sent only with its flag on: "HH:MM" for a goal that works once a day, else null. */
+  daily_at?: string | null;
   mode_until: string | null;
   /** A goal that may run any command: the hours chosen at creation (null for a contained goal). */
   mode_hours: number | null;
@@ -151,6 +153,15 @@ export interface GoalOptions {
   tools?: NewGoalTools;
   /** With goals that may run any command: the create form's part. */
   commands?: CommandsOptions;
+  /** Goal pacing, with its flag on: the zone of once-a-day goals, the stall limit's range, the form's default time. */
+  pacing?: PacingOptions;
+}
+
+/** GET /goals/options `pacing`. */
+export interface PacingOptions {
+  zone: string;
+  stall_limit: { low: number; high: number };
+  default_at: string;
 }
 
 /** What a new goal may be allowed (GET /goals/options `tools`): the same rows as a goal's own, and the one question
@@ -177,6 +188,8 @@ export interface CreateBody {
   tools?: NewGoalTool[];
   /** Its tasks may run any command for `hours` from its approval; `confirm` is the sentence the owner typed. */
   commands?: { hours: number; confirm: string };
+  /** Goal pacing: the goal works once a day from this time ("HH:MM"). */
+  daily_at?: string;
 }
 
 export interface NewGoalTool { tool: string; confirm: true; identity?: string }
@@ -431,6 +444,7 @@ export const ACTION_TEXT: Record<Action, { label: string; spends: boolean; ends:
   pause: { label: 'Pause', spends: false, ends: false, done: 'Paused: no new session starts. A session already running finishes.' },
   stop: { label: 'Stop now', spends: false, ends: true, done: 'Stopped.' },
   budget: { label: 'Change budget', spends: true, ends: false, done: 'Budget changed.' },
+  sessions: { label: 'Change how it works', spends: true, ends: false, done: 'Changed. It applies from the next session.' },
   deadline: { label: 'Extend deadline', spends: true, ends: false, done: 'Deadline extended.' },
   note: { label: 'Add note', spends: false, ends: false, done: 'Added. The next session reads it.' },
   cancel: { label: 'Cancel goal', spends: false, ends: true, done: 'Cancelled.' },
@@ -480,6 +494,8 @@ export function confirmText(
       return `This ends the goal for good. It cannot be reopened.${goal.open_session !== null ? ` Session ${goal.open_session}, which is running, is cancelled too.` : ''}`;
     case 'confirm-done':
       return 'This closes the goal as done. Nothing more runs for it.';
+    case 'sessions':
+      return SESSIONS_NOTE;
     default:
       return '';
   }
@@ -544,11 +560,12 @@ export interface LostChange {
     top: number;
     lastSession: number;
   };
-  /** A note's text, a budget's new values, a deadline's added days, as sent. */
+  /** A note's text, a budget's new values, a deadline's added days, the session settings, as sent. */
   text?: string;
   total?: number;
   day?: number;
   days?: number;
+  sessions?: SessionsBody;
 }
 
 const DAY_MS = 86_400_000;
@@ -596,6 +613,10 @@ export function changeLanded(lost: LostChange, goal: GoalDetail): boolean {
       return b.state !== 'done' && goal.state === 'done';
     case 'contained':
       return b.mode !== 'contained' && goal.mode === 'contained';
+    case 'sessions':
+      // The owner's row of a change, and every value this change asked for: a change made elsewhere is not this one.
+      return sessionsHeld(lost.sessions, goal)
+        && goal.journal.some((row) => row.seq > b.top && row.kind === 'state' && row.actor === 'owner' && row.text.startsWith(SESSIONS_ROW));
     case 'run-now':
       return (b.pending_request !== 'run_now' && goal.pending_request === 'run_now')
         || goal.sessions.some((s) => s.n > b.lastSession && s.trigger === 'run_now');
@@ -730,6 +751,9 @@ export interface CreateForm {
   limits: Record<NumberLimit, string>;
   quiet_hours_ok: boolean;
   origin_channel: string;
+  /** Goal pacing: once a day, from `daily_at` ("HH:MM"). */
+  daily?: boolean;
+  daily_at?: string;
 }
 
 const capital = (text: string) => `${text[0].toUpperCase()}${text.slice(1)}.`;
@@ -766,6 +790,7 @@ export function createProblems(form: CreateForm, options: GoalOptions): string[]
   } else if (!options.presets?.[form.preset]) {
     found.push('Choose a size.');
   }
+  if (form.daily && !TIME_OF_DAY.test((form.daily_at ?? '').trim())) found.push(TIME_PROBLEM);
   const channel = form.origin_channel.trim();
   if (!channel) {
     if (options.has_default_channel === false) found.push('Give it a channel: this server has no default chat to ask you.');
@@ -800,6 +825,7 @@ export function createBody(form: CreateForm): CreateBody {
     };
   }
   if (form.origin_channel.trim()) body.origin_channel = form.origin_channel.trim();
+  if (form.daily) body.daily_at = (form.daily_at ?? '').trim();
   return body;
 }
 
@@ -818,3 +844,145 @@ export function limitFields(limits: Limits): Record<NumberLimit, string> {
 /** A preset in one line: "2,000,000 tokens, 500,000 a day, 3 days". */
 export const presetLine = (limits: Limits) =>
   `${formatTokens(limits.total_budget)}, ${formatNumber(limits.day_budget)} a day, ${limits.deadline_days} days`;
+
+// ── Goal pacing: how often a goal works, and its session settings ─────────────────────
+// With the server's pacing on (GET /goals/options `pacing`): the create form's "How often should it work?", a goal's
+// "How often" row, and "Change how it works" (POST /goals/{ref}/sessions), which sends only what changed.
+
+/** "HH:MM", 00:00 to 23:59: a time of day as the server takes it. */
+export const TIME_OF_DAY = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+export const TIME_PROBLEM = 'Type the time of day as HH:MM, from 00:00 to 23:59.';
+/** What the owner reads before a change of session settings is sent (`sessionsNote` adds the stall limit's). */
+export const SESSIONS_NOTE =
+  'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.';
+/** Said beside a once-a-day goal's sessions per day, which the server does not read for it. */
+export const ONCE_A_DAY_SESSIONS_NOTE = 'Sessions per day does not apply: a goal that works once a day starts one session a day.';
+/** How the server's journal row of such a change begins. */
+const SESSIONS_ROW = 'Session settings: ';
+export const HOW_OFTEN_TEXT = { often: 'As often as its size allows', daily: 'Once a day' } as const;
+
+/** Whether `goal` holds every session setting `asked` sets; false when it asks for nothing. */
+function sessionsHeld(asked: SessionsBody | undefined, goal: GoalDetail): boolean {
+  if (!asked) return false;
+  const held: boolean[] = [];
+  for (const field of ['sessions_per_day', 'min_interval_seconds', 'jobs_per_day', 'quiet_hours_ok', 'stall_limit'] as const) {
+    if (asked[field] !== undefined) held.push(goal[field] === asked[field]);
+  }
+  if (asked.daily !== undefined) held.push(asked.daily ? goal.daily_at === asked.daily_at : !goal.daily_at);
+  return held.length > 0 && held.every(Boolean);
+}
+
+/** The hint beside a once-a-day time: on the create form (`create`), or on a goal's page (`change`). */
+export function dailyHint(zone: string, where: 'create' | 'change'): string {
+  const then = where === 'create'
+    ? 'Approved after that time, it starts its first session at once.'
+    : 'If that time has passed today and no session ran today, one starts at once.';
+  return `Time of day in ${zone}. It starts one session at that time each day. ${then}`;
+}
+
+/** A goal's sessions per day as its facts show it: for a once-a-day goal, why the number does not count. */
+export const sessionsPerDayText = (goal: Pick<GoalDetail, 'sessions_per_day' | 'daily_at'>) =>
+  goal.daily_at ? 'One, as it works once a day' : String(goal.sessions_per_day);
+
+/** A goal's "How often" in words. */
+export function howOftenText(goal: Pick<GoalDetail, 'daily_at'>, options: GoalOptions): string {
+  if (!goal.daily_at) return 'As often as its limits allow';
+  const zone = options.pacing?.zone;
+  return `Once a day, from ${goal.daily_at}${zone ? ` (${zone})` : ''}`;
+}
+
+/** The session settings form, as typed. The gap is in minutes. */
+export interface SessionsForm {
+  sessions_per_day: string;
+  gap_minutes: string;
+  jobs_per_day: string;
+  quiet_hours_ok: boolean;
+  stall_limit: string;
+  daily: boolean;
+  daily_at: string;
+}
+
+/** The body of POST /goals/{ref}/sessions. */
+export interface SessionsBody {
+  sessions_per_day?: number;
+  min_interval_seconds?: number;
+  jobs_per_day?: number;
+  quiet_hours_ok?: boolean;
+  stall_limit?: number;
+  daily?: boolean;
+  daily_at?: string;
+}
+
+/** The form as it starts: the goal's own settings, and the server's default time for a goal that is not once a day. */
+export function sessionsForm(
+  goal: Pick<GoalDetail, 'sessions_per_day' | 'min_interval_seconds' | 'jobs_per_day' | 'quiet_hours_ok' | 'stall_limit' | 'daily_at'>,
+  options: GoalOptions,
+): SessionsForm {
+  return {
+    sessions_per_day: String(goal.sessions_per_day),
+    gap_minutes: String(goal.min_interval_seconds / 60),
+    jobs_per_day: String(goal.jobs_per_day),
+    quiet_hours_ok: goal.quiet_hours_ok,
+    stall_limit: String(goal.stall_limit),
+    daily: Boolean(goal.daily_at),
+    daily_at: goal.daily_at || options.pacing?.default_at || '09:00',
+  };
+}
+
+const NUMBER_FIELDS = ['sessions_per_day', 'gap_minutes', 'jobs_per_day', 'stall_limit'] as const;
+type SessionsNumber = typeof NUMBER_FIELDS[number];
+
+/** Whether a number field was changed: its text, and then its value (" 04 " is still 4). */
+function numberChanged(form: SessionsForm, start: SessionsForm, field: SessionsNumber): boolean {
+  if (form[field].trim() === start[field].trim()) return false;
+  return typedNumber(form[field]) !== typedNumber(start[field]) || Number.isNaN(typedNumber(form[field]));
+}
+
+/** Only what changed, as the route takes it. */
+export function sessionsBody(form: SessionsForm, start: SessionsForm): SessionsBody {
+  const body: SessionsBody = {};
+  // A once-a-day goal's sessions per day is not read by the server: it is neither sent nor checked.
+  if (!form.daily && numberChanged(form, start, 'sessions_per_day')) body.sessions_per_day = typedNumber(form.sessions_per_day);
+  if (numberChanged(form, start, 'gap_minutes')) body.min_interval_seconds = typedNumber(form.gap_minutes) * 60;
+  if (numberChanged(form, start, 'jobs_per_day')) body.jobs_per_day = typedNumber(form.jobs_per_day);
+  if (form.quiet_hours_ok !== start.quiet_hours_ok) body.quiet_hours_ok = form.quiet_hours_ok;
+  if (numberChanged(form, start, 'stall_limit')) body.stall_limit = typedNumber(form.stall_limit);
+  if (form.daily !== start.daily || (form.daily && form.daily_at.trim() !== start.daily_at.trim())) {
+    body.daily = form.daily;
+    if (form.daily) body.daily_at = form.daily_at.trim();
+  }
+  return body;
+}
+
+/** What is wrong with the form, in words; null when it can be sent. Only a changed setting is checked, against the
+ * server's ranges: the create form's, the gap in whole minutes, and the stall limit's from `options.pacing`. */
+export function sessionsProblem(form: SessionsForm, start: SessionsForm, options: GoalOptions): string | null {
+  const range = (field: NumberLimit) => rangeOf(options, field);
+  const gap = range('min_interval_seconds');
+  const stall = options.pacing?.stall_limit ?? { low: 1, high: 10 };
+  const checks: [SessionsNumber, string, number, number, string][] = [
+    ['sessions_per_day', range('sessions_per_day')?.words ?? 'sessions per day', range('sessions_per_day')?.low ?? 1, range('sessions_per_day')?.high ?? 24, ''],
+    ['gap_minutes', 'the shortest gap between sessions', Math.ceil((gap?.low ?? 60) / 60), Math.floor((gap?.high ?? 604_800) / 60), ' minutes'],
+    ['jobs_per_day', range('jobs_per_day')?.words ?? 'jobs per day', range('jobs_per_day')?.low ?? 0, range('jobs_per_day')?.high ?? 20, ''],
+    ['stall_limit', 'the stall limit', stall.low, stall.high, ''],
+  ];
+  for (const [field, words, low, high, unit] of checks) {
+    if (!numberChanged(form, start, field) || (field === 'sessions_per_day' && form.daily)) continue;
+    const value = typedNumber(form[field]);
+    if (!Number.isInteger(value)) return capital(`${words} must be a whole number`);
+    if (!inRange(value, low, high)) return capital(`${words} must be at least ${formatNumber(low)} and at most ${formatNumber(high)}${unit}`);
+  }
+  if (form.daily && !TIME_OF_DAY.test(form.daily_at.trim())) return TIME_PROBLEM;
+  if (!Object.keys(sessionsBody(form, start)).length) return 'Change a setting first.';
+  return null;
+}
+
+/** The sentence before a change of session settings is sent: `SESSIONS_NOTE`, and when the stall limit is lowered,
+ * that a goal whose newest sessions already reach it is paused (the server's next check pauses it; the change never
+ * does). */
+export function sessionsNote(form: SessionsForm, start: SessionsForm): string {
+  const stall = typedNumber(form.stall_limit);
+  if (!numberChanged(form, start, 'stall_limit') || !(stall < typedNumber(start.stall_limit))) return SESSIONS_NOTE;
+  const newest = stall === 1 ? 'its last session' : `its last ${stall} sessions in a row`;
+  return `${SESSIONS_NOTE} If ${newest} finished nothing, Nous pauses it at its next check.`;
+}

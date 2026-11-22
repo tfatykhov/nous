@@ -172,8 +172,8 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
             *(
                 f"/goals/G-0001/{action}"
                 for action in (
-                    "approve", "pause", "resume", "confirm-done", "stop", "cancel", "run-now", "budget", "deadline",
-                    "note", "contained",
+                    "approve", "pause", "resume", "confirm-done", "stop", "cancel", "run-now", "budget", "sessions",
+                    "deadline", "note", "contained",
                 )
             ),
         )
@@ -491,7 +491,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         for method in route.methods - {"HEAD"}
     }
     assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
-    assert len(GOAL_ROUTE_SET) == 19
+    assert len(GOAL_ROUTE_SET) == 20
     assert len(AUTONOMY_ROUTE_SET) == 7
 
 

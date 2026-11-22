@@ -46,6 +46,34 @@ _RANGES: tuple[tuple[str, int, int, str], ...] = (
 )
 
 
+# Two settings of a goal's sessions kept beside the envelope, with the bounds of their CHECKs on brain.goals: the stall
+# limit (goals_stall_limit_check) and the time of day of a goal that works once a day (chk_goals_daily_at_minute,
+# migration 120).
+STALL_RANGE: tuple[int, int] = (1, 10)
+MINUTE_RANGE: tuple[int, int] = (0, 1439)
+
+
+def _whole(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def stall_problem(value: Any) -> str | None:
+    """What is wrong with a stall limit, in words; None when it fits its CHECK."""
+    low, high = STALL_RANGE
+    if not _whole(value) or not low <= value <= high:
+        return f"the stall limit must be a whole number from {low} to {high}"
+    return None
+
+
+def minute_problem(value: Any) -> str | None:
+    """What is wrong with a time of day (minutes after midnight), in words; None when it fits its CHECK. None is a
+    goal that runs as often as its limits allow, and fits."""
+    low, high = MINUTE_RANGE
+    if value is not None and (not _whole(value) or not low <= value <= high):
+        return "the time of day must be from 00:00 to 23:59"
+    return None
+
+
 def problems(envelope: Envelope) -> list[str]:
     """What is wrong with ``envelope``, in words; empty when it fits the table's CHECKs."""
     found: list[str] = []

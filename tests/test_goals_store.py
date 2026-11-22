@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
 import weakref
@@ -9,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
@@ -653,3 +654,316 @@ async def test_after_an_overshoot_the_budget_may_still_move_the_right_way(db):
     with pytest.raises(GoalRefused, match="already spent"):
         await store.raise_budget(goal.id, total=2_100_000, actor="host")  # down, below what is spent
     assert (await store.get(goal.id)).total_budget == 2_200_000
+
+
+# ---- goal pacing: a goal created to work once a day ---------------------------------------------------------------
+
+PACED = {
+    "goals_enabled": True,
+    "continuation_enabled": True,
+    "intentions_enabled": True,
+    "result_inbox_enabled": True,
+    "subtask_enabled": True,
+    "goals_pacing_enabled": True,
+    "goals_timezone": "America/New_York",
+}
+
+
+async def test_a_goal_created_to_work_once_a_day_keeps_its_time_and_says_so(db):
+    store = _store(db, **PACED)
+    assert store._settings.goals_pacing_enabled is True
+    goal = await _draft(store, daily_at_minute=540)
+    assert (goal.daily_at_minute, goal.preset) == (540, "small")
+    assert [(r.actor, r.text) for r in await _journal(store, goal)] == [
+        ("host", "Created as a draft (small limits)."),
+        ("host", "Once a day from 09:00 (America/New_York)."),
+    ]
+    plain = await _draft(store)
+    assert plain.daily_at_minute is None
+    assert [r.text for r in await _journal(store, plain)] == ["Created as a draft (small limits)."]
+
+
+async def test_a_once_a_day_goal_is_refused_while_pacing_is_off(db):
+    store = _store(db)
+    with pytest.raises(GoalRefused, match="^Once-a-day goals are off on this server.$"):
+        await _draft(store, daily_at_minute=540)
+    assert await store.list() == []
+
+
+@pytest.mark.parametrize("minute", [-1, 1440, True, "09:00", 540.0])
+async def test_a_time_of_day_out_of_range_is_refused_in_words(db, minute):
+    store = _store(db, **PACED)
+    with pytest.raises(GoalRefused, match="^the time of day must be from 00:00 to 23:59$"):
+        await _draft(store, daily_at_minute=minute)
+    assert await store.list() == []
+
+
+# ---- goal pacing: the owner changes a goal's session settings -------------------------------------------------------
+
+
+async def _row(store: GoalStore, goal: Goal) -> Goal:
+    """The goal as stored now."""
+    async with store._db.session() as s:
+        return (await s.execute(select(Goal).where(Goal.id == goal.id))).scalar_one()
+
+
+async def test_changing_session_settings_is_the_owners_only(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    with pytest.raises(GoalRefused, match="only the owner can change a goal's session settings"):
+        await store.change_sessions(goal.id, changes={"sessions_per_day": 1}, actor="chain")
+    assert (await store.change_sessions(goal.id, changes={"sessions_per_day": 1}, actor="host")).sessions_per_day == 1
+
+
+async def test_changing_session_settings_is_refused_while_pacing_is_off(db):
+    store = _store(db)
+    goal = await _draft(store)
+    with pytest.raises(GoalRefused, match="^Changing a goal's session settings is off on this server.$"):
+        await store.change_sessions(goal.id, changes={"sessions_per_day": 1}, actor="owner")
+    assert (await _row(store, goal)).sessions_per_day == 2
+    assert len(await _journal(store, goal)) == 1
+
+
+async def test_a_finished_goals_session_settings_cannot_change(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    await store.cancel(goal.id, actor="owner")
+    with pytest.raises(GoalRefused, match="only a draft, active or paused goal's session settings can change"):
+        await store.change_sessions(goal.id, changes={"stall_limit": 5}, actor="owner")
+
+
+@pytest.mark.parametrize(
+    ("field", "bad", "good", "words"),
+    [
+        ("sessions_per_day", (0, 25, True, 2.0), (1, 24), "sessions per day must be"),
+        ("min_interval_seconds", (59, 604_801, "60"), (60, 604_800), "the interval between sessions in seconds must"),
+        ("jobs_per_day", (-1, 21, None), (0, 20), "jobs per day must be"),
+        ("quiet_hours_ok", (1, "yes", None), (True, False), "quiet_hours_ok must be true or false"),
+        ("stall_limit", (0, 11, False, None), (1, 10), "the stall limit must be a whole number from 1 to 10"),
+        ("daily_at_minute", (-1, 1440, True, "09:00"), (0, 1439, None), "the time of day must be from 00:00 to 23:59"),
+    ],
+)
+async def test_each_session_setting_is_held_to_its_range_in_words(db, field, bad, good, words):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    for value in bad:
+        with pytest.raises(GoalRefused, match=words):
+            await store.change_sessions(goal.id, changes={field: value}, actor="owner")
+    assert len(await _journal(store, goal)) == 1
+    for value in good:
+        if getattr(await _row(store, goal), field) == value:
+            continue
+        assert getattr(await store.change_sessions(goal.id, changes={field: value}, actor="owner"), field) == value
+
+
+async def test_nothing_given_an_unknown_setting_or_nothing_changed_is_refused(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    with pytest.raises(GoalRefused, match="give at least one session setting"):
+        await store.change_sessions(goal.id, changes={}, actor="owner")
+    for unknown in ({"day_budget": 5}, {"state": "active"}, {"next_wake_at": None}, {"preset": "large"}):
+        with pytest.raises(GoalRefused, match="not a session setting of a goal"):
+            await store.change_sessions(goal.id, changes=unknown, actor="owner")
+    with pytest.raises(GoalRefused, match="nothing would change"):
+        await store.change_sessions(goal.id, changes={"sessions_per_day": 2, "stall_limit": 3}, actor="owner")
+    assert len(await _journal(store, goal)) == 1
+
+
+async def test_once_a_day_is_set_and_cleared(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    paced = await store.change_sessions(goal.id, changes={"daily_at_minute": 540}, actor="owner")
+    assert (paced.daily_at_minute, paced.preset) == (540, "small")
+    moved = await store.change_sessions(goal.id, changes={"daily_at_minute": 600}, actor="owner")
+    assert moved.daily_at_minute == 600
+    cleared = await store.change_sessions(goal.id, changes={"daily_at_minute": None}, actor="owner")
+    assert cleared.daily_at_minute is None
+    assert [r.text for r in await _journal(store, goal)][1:] == [
+        "Session settings: once a day: off -> 09:00 (America/New_York).",
+        "Session settings: once a day: 09:00 (America/New_York) -> 10:00 (America/New_York).",
+        "Session settings: once a day: 10:00 (America/New_York) -> off.",
+    ]
+
+
+async def test_a_limit_of_the_size_makes_the_goal_custom_the_stall_limit_and_the_time_do_not(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    kept = await store.change_sessions(goal.id, changes={"stall_limit": 5, "daily_at_minute": 0}, actor="owner")
+    assert (kept.preset, kept.stall_limit, kept.daily_at_minute) == ("small", 5, 0)
+    for field, value in (
+        ("sessions_per_day", 1),
+        ("min_interval_seconds", 60),
+        ("jobs_per_day", 0),
+        ("quiet_hours_ok", True),
+    ):
+        fresh = await _draft(store)
+        changed = await store.change_sessions(fresh.id, changes={field: value}, actor="owner")
+        assert (changed.preset, getattr(changed, field)) == ("custom", value), field
+
+
+async def test_one_owner_row_in_fixed_words_old_to_new(db):
+    store = _store(db, **PACED)
+    goal = await _draft(store, preset="medium")
+    changes = {
+        "daily_at_minute": 540,
+        "stall_limit": 4,
+        "quiet_hours_ok": True,
+        "jobs_per_day": 0,
+        "min_interval_seconds": 7200,
+        "sessions_per_day": 1,
+    }
+    await store.change_sessions(goal.id, changes=changes, actor="owner")
+    rows = await _journal(store, goal)
+    assert len(rows) == 2
+    assert (rows[-1].kind, rows[-1].actor, rows[-1].session_n) == ("state", "owner", None)
+    assert rows[-1].text == (
+        "Session settings: sessions per day 4 -> 1; shortest gap between sessions 3600 -> 7200 seconds; "
+        "job launches per day 2 -> 0; may start in quiet hours no -> yes; stall limit 3 -> 4; "
+        "once a day: off -> 09:00 (America/New_York)."
+    )
+    only_one = await store.change_sessions(goal.id, changes={"sessions_per_day": 1, "stall_limit": 6}, actor="owner")
+    assert only_one.stall_limit == 6
+    assert (await _journal(store, goal))[-1].text == "Session settings: stall limit 4 -> 6."
+
+
+@pytest.mark.parametrize("state", ["draft", "active", "paused"])
+async def test_a_change_never_starts_wakes_resumes_or_pauses_a_goal(db, state):
+    store = _store(db, **PACED)
+    goal = await _draft(store)
+    if state != "draft":
+        goal = await store.approve(goal.id, actor="host")
+        await _set(store, goal, next_wake_at=datetime.now(UTC) + timedelta(hours=5))
+    if state == "paused":
+        goal = await store.pause(goal.id, actor="host")
+    before = await _row(store, goal)
+    await store.change_sessions(goal.id, changes={"sessions_per_day": 1, "stall_limit": 5}, actor="owner")
+    after = await _row(store, goal)
+    keep = ("state", "pause_reason", "next_wake_at", "pending_request", "pending_request_at", "approved_at")
+    assert [getattr(after, name) for name in keep] == [getattr(before, name) for name in keep]
+    assert (after.sessions_per_day, after.stall_limit) == (1, 5)
+
+
+async def test_a_change_leaves_an_open_session_and_a_pending_request_as_they_are(db):
+    store = _store(db, **PACED)
+    goal = await _active(store)
+    session = await _open_session(store, goal)
+    await _set(store, goal, pending_request="stop", pending_request_at=datetime.now(UTC))
+    before = await _row(store, goal)
+    await store.change_sessions(goal.id, changes={"min_interval_seconds": 600}, actor="owner")
+    after = await _row(store, goal)
+    assert (after.pending_request, after.pending_request_at) == (before.pending_request, before.pending_request_at)
+    async with store._db.session() as s:
+        row = await s.get(GoalSession, session.id)
+    assert (row.ended_at, row.outcome, row.trigger, row.n) == (None, None, "timer", 1)
+
+
+async def _wait_for_a_waiter_on_goals(db, timeout: float = 10.0) -> None:
+    """Until another connection is blocked on a lock in a statement on brain.goals."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    query = text(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+        "AND wait_event_type = 'Lock' AND query ILIKE '%brain.goals%'"
+    )
+    while True:
+        async with db.session() as s:
+            if (await s.execute(query)).scalar_one():
+                return
+        assert loop.time() < deadline, "no statement waited on the goal row"
+        await asyncio.sleep(0.02)
+
+
+async def test_a_change_waiting_behind_a_session_start_is_made_after_it(db):
+    """The driver's start holds the goal row while it writes the session row: a change made at that moment waits for
+    the start's commit, then writes its own columns only."""
+    store = _store(db, **PACED)
+    goal = await _active(store)
+    async with db.session() as starting:
+        await starting.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        starting.add(
+            GoalSession(agent_id=store.agent_id, goal_id=goal.id, n=1, trigger="timer", first_subtask_id=uuid.uuid4())
+        )
+        await starting.flush()
+        waiting = asyncio.create_task(store.change_sessions(goal.id, changes={"sessions_per_day": 1}, actor="owner"))
+        await _wait_for_a_waiter_on_goals(db)
+        assert not waiting.done()
+        await starting.commit()
+    after = await waiting
+    assert (after.state, after.sessions_per_day, after.next_wake_at) == ("active", 1, goal.next_wake_at)
+    async with store._db.session() as s:
+        sessions = list((await s.execute(select(GoalSession).where(GoalSession.goal_id == goal.id))).scalars())
+    assert [(row.n, row.ended_at) for row in sessions] == [(1, None)]
+
+
+# ---- a change of once a day: the driver decides again ---------------------------------------------------------------
+
+
+async def _clock(store: GoalStore) -> datetime:
+    async with store._db.session() as s:
+        return (await s.execute(select(func.clock_timestamp()))).scalar_one()
+
+
+@pytest.mark.parametrize("to", [None, 420], ids=["as_often_as_allowed", "an_earlier_time"])
+async def test_a_change_of_once_a_day_wakes_an_active_goal_now(db, to):
+    """A paced goal that waits for tomorrow's 09:00 is switched to as often as its limits allow, or to an earlier time:
+    its wake moves to now, so the driver decides again at its next tick (and moves the wake where the rule says)."""
+    store = _store(db, **PACED)
+    goal = await _active(store)
+    tomorrow = datetime.now(UTC) + timedelta(days=1)
+    await _set(store, goal, daily_at_minute=540, next_wake_at=tomorrow)
+    before = await _clock(store)
+    changed = await store.change_sessions(goal.id, changes={"daily_at_minute": to}, actor="owner")
+    assert before <= changed.next_wake_at <= await _clock(store)
+    assert (changed.state, changed.daily_at_minute) == ("active", to)
+
+
+async def test_a_change_of_once_a_day_keeps_the_shortest_gap_after_the_last_session(db):
+    store = _store(db, **PACED)
+    goal = await _active(store)  # gap 7200 s
+    tomorrow = datetime.now(UTC) + timedelta(days=1)
+    await _set(store, goal, daily_at_minute=540, next_wake_at=tomorrow)
+    ended = await _clock(store) - timedelta(minutes=10)
+    async with store._db.session() as s:
+        s.add(
+            GoalSession(
+                agent_id=store.agent_id,
+                goal_id=goal.id,
+                n=1,
+                trigger="timer",
+                first_subtask_id=uuid.uuid4(),
+                started_at=ended - timedelta(minutes=20),
+                ended_at=ended,
+                outcome="step_closed",
+            )
+        )
+        await s.commit()
+    changed = await store.change_sessions(goal.id, changes={"daily_at_minute": None}, actor="owner")
+    assert changed.next_wake_at == ended + timedelta(seconds=7200)
+    both = {"daily_at_minute": 600, "min_interval_seconds": 1800}  # the gap given with it is the one kept
+    assert (await store.change_sessions(goal.id, changes=both, actor="owner")).next_wake_at == ended + timedelta(
+        seconds=1800
+    )
+
+
+async def test_a_change_of_once_a_day_leaves_the_wake_of_a_goal_with_an_open_session_a_draft_or_a_paused_goal(db):
+    store = _store(db, **PACED)
+    running = await _active(store)
+    later = datetime.now(UTC) + timedelta(hours=5)
+    await _set(store, running, next_wake_at=later)
+    await _open_session(store, running)  # its close sets the wake
+    daily = {"daily_at_minute": 540}
+    assert (await store.change_sessions(running.id, changes=daily, actor="owner")).next_wake_at == later
+    draft = await _draft(store)
+    assert (await store.change_sessions(draft.id, changes=daily, actor="owner")).next_wake_at is None
+    paused = await store.pause((await _active(store)).id, actor="host")
+    assert (await store.change_sessions(paused.id, changes=daily, actor="owner")).next_wake_at is None
+
+
+async def test_a_change_of_other_session_settings_leaves_an_active_goals_wake(db):
+    store = _store(db, **PACED)
+    goal = await _active(store)
+    later = datetime.now(UTC) + timedelta(hours=5)
+    await _set(store, goal, next_wake_at=later)
+    changes = {"sessions_per_day": 1, "min_interval_seconds": 600, "jobs_per_day": 0, "quiet_hours_ok": True}
+    changed = await store.change_sessions(goal.id, changes={**changes, "stall_limit": 4}, actor="owner")
+    assert changed.next_wake_at == later

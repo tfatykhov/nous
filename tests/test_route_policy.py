@@ -140,6 +140,8 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     # A goal that may run any command: the banner's read and the return to contained
     ("GET", "/goals/commands"): OWNER,
     ("POST", "/goals/{ref}/contained"): OWNER,
+    # Goal pacing: the owner changes a goal's session settings (with the flag off the store refuses)
+    ("POST", "/goals/{ref}/sessions"): OWNER,
     # F115 autonomy settings: the limits, the record of changes and the tools (reads included)
     ("GET", "/autonomy/limits"): OWNER,
     ("PUT", "/autonomy/limits/{key}"): OWNER,

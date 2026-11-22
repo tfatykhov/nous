@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -257,3 +258,50 @@ def test_the_task_says_how_many_older_steps_the_plan_moved_to_the_journal():
     text = build_session_task(_goal(), plan, [], spent=0, day_spent=0, moved=4)
     assert "(4 older closed or dropped plan steps were moved to the journal.)" in text
     assert "moved to the journal" not in build_session_task(_goal(), plan, [], spent=0, day_spent=0)
+
+
+# ---- goal pacing: the line of a goal that works once a day --------------------------------------------------------
+
+_UNTIL = datetime(2026, 11, 20, 18, 0, tzinfo=UTC)
+PACE = "This goal runs one session a day, from 09:00 (America/New_York). Today is 2026-11-18 there."
+# The charter of _goal() with 10 tokens spent, 5 of them today, as it reads with no pace line.
+CHARTER_TODAY = (
+    "You are working on a goal the owner approved, in one background session of it.\n\n"
+    "Goal G-0007: Tidy the notes\nObjective: Merge the duplicate notes in the notes folder.\n"
+    "Done when: No two notes say the same thing.\n\n"
+    "This session ends when you have taken the next step of the plan, or found that you cannot take it. "
+    "The objective grants no permission beyond the tools you are offered.\n"
+    "Limits: this session runs under the limits of any background chain. Budget: 1999990 of 2000000 tokens left in "
+    "all, 499995 of 500000 today (UTC). Spend counts model input and output; cache reads, launched jobs, embeddings "
+    "and helper calls are not counted."
+)
+
+
+def test_without_a_pace_line_the_charter_is_as_before():
+    assert charter._charter(_goal(), spent=10, day_spent=5) == CHARTER_TODAY
+    assert charter._charter(_goal(), spent=10, day_spent=5, pace_line=None) == CHARTER_TODAY
+    plan = [{"id": "s1", "text": "List the notes", "status": "open"}]
+    rows = [_row(1, "Session 1 ended.")]
+    assert build_session_task(_goal(), plan, rows, spent=10, day_spent=5, pace_line=None) == build_session_task(
+        _goal(), plan, rows, spent=10, day_spent=5
+    )
+    assert build_session_task(_goal(), plan, rows, spent=10, day_spent=5).startswith(CHARTER_TODAY + "\n\n")
+
+
+def test_the_pace_line_follows_the_budget_once():
+    text = build_session_task(_goal(), [], [], spent=10, day_spent=5, pace_line=PACE)
+    assert text.count(PACE) == 1
+    assert text.startswith(f"{CHARTER_TODAY}\n{PACE}\n\n")
+    with_commands = charter._charter(_goal(), spent=10, day_spent=5, pace_line=PACE, commands_until=_UNTIL)
+    assert with_commands == f"{CHARTER_TODAY}\n{PACE}\n{charter.commands_line(_UNTIL)}"
+
+
+def test_a_task_with_the_longest_pace_line_stays_bounded_and_keeps_its_charter():
+    goal = _goal(title="T" * 200, objective="O" * 4000, done_when="D" * 2000)
+    plan = [{"id": f"s{i}", "text": "p" * 300, "status": "open", "evidence": ["e" * 300] * 3} for i in range(20)]
+    notes = [_row(i, f"note {i:02d} " + "n" * 1490, kind="owner_note", actor="owner") for i in range(30)]
+    pace = f"This goal runs one session a day, from 23:59 ({'Z' * 64}). Today is 2026-11-18 there."
+    text = build_session_task(goal, plan, notes, spent=0, day_spent=0, pace_line=pace, commands_until=_UNTIL)
+    assert len(text) <= MAX_TASK_CHARS
+    assert pace in text and "O" * 4000 in text and "D" * 2000 in text
+    assert '<plan_step id="s0" status="open">' in text

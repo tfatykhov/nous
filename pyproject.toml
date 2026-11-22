@@ -15,6 +15,7 @@ dependencies = [
     "h2>=4.3.0",
     "anthropic>=0.52,<1.0",
     "jsonschema>=4,<5",
+    "tzdata>=2024.1",  # goal pacing: the IANA time zones of NOUS_GOALS_TIMEZONE, on a host without zone files
 ]
 
 [project.optional-dependencies]

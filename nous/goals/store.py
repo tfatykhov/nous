@@ -31,8 +31,18 @@ from nous.api import tool_policy
 from nous.api.tool_classes import McpIdentity
 from nous.brain.continuation import owner_channel
 from nous.goals import commands as goal_commands
+from nous.goals import pacing
 from nous.goals.commands import CONTAINED_VALUES, MODE_COMMANDS, MODE_CONTAINED, CommandsRequest, mode_refs
-from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, validate
+from nous.goals.envelope import (
+    CUSTOM,
+    Envelope,
+    EnvelopeError,
+    envelope_for,
+    minute_problem,
+    problems,
+    stall_problem,
+    validate,
+)
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
@@ -51,6 +61,8 @@ STOP_REF = "stop:"
 # The evidence ref (+ the session's number) of the harness row written when a session's done claim made the goal wait
 # for the owner: the goal driver leaves that session out of a run of sessions without a step.
 WAITING_REF = "waiting:"
+# How the owner's ``state`` row of a resume begins (``resume``): goal pacing reads when a goal was last resumed from it.
+RESUMED_TEXT = "Resumed (it was paused: "
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(
@@ -69,6 +81,17 @@ _NO_REQUEST = {"pending_request": None, "pending_request_at": None}
 OWNER_ACTORS: frozenset[str] = frozenset({"owner", "host"})
 # The most tools one goal may be allowed to use without asking at once (brain.goal_tool_grants, migration 117).
 GRANTS_MAX = 20
+# The session settings the owner may change on an existing goal (``change_sessions``), in the order the journal names
+# them. The first four are limits of the goal's size: changing one makes the goal ``custom``.
+SESSION_FIELDS: tuple[str, ...] = (
+    "sessions_per_day",
+    "min_interval_seconds",
+    "jobs_per_day",
+    "quiet_hours_ok",
+    "stall_limit",
+    "daily_at_minute",
+)
+_SIZE_FIELDS = frozenset(SESSION_FIELDS[:4])
 _SHORT_ID_RE = re.compile(r"^(?:g-?)?0*(\d{1,12})$", re.IGNORECASE)
 # The channel kinds an owner-facing row is delivered on: nous.handlers.continuation_publisher pushes rows whose
 # channel is LIKE 'telegram:%', to the chat id after the colon. A goal's questions and reports go to its channel.
@@ -135,6 +158,22 @@ def _envelope_of(goal: Goal) -> Envelope:
         jobs_per_day=goal.jobs_per_day,
         quiet_hours_ok=goal.quiet_hours_ok,
     )
+
+
+def _session_words(name: str, old: Any, new: Any, tz: Any) -> str:
+    """One changed session setting as the journal says it, old to new."""
+    if name == "quiet_hours_ok":
+        return f"may start in quiet hours {'yes' if old else 'no'} -> {'yes' if new else 'no'}"
+    if name == "daily_at_minute":
+        before, after = (pacing.at_words(value, tz) if value is not None else "off" for value in (old, new))
+        return f"once a day: {before} -> {after}"
+    label, unit = {
+        "sessions_per_day": ("sessions per day", ""),
+        "min_interval_seconds": ("shortest gap between sessions", " seconds"),
+        "jobs_per_day": ("job launches per day", ""),
+        "stall_limit": ("stall limit", ""),
+    }[name]
+    return f"{label} {old} -> {new}{unit}"
 
 
 def _owner_only(actor: str, what: str) -> None:
@@ -280,6 +319,7 @@ class GoalStore:
         tools: Sequence[tuple[str, McpIdentity | None]] = (),
         proof: str | None = None,
         commands: CommandsRequest | None = None,
+        daily_at_minute: int | None = None,
     ) -> Goal:
         """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given. ``tools`` (F115
         per-goal tools, the owner's only): each ``(tool, identity)`` the goal may use without asking, granted in the
@@ -289,10 +329,20 @@ class GoalStore:
         ``commands`` (the owner's only, with ``NOUS_GOAL_COMMANDS_ENABLED`` on): the goal's tasks may run any command
         for ``hours`` hours from its approval, 1 to the host's ceiling and to the goal's deadline, when ``confirm`` is
         ``commands.confirm_sentence(hours)`` (surrounding spaces aside). Written as ``mode = 'commands'`` with its
-        hours and no end yet, with an owner ``state`` row whose evidence names ``proof``, in the same transaction."""
+        hours and no end yet, with an owner ``state`` row whose evidence names ``proof``, in the same transaction.
+
+        ``daily_at_minute`` (goal pacing, with ``NOUS_GOALS_PACING_ENABLED`` on): the goal works once a day, from that
+        minute of the day in the configured zone, with one more creation row saying so. Refused with pacing off."""
         actor = _PROPOSER_ACTOR.get(proposed_by)
         if actor is None:
             raise GoalRefused(f"proposed_by must be one of {', '.join(_PROPOSER_ACTOR)}")
+        tz = pacing.zone(self._settings)
+        if daily_at_minute is not None:
+            if tz is None:
+                raise GoalRefused(pacing.CREATE_OFF)
+            problem = minute_problem(daily_at_minute)
+            if problem is not None:
+                raise GoalRefused(problem)
         if commands is not None:
             if proposed_by != "owner":
                 raise GoalRefused(goal_commands.PROPOSER)
@@ -347,10 +397,15 @@ class GoalStore:
                 proposed_by=proposed_by,
                 origin_channel=channel,
                 **mode,
+                daily_at_minute=daily_at_minute,
             )
             s.add(goal)
             await s.flush()
             self.add_journal_row(s, goal.id, "state", f"Created as a draft ({preset_name} limits).", actor=actor)
+            if daily_at_minute is not None:
+                assert tz is not None
+                text = f"Once a day from {pacing.at_words(daily_at_minute, tz)}."
+                self.add_journal_row(s, goal.id, "state", text, actor=actor)
             for tool, identity in tools:
                 assert proof is not None
                 self._add_grant(s, goal.id, tool, identity, proof=proof)
@@ -486,7 +541,7 @@ class GoalStore:
                     "extend it first"
                 )
             values = {"state": "active", "pause_reason": None, "next_wake_at": now, **_NO_REQUEST}
-            note = f"Resumed (it was paused: {goal.pause_reason})."
+            note = f"{RESUMED_TEXT}{goal.pause_reason})."
             return await self._apply(s, goal, ("paused",), values, actor=actor, note=note)
 
     async def confirm_done(self, ref: GoalRef, *, actor: str) -> Goal:
@@ -596,6 +651,67 @@ class GoalStore:
                 f"day {old.day_budget} -> {new.day_budget} tokens."
             )
             return await self._apply(s, goal, LIVE_STATES, values, actor=actor, note=note)
+
+    async def change_sessions(self, ref: GoalRef, *, changes: Mapping[str, Any], actor: str) -> Goal:
+        """New session settings for a draft, active or paused goal (goal pacing, with ``NOUS_GOALS_PACING_ENABLED``
+        on): any of ``SESSION_FIELDS``, each within its CHECK's range; ``daily_at_minute`` None makes the goal run as
+        often as its limits allow. A value equal to the stored one is not a change, and a call that changes nothing
+        is refused. A change of one of the first four makes the goal ``custom``. One owner ``state`` row says each
+        change, old to new, in fixed words.
+
+        Only these columns are written, and never the goal's state or its request, so a change never resumes or
+        pauses anything. The wake moves only when once a day or its time changes on an active goal with no open
+        session: to now, or to the end of the shortest gap after its newest session when that is later, so the driver
+        decides again at its next tick (a goal that no longer waits for tomorrow's time is not left waiting for it). A
+        session that is open runs on as it started; the driver reads the new values at the next start, under the goal
+        row's lock, and the session's close sets the wake."""
+        _owner_only(actor, "change a goal's session settings")
+        tz = pacing.zone(self._settings)
+        if tz is None:
+            raise GoalRefused(pacing.CHANGE_OFF)
+        unknown = sorted(str(name) for name in changes if name not in SESSION_FIELDS)
+        if unknown:
+            raise GoalRefused(
+                f"not a session setting of a goal: {', '.join(unknown)} (they are {', '.join(SESSION_FIELDS)})"
+            )
+        if not changes:
+            raise GoalRefused("give at least one session setting to change")
+        async with self._locked(ref) as (s, goal, now):
+            if goal.state not in LIVE_STATES:
+                raise GoalRefused(
+                    f"{describe(goal)}: only a draft, active or paused goal's session settings can change"
+                )
+            size = replace(_envelope_of(goal), **{name: changes[name] for name in _SIZE_FIELDS & set(changes)})
+            found = problems(size)
+            if "stall_limit" in changes and (problem := stall_problem(changes["stall_limit"])):
+                found.append(problem)
+            if problem := minute_problem(changes.get("daily_at_minute")):
+                found.append(problem)
+            if found:
+                raise GoalRefused("; ".join(found))
+            given = [name for name in SESSION_FIELDS if name in changes]
+            changed = {name: changes[name] for name in given if getattr(goal, name) != changes[name]}
+            if not changed:
+                raise GoalRefused(f"{describe(goal)}: nothing would change")
+            words = [_session_words(name, getattr(goal, name), value, tz) for name, value in changed.items()]
+            values = dict(changed)
+            if _SIZE_FIELDS & set(changed):
+                values["preset"] = CUSTOM
+            if "daily_at_minute" in changed and goal.state == "active" and await self._open_session(s, goal.id) is None:
+                gap = changed.get("min_interval_seconds", goal.min_interval_seconds)
+                values["next_wake_at"] = await self._after_gap(s, goal.id, now, gap)
+            return await self._apply(
+                s, goal, LIVE_STATES, values, actor=actor, note=f"Session settings: {'; '.join(words)}."
+            )
+
+    async def _after_gap(self, s: AsyncSession, goal_id: UUID, now: datetime, seconds: int) -> datetime:
+        """``now``, or the end of a gap of ``seconds`` after the goal's newest session ended when that is later."""
+        ended = await s.scalar(
+            select(func.max(GoalSession.ended_at)).where(
+                GoalSession.agent_id == self.agent_id, GoalSession.goal_id == goal_id
+            )
+        )
+        return now if ended is None else max(now, ended + timedelta(seconds=seconds))
 
     async def extend_deadline(self, ref: GoalRef, *, days: int, actor: str) -> Goal:
         """``days`` more. A draft's length (``deadline_days``, applied at approval) grows, up to 90 days. An approved
