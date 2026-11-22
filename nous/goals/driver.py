@@ -43,7 +43,16 @@ from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, owner_message, pacing, roots, spend
 from nous.goals import commands as goal_commands
-from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, WAITING_REF, GoalStore, clip, moved_steps
+from nous.goals.store import (
+    OWNER_ACTORS,
+    RESUMED_TEXT,
+    SESSION_NOTE_LABEL,
+    STOP_REF,
+    WAITING_REF,
+    GoalStore,
+    clip,
+    moved_steps,
+)
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -698,10 +707,23 @@ class GoalDriver:
         if trigger != "run_now":
             tz = self._pace_zone(goal)
             if tz is not None:
-                # Goal pacing: one session a local day, not before its time; sessions_per_day is not read.
+                # Goal pacing (the rule of nous/goals/pacing.py): one session a local day, not before its time unless
+                # the previous day is owed; sessions_per_day is not read.
                 since = pacing.day_start(now, tz)
                 started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now, since=since)
-                held = pacing.hold(now, tz, goal.daily_at_minute, started)
+                owed = False
+                if started == 0 and pacing.before_todays_time(now, tz, goal.daily_at_minute):
+                    since_previous = await spend.sessions_started_today(
+                        s, self._agent_id, goal.id, now=now, since=pacing.previous_day_start(now, tz)
+                    )
+                    owed = pacing.owed(
+                        now,
+                        tz,
+                        goal.daily_at_minute,
+                        started_since_previous_day=since_previous,
+                        active_since=await self._active_since(s, goal),
+                    )
+                held = pacing.hold(now, tz, goal.daily_at_minute, started, owed=owed)
                 if held is not None:
                     return held
             else:
@@ -722,6 +744,22 @@ class GoalDriver:
         if int(open_sessions or 0) >= int(self._settings.goals_max_active_sessions):
             return "sessions"
         return None
+
+    async def _active_since(self, s: AsyncSession, goal: Goal) -> datetime | None:
+        """When ``goal`` last became active: its approval, or its newest resume (the owner's ``state`` row that
+        ``GoalStore.resume`` writes) when later; None for a goal never approved."""
+        if goal.approved_at is None:
+            return None
+        resumed = await s.scalar(
+            select(func.max(GoalJournal.created_at)).where(
+                GoalJournal.agent_id == self._agent_id,
+                GoalJournal.goal_id == goal.id,
+                GoalJournal.kind == "state",
+                GoalJournal.actor.in_(tuple(OWNER_ACTORS)),
+                GoalJournal.text.startswith(RESUMED_TEXT, autoescape=True),
+            )
+        )
+        return goal.approved_at if resumed is None else max(goal.approved_at, resumed)
 
     def _pace_zone(self, goal: Goal) -> ZoneInfo | None:
         """The zone of a goal paced once a day (goal pacing on and its time set), else None."""

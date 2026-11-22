@@ -182,3 +182,62 @@ def test_zone_is_none_unless_the_flag_is_on():
 @pytest.mark.parametrize("name", ["", "Mars/Olympus", "../etc/passwd", "/etc/localtime", "America", "Etc"])
 def test_zone_is_none_for_a_name_that_is_not_a_zone(name):
     assert pacing.zone(SimpleNamespace(goals_pacing_enabled=True, goals_timezone=name)) is None
+
+
+# ---- the owed day -------------------------------------------------------------------------------------------------
+# A day whose time passed while the goal was active, and on which no session started, is owed: the next local day may
+# start one session before its own time, and that session is the new day's.
+
+EIGHT_PM = 20 * 60
+
+
+def test_previous_day_start_on_a_normal_day_and_on_both_clock_changes():
+    assert pacing.previous_day_start(_utc(2026, 11, 18, 15, 0), NY) == _utc(2026, 11, 17, 5, 0)
+    # 00:30 EDT on 2026-03-09: the previous day (2026-03-08, 23 hours) began at 05:00Z
+    assert pacing.previous_day_start(_utc(2026, 3, 9, 4, 30), NY) == _utc(2026, 3, 8, 5, 0)
+    # 00:30 EST on 2026-11-02: the previous day (2026-11-01, 25 hours) began at 04:00Z
+    assert pacing.previous_day_start(_utc(2026, 11, 2, 5, 30), NY) == _utc(2026, 11, 1, 4, 0)
+
+
+def test_the_previous_days_time_owed_when_active_through_it_and_no_session_since_its_midnight():
+    now = _utc(2026, 11, 18, 5, 30)  # 00:30 on the 18th in New York; the 17th's 20:00 was 01:00Z on the 18th
+    yesterdays_time = _utc(2026, 11, 18, 1, 0)
+    owed = lambda **kw: pacing.owed(now, NY, EIGHT_PM, **{"started_since_previous_day": 0, **kw})  # noqa: E731
+    assert owed(active_since=yesterdays_time - timedelta(days=3)) is True
+    assert owed(active_since=yesterdays_time) is True  # active at that very instant
+    assert owed(active_since=yesterdays_time + timedelta(seconds=1)) is False  # approved or resumed after it
+    assert owed(active_since=now) is False  # approved for the first time today
+    assert owed(active_since=None) is False  # never approved
+    assert owed(active_since=yesterdays_time - timedelta(days=3), started_since_previous_day=1) is False
+
+
+def test_the_owed_day_is_the_previous_local_days_on_both_clock_changes():
+    # 00:30 EDT on 2026-03-09: the 8th (23 hours) had its 20:00 EDT at 00:00Z on the 9th
+    now = _utc(2026, 3, 9, 4, 30)
+    assert pacing.owed(now, NY, EIGHT_PM, started_since_previous_day=0, active_since=_utc(2026, 3, 9, 0, 0)) is True
+    assert pacing.owed(now, NY, EIGHT_PM, started_since_previous_day=0, active_since=_utc(2026, 3, 9, 0, 1)) is False
+    # 00:30 EST on 2026-11-02: the 1st (25 hours) had its 20:00 EST at 01:00Z on the 2nd
+    now = _utc(2026, 11, 2, 5, 30)
+    assert pacing.owed(now, NY, EIGHT_PM, started_since_previous_day=0, active_since=_utc(2026, 11, 2, 1, 0)) is True
+    assert pacing.owed(now, NY, EIGHT_PM, started_since_previous_day=0, active_since=_utc(2026, 11, 2, 1, 1)) is False
+
+
+def test_an_owed_day_starts_before_todays_time_and_is_todays_session():
+    before = _utc(2026, 11, 18, 5, 30)  # 00:30 local, the time is 20:00
+    assert pacing.hold(before, NY, EIGHT_PM, 0) == "paced"
+    assert pacing.hold(before, NY, EIGHT_PM, 0, owed=True) is None
+    # once it started it is the day's one session: today's time starts nothing more
+    assert pacing.hold(_utc(2026, 11, 19, 1, 0), NY, EIGHT_PM, 1, owed=True) == "day_sessions"
+    # and its close wakes the goal at the following day's time (the 19th's 20:00), not this day's
+    assert pacing.wake_after_close(before, NY, EIGHT_PM) == _utc(2026, 11, 20, 1, 0)
+
+
+def test_an_owed_day_is_one_day_never_a_backlog():
+    """After an owed session, the next day owes nothing: a session started on the day before it."""
+    owed_session_day = _utc(2026, 11, 18, 9, 0)  # 04:00 on the 18th, when quiet hours ended
+    next_day = _utc(2026, 11, 19, 5, 30)  # 00:30 on the 19th
+    since = pacing.previous_day_start(next_day, NY)
+    started_since = 1 if owed_session_day >= since else 0
+    assert started_since == 1
+    active = _utc(2026, 11, 1)
+    assert pacing.owed(next_day, NY, EIGHT_PM, started_since_previous_day=started_since, active_since=active) is False

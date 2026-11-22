@@ -1842,6 +1842,115 @@ async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_fac
     assert (await _goal(w, goal)).next_wake_at < before
 
 
+# ---- once a day: a day whose session a hold kept past local midnight is owed --------------------------------------
+
+EIGHT_PM = 20 * 60
+
+
+async def _after_midnight(env_factory, *, quiet: bool = False) -> tuple[SimpleNamespace, ZoneInfo, datetime]:  # noqa: F811
+    """A world with goal pacing on, in a whole-hour zone where it is now just after local midnight (``Etc/GMT+N`` is
+    N hours BEHIND UTC), so yesterday's 20:00 has passed and today's has not; with ``quiet``, quiet hours (UTC) hold
+    the next two hours. Its zone and local now."""
+    probe = await _world(env_factory)
+    hour = (await _db_now(probe)).hour
+    offset = -hour if hour <= 12 else 24 - hour
+    name = "Etc/GMT" if offset == 0 else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+    quiet_hours = {"heartbeat_quiet_start": hour, "heartbeat_quiet_end": (hour + 2) % 24} if quiet else {}
+    w = await _world(env_factory, goals_pacing_enabled=True, goals_timezone=name, **quiet_hours)
+    zone = ZoneInfo(name)
+    local = (await _db_now(w)).astimezone(zone)
+    assert local.hour in (0, 1), (name, local)
+    return w, zone, local
+
+
+async def _owed_goal(w: SimpleNamespace, zone: ZoneInfo, local: datetime, **over) -> tuple[Goal, datetime]:
+    """A goal approved two days before yesterday's 20:00, due since then (as a hold that moves no wake leaves it),
+    with no session: yesterday's session is owed. The goal and yesterday's 20:00."""
+    goal = await _active(w, **over)
+    yesterdays_time = pacing.slot(local.date() - timedelta(days=1), EIGHT_PM, zone)
+    await _set_goal(
+        w, goal, daily_at_minute=EIGHT_PM, approved_at=yesterdays_time - timedelta(days=2), next_wake_at=yesterdays_time
+    )
+    return goal, yesterdays_time
+
+
+def _no_quiet_hours(w: SimpleNamespace) -> None:
+    object.__setattr__(w.env.settings, "heartbeat_quiet_start", 0)
+    object.__setattr__(w.env.settings, "heartbeat_quiet_end", 0)
+
+
+async def test_a_day_kept_by_quiet_hours_past_local_midnight_starts_when_they_end(env_factory):  # noqa: F811
+    """Quiet hours are UTC hours and cross local midnight: at the time they hold the start, past midnight the day is
+    owed and its session starts when they end; it is that day's session, so the next is the following day's time."""
+    w, zone, local = await _after_midnight(env_factory, quiet=True)
+    goal, yesterdays_time = await _owed_goal(w, zone, local)
+    assert goal.quiet_hours_ok is False
+    assert (await w.driver.tick()).started == ()  # quiet hours hold it
+    assert (await _goal(w, goal)).next_wake_at == yesterdays_time  # still due: the wake did not move to tonight
+    _no_quiet_hours(w)  # they end
+    closed, _task = await _run_one_session(w, goal)
+    assert pacing.local_date(closed.started_at, zone) == local.date()
+    tomorrows_time = pacing.slot(local.date() + timedelta(days=1), EIGHT_PM, zone)
+    assert (await _goal(w, goal)).next_wake_at == tomorrows_time
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()  # today's own time starts nothing more
+    assert (await _goal(w, goal)).next_wake_at == tomorrows_time
+
+
+async def test_a_day_kept_by_another_goals_open_session_past_local_midnight_starts_after_it(env_factory):  # noqa: F811
+    w, _zone, local = await _after_midnight(env_factory)
+    assert w.env.settings.goals_max_active_sessions == 1
+    other = await _active(w, title="Sort the photos")
+    root, _session = await _started(w, other)
+    goal, yesterdays_time = await _owed_goal(w, _zone, local)
+    assert (await w.driver.tick()).started == ()  # the one session allowed at once is the other goal's
+    assert (await _goal(w, goal)).next_wake_at == yesterdays_time
+    await _finish(w, root)
+    report = await w.driver.tick()  # closes the other goal's session, then starts the owed one
+    assert report.closed == 1
+    assert [s.trigger for s in await _sessions(w, goal)] == ["timer"]
+
+
+async def test_a_goal_approved_for_the_first_time_today_owes_nothing_for_yesterday(env_factory):  # noqa: F811
+    w, zone, local = await _after_midnight(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, daily_at_minute=EIGHT_PM, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == pacing.slot(local.date(), EIGHT_PM, zone)
+
+
+async def test_a_day_that_had_its_session_owes_nothing(env_factory):  # noqa: F811
+    w, zone, local = await _after_midnight(env_factory)
+    goal, yesterdays_time = await _owed_goal(w, zone, local)
+    end = yesterdays_time + timedelta(minutes=20)
+    await _closed(w, goal, ["step_closed"], started_at=yesterdays_time, ended_at=end)
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == pacing.slot(local.date(), EIGHT_PM, zone)
+
+
+async def test_a_goal_paused_through_yesterdays_time_and_resumed_today_owes_nothing(env_factory):  # noqa: F811
+    w, zone, local = await _after_midnight(env_factory)
+    goal, _yesterdays_time = await _owed_goal(w, zone, local)
+    await w.store.pause(goal.id, actor="owner")
+    await w.store.resume(goal.id, actor="owner")  # the resume is today: the goal was not active through yesterday
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == pacing.slot(local.date(), EIGHT_PM, zone)
+
+
+async def test_approved_or_resumed_after_todays_time_it_starts_at_once_then_at_the_next_days_time(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    minute = _minute(local, hours=-1)
+    goal = await _active(w, daily_at_minute=minute)  # approved after today's time: its wake is now
+    closed, _task = await _run_one_session(w, goal)
+    assert closed.trigger == "timer"
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, minute, days=1)
+    second = await _active(w, title="Sort the photos", daily_at_minute=minute)
+    await w.store.pause(second.id, actor="owner")
+    await w.store.resume(second.id, actor="owner")  # resumed after today's time
+    await _run_one_session(w, second)
+    assert (await _goal(w, second)).next_wake_at == _slot(zone, local, minute, days=1)
+
+
 # ---- a reactivated lineage DAG -----------------------------------------------------------------------------------
 
 

@@ -61,6 +61,8 @@ STOP_REF = "stop:"
 # The evidence ref (+ the session's number) of the harness row written when a session's done claim made the goal wait
 # for the owner: the goal driver leaves that session out of a run of sessions without a step.
 WAITING_REF = "waiting:"
+# How the owner's ``state`` row of a resume begins (``resume``): goal pacing reads when a goal was last resumed from it.
+RESUMED_TEXT = "Resumed (it was paused: "
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(
@@ -539,7 +541,7 @@ class GoalStore:
                     "extend it first"
                 )
             values = {"state": "active", "pause_reason": None, "next_wake_at": now, **_NO_REQUEST}
-            note = f"Resumed (it was paused: {goal.pause_reason})."
+            note = f"{RESUMED_TEXT}{goal.pause_reason})."
             return await self._apply(s, goal, ("paused",), values, actor=actor, note=note)
 
     async def confirm_done(self, ref: GoalRef, *, actor: str) -> Goal:
