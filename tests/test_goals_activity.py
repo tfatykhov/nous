@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +45,8 @@ async def test_a_running_task_of_the_chain_is_named_by_its_intent_redacted_and_c
     assert current["name"].startswith("Fix the export ") and SECRET not in current["name"]
     assert "REDACTED" in current["name"]
     assert len(current["name"]) <= activity.NAME_CHARS == 120
-    assert (current["node"], current["waiting_for"]) == (None, None)
+    assert list(current) == ["kind", "name", "first_task", "status", "started_at", "waiting_for"]
+    assert current["waiting_for"] is None
 
 
 async def test_the_sessions_own_first_task_has_no_name(db):
@@ -105,19 +107,25 @@ async def test_a_workflow_waiting_on_a_wait_step_says_what_for_in_identifiers_on
     found = await w.read()
     assert found["phase"] == "waiting"
     assert found["current"]["waiting_for"] == expected
-    assert found["current"]["node"] == {"name": "wait_for_job", "type": "wait", "status": "awaiting_check"}
     said = json.dumps(found)
-    for words in ("then email the notes", "owner/private-repo", "the-private-plan", "someone"):
+    for words in ("then email the notes", "owner/private-repo", "the-private-plan", "someone", "wait_for_job"):
         assert words not in said
 
 
-async def test_a_steps_name_is_redacted(db):
+@pytest.mark.parametrize("step", ["running", "awaiting_input", "awaiting_check"])
+async def test_the_answer_holds_no_step_name(db, step):
+    """A workflow step's name is the agent's text: only the workflow's own name is sent, never a step's."""
     w = await world_of(db)
     s = await w.session(first_status="completed")
-    await w.workflow(s.root_id, started=at(1), nodes=((f"push {SECRET}", "subtask", "running", at(2), None),))
+    kind = {"running": "subtask", "awaiting_input": "approval", "awaiting_check": "wait"}[step]
+    wait = {"kind": "job", "job_id": JOB} if kind == "wait" else None
+    await w.workflow(
+        s.root_id, name="Build the export", started=at(1), nodes=(("STEP-NAME-MARK", kind, step, at(2), wait),)
+    )
     found = await w.read()
-    assert SECRET not in json.dumps(found)
-    assert found["current"]["node"]["name"].startswith("push ") and "REDACTED" in found["current"]["node"]["name"]
+    assert found["current"]["name"] == "Build the export"
+    assert "node" not in found["current"]
+    assert "STEP-NAME-MARK" not in json.dumps(found)
 
 
 async def test_a_workflow_with_a_running_step_besides_a_wait_is_running(db):
@@ -130,7 +138,6 @@ async def test_a_workflow_with_a_running_step_besides_a_wait_is_running(db):
     )
     found = await w.read()
     assert found["phase"] == "workflow" and found["current"]["waiting_for"] is None
-    assert found["current"]["node"] == {"name": "wait_for_job", "type": "wait", "status": "awaiting_check"}
 
 
 async def test_a_workflow_step_waiting_for_the_owners_approval_reads_approval(db):
@@ -139,7 +146,6 @@ async def test_a_workflow_step_waiting_for_the_owners_approval_reads_approval(db
     await w.workflow(s.root_id, started=at(1), nodes=(("ship", "approval", "awaiting_input", at(4), None),))
     found = await w.read()
     assert found["phase"] == "approval" and found["current"]["waiting_for"] is None
-    assert found["current"]["node"] == {"name": "ship", "type": "approval", "status": "awaiting_input"}
 
 
 @pytest.mark.parametrize(
@@ -180,13 +186,7 @@ async def test_an_ended_newest_session_reads_none_with_no_current_work(db):
     s = await w.session(n=1, first_status="running", ended=at(30))
     await w.task(s.root_id, started=at(5))
     found = await w.read()
-    assert found["session"] == {
-        "n": 1,
-        "open": False,
-        "trigger": "timer",
-        "started_at": T0.isoformat(),
-        "ended_at": at(30).isoformat(),
-    }
+    assert found["session"] == {"n": 1, "open": False, "started_at": T0.isoformat(), "ended_at": at(30).isoformat()}
     assert (found["phase"], found["current"]) == ("none", None)
     assert found["jobs"] is None and found["recent"] == []
 
@@ -253,48 +253,87 @@ async def test_an_open_session_with_no_root_has_no_calls(db):
     await w.session(with_root=False)
     found = await w.read()
     assert found["calls"] == {"total": 0, "errors": 0, "capped": False} and found["last_call_at"] is None
-    assert found["jobs"] == {"launched": 0, "last_launch_at": None}
+    assert found["jobs"] == {"launched": 0, "last_launch_at": None, "capped": False}
 
 
 async def test_the_recent_calls_are_the_newest_eight_in_words_from_closed_sets(db):
     w = await world_of(db)
     s = await w.session(first_status="completed")
     rows = [
-        ("bash", "ran", "intention", 100),
-        ("read_file", "error", "subtask", 5),
-        ("send_email", "refused", "workflow_step", None),
-        ("browser_task", "gated", "intention", 1),
-        ("bash", "suppressed", "heartbeat", 2),
-        ("old_tool", "retired", "intention", 3),
-        ("bash", "bad_input", "intention", 4),
-        ("mcp__notes__" + "x" * 90, "a-new-outcome", "intention", 6),
-        ("bash", "ran", "intention", 7),
-        ("bash", "ran", "intention", 8),
+        ("bash", "ran", "intention"),
+        ("read_file", "error", "subtask"),
+        ("send_email", "refused", "workflow_step"),
+        ("browser_task", "gated", "intention"),
+        ("bash", "suppressed", "heartbeat"),
+        ("old_tool", "retired", "intention"),
+        ("bash", "bad_input", "intention"),
+        ("mcp__notes__search", "a-new-outcome", "intention"),
+        ("bash", "ran", "intention"),
+        ("bash", "ran", "intention"),
     ]
     sid = intent_sid(s.root_id)
-    for minute, (tool, outcome, kind, ms) in enumerate(rows, start=1):
-        await w.call(at(minute), session_id=sid, tool=tool, outcome=outcome, work_kind=kind, duration_ms=ms)
+    for minute, (tool, outcome, kind) in enumerate(rows, start=1):
+        await w.call(at(minute), session_id=sid, tool=tool, outcome=outcome, work_kind=kind)
     recent = (await w.read())["recent"]
     assert len(recent) == activity.RECENT_SHOWN == 8
     assert [r["at"] for r in recent] == [at(m).isoformat() for m in range(10, 2, -1)]
-    assert recent[0] == {"tool": "bash", "at": at(10).isoformat(), "outcome": "ran", "ms": 8, "in": "decisions"}
+    assert recent[0] == {"tool": "bash", "at": at(10).isoformat(), "outcome": "ran", "in": "decisions"}
     by_minute = {r["at"]: r for r in recent}
     third = by_minute[at(3).isoformat()]
-    assert (third["outcome"], third["in"], third["ms"]) == ("refused", "workflow", None)
+    assert (third["tool"], third["outcome"], third["in"]) == ("send_email", "refused", "workflow")
     assert by_minute[at(4).isoformat()]["outcome"] == "gated"
     assert by_minute[at(5).isoformat()]["in"] == "other"
     assert by_minute[at(6).isoformat()]["outcome"] == "retired"
     assert by_minute[at(7).isoformat()]["outcome"] == "bad_input"
     eighth = by_minute[at(8).isoformat()]
-    assert eighth["outcome"] == "other" and len(eighth["tool"]) == activity.TOOL_NAME_CHARS == 64
+    assert (eighth["tool"], eighth["outcome"]) == ("mcp__notes__search", "other")
+
+
+@pytest.mark.parametrize(
+    ("called", "sent"),
+    [
+        ("mcp__notes__search", "mcp__notes__search"),
+        ("tool.v2-beta", "tool.v2-beta"),
+        ("x" * 64, "x" * 64),
+        ("x" * 65, "other"),
+        ("send the notes to everyone", "other"),
+        ("bash;rm", "other"),
+        ("", "other"),
+        ("café", "other"),
+    ],
+    ids=["mcp", "dots-and-dashes", "64", "65", "a-sentence", "punctuation", "empty", "non-ascii"],
+)
+async def test_a_tool_name_is_sent_only_in_the_shape_of_a_tool_name(db, called, sent):
+    """The log keeps what the model called a tool it made up; only a name made of letters, digits, ``_``, ``.`` and
+    ``-``, at most 64 long, is sent."""
+    w = await world_of(db)
+    s = await w.session()
+    await w.call(at(1), session_id=intent_sid(s.root_id), tool=called)
+    assert (await w.read())["recent"][0]["tool"] == sent
 
 
 async def test_a_call_of_a_task_says_task(db):
     w = await world_of(db)
     s = await w.session()
     await w.call(at(1), subtask_id=s.first_subtask_id, work_kind="subtask", outcome="error", is_error=True)
-    assert (await w.read())["recent"] == [
-        {"tool": "bash", "at": at(1).isoformat(), "outcome": "error", "ms": None, "in": "task"}
+    assert (await w.read())["recent"] == [{"tool": "bash", "at": at(1).isoformat(), "outcome": "error", "in": "task"}]
+
+
+async def test_a_calls_time_is_when_it_ended_and_the_last_call_is_the_last_to_end(db):
+    """A row is written when its call ends: a two-hour command that ended a minute ago is the last call, not one of
+    two hours ago."""
+    w = await world_of(db)
+    s = await w.session()
+    sid = intent_sid(s.root_id)
+    await w.call(at(1), session_id=sid, tool="bash", duration_ms=120 * 60_000)
+    await w.call(at(10), session_id=sid, tool="read_file", duration_ms=2_000)
+    await w.call(at(20), session_id=sid, tool="write_file", duration_ms=None)
+    found = await w.read()
+    assert found["last_call_at"] == at(121).isoformat()
+    assert [(r["tool"], r["at"]) for r in found["recent"]] == [
+        ("bash", at(121).isoformat()),
+        ("write_file", at(20).isoformat()),
+        ("read_file", (at(10) + timedelta(seconds=2)).isoformat()),
     ]
 
 
@@ -321,8 +360,18 @@ async def test_jobs_started_this_session_count_each_launch_and_agree_with_the_da
     await w.call(at(12), session_id=sid, input_text=bash_input(f"{RUNNER} status {JOB}"))
     await w.call(at(13), session_id=sid, outcome="refused", input_text=bash_input(launch))
     await w.call(at(14), session_id=sid, tool="read_file", input_text=bash_input(launch))
+    # The shell reads these as runner.sh launch too, though no text of them says "runner.sh".
+    for minute, command in enumerate(
+        [
+            '/workspace/claude-jobs/run"ner".sh launch nous',
+            "/workspace/claude-jobs/runner'.sh' launch nous",
+            "/workspace/claude-jobs/runner\\.sh launch nous",
+        ],
+        start=15,
+    ):
+        await w.call(at(minute), session_id=sid, input_text=bash_input(command))
     found = await w.read()
-    assert found["jobs"] == {"launched": 3, "last_launch_at": at(11).isoformat()}
+    assert found["jobs"] == {"launched": 6, "last_launch_at": at(17).isoformat(), "capped": False}
     async with db.session() as session:
         today = await spend.jobs_launched_today(
             session, w.agent, w.goal_id, SimpleNamespace(tool_call_log_enabled=True), now=at(60)
@@ -330,14 +379,17 @@ async def test_jobs_started_this_session_count_each_launch_and_agree_with_the_da
     assert today == found["jobs"]["launched"]
 
 
-async def test_the_launch_rows_read_are_capped_newest_first(db, monkeypatch):
-    monkeypatch.setattr(activity, "LAUNCH_ROWS_CAP", 1)
+@pytest.mark.parametrize(("rows", "launched", "capped"), [(3, 2, True), (2, 2, False)])
+async def test_the_shell_calls_read_for_launches_are_capped_newest_first_and_say_so(
+    db, monkeypatch, rows, launched, capped
+):
+    monkeypatch.setattr(activity, "LAUNCH_ROWS_CAP", 2)
     w = await world_of(db)
     s = await w.session()
     launch = bash_input(f"{RUNNER} launch nous --prompt-file /workspace/notes/p.md")
-    await w.call(at(1), session_id=intent_sid(s.root_id), input_text=launch)
-    await w.call(at(2), session_id=intent_sid(s.root_id), input_text=launch)
-    assert (await w.read())["jobs"] == {"launched": 1, "last_launch_at": at(2).isoformat()}
+    for minute in range(1, rows + 1):
+        await w.call(at(minute), session_id=intent_sid(s.root_id), input_text=launch)
+    assert (await w.read())["jobs"] == {"launched": launched, "last_launch_at": at(rows).isoformat(), "capped": capped}
 
 
 async def test_the_read_runs_under_its_statement_limit(db):

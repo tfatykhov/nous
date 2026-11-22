@@ -2,23 +2,27 @@
 
 Read from rows, in the caller's one transaction under a statement limit of ``STATEMENT_TIMEOUT``: the goal's open
 session (else its newest), the intentions of its chain (its root, ``nous.goals.roots``), the subtasks and workflows
-those intentions name with the status of each row, the active steps of the current workflow and, with the tool-call
-log on, the chain's calls since the session began: a call of the root's decision turns (their session id), of a
-subtask of the chain or of a workflow of the chain, as ``spend.jobs_launched_today`` selects them. A call row is
-written when the call ends, so an ended session's calls are read up to ``ENDED_GRACE`` after its end.
+those intentions name with the status of each row, the kind and state of the current workflow's active steps (never
+their names) and, with the tool-call log on, the chain's calls since the session began: a call of the root's
+decision turns (their session id), of a subtask of the chain or of a workflow of the chain, as
+``spend.jobs_launched_today`` selects them. A call row is written when the call ends, so an ended session's calls are
+read up to ``ENDED_GRACE`` after its end, and a call's time in the answer is when it ended (its start plus its
+duration).
 
 The answer holds numbers, times, ids and words from closed sets. The only text the agent wrote in it is the name of
-the current task (the purpose line it was spawned with) or workflow, and of a workflow step, each redacted and cut
-(``ledger_store.redacted_head``). A launch call's input is read to count its job launches (``spend.job_launches``)
-and is never put in the answer, nor is any call's result, reason or error text.
+the current task (the purpose line it was spawned with) or workflow, redacted and cut (``ledger_store.redacted_head``).
+A tool's name is sent only in the shape of a tool name (``TOOL_NAME_RE``; the log keeps what the model called a tool it
+made up). A shell call's input is read to count its job launches (``spend.job_launches``) and is never put in the
+answer, nor is any call's result, reason or error text.
 
 What a read costs: the calls are found through the log's ``(agent_id, started_at)`` index over the agent's calls
 since the session began (there is no index on a call's subtask or workflow), at most ``CALLS_CAP`` rows of narrow
-columns, and at most ``LAUNCH_ROWS_CAP`` launch rows with their input.
+columns, and at most ``LAUNCH_ROWS_CAP`` shell calls with their input (each at most ``NOUS_TOOL_INPUT_MAX_CHARS``).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -37,10 +41,10 @@ from nous.storage.models import DAGNode, ExecutionDAG, GoalSession, Intention, S
 # What a read may take, and how much of each name the page is sent.
 STATEMENT_TIMEOUT = "5s"
 NAME_CHARS = 120
-NODE_NAME_CHARS = 80
-TOOL_NAME_CHARS = 64
-# The most call rows read (the count then says "more than"), launch rows read, recent calls and Work screen
-# sessions sent.
+# A tool's name as the answer may carry it; any other stored name is sent as ``other``.
+TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+# The most call rows read (the count then says "more than"), shell calls read for launches (the count then says "at
+# least"), recent calls and Work screen sessions sent.
 CALLS_CAP = 2000
 LAUNCH_ROWS_CAP = 200
 RECENT_SHOWN = 8
@@ -199,35 +203,26 @@ def _current_item(items: Sequence[_Item]) -> _Item | None:
 
 
 async def _active_nodes(session: AsyncSession, dag_id: UUID) -> list[Any]:
-    """The workflow's steps under way, the one started last first."""
+    """The kind, state and wait of the workflow's steps under way (never their names), the one started last first."""
     found = await session.execute(
-        select(DAGNode.name, DAGNode.node_type, DAGNode.status, DAGNode.started_at, DAGNode.wait_for)
+        select(DAGNode.node_type, DAGNode.status, DAGNode.wait_for)
         .where(DAGNode.dag_id == dag_id, DAGNode.status.in_(ACTIVE_NODE_STATES))
-        .order_by(DAGNode.started_at.desc().nulls_last(), DAGNode.name)
+        .order_by(DAGNode.started_at.desc().nulls_last(), DAGNode.id)
     )
     return list(found.all())
 
 
-def _node_words(node: Any) -> dict[str, Any]:
-    return {"name": redacted_head(node.name, NODE_NAME_CHARS), "type": node.node_type, "status": node.status}
-
-
 def _current(item: _Item, nodes: Sequence[Any], phase: str) -> dict[str, Any]:
-    node = None
     wait = None
-    if nodes:
-        shown = nodes[0]
-        if phase == "waiting":
-            shown = next(n for n in nodes if n.node_type == "wait" and n.status == "awaiting_check")
-            wait = waiting_for(shown.wait_for)
-        node = _node_words(shown)
+    if phase == "waiting":
+        step = next(n for n in nodes if n.node_type == "wait" and n.status == "awaiting_check")
+        wait = waiting_for(step.wait_for)
     return {
         "kind": item.kind,
         "name": redacted_head(item.name, NAME_CHARS) if item.name is not None else None,
         "first_task": item.kind == "task" and item.name is None,
         "status": item.status,
         "started_at": _iso(item.started_at),
-        "node": node,
         "waiting_for": wait,
     }
 
@@ -253,12 +248,16 @@ def _window(agent_id: str, row: GoalSession, chain: Sequence[ColumnElement[bool]
     return where
 
 
+def _ended(call: Any) -> datetime:
+    """When the call ended: its start plus its duration (its start when no duration was logged)."""
+    return call.started_at + timedelta(milliseconds=max(call.duration_ms or 0, 0))
+
+
 def _call_words(call: Any) -> dict[str, Any]:
     return {
-        "tool": call.tool_name[:TOOL_NAME_CHARS],
-        "at": _iso(call.started_at),
+        "tool": call.tool_name if TOOL_NAME_RE.fullmatch(call.tool_name) else "other",
+        "at": _iso(_ended(call)),
         "outcome": call.outcome if call.outcome in OUTCOMES else "other",
-        "ms": call.duration_ms,
         "in": WORK_KIND_WORDS.get(call.work_kind, "other"),
     }
 
@@ -277,27 +276,28 @@ def _work_sessions(calls: Sequence[Any]) -> list[dict[str, str]]:
 async def _launches(
     session: AsyncSession, agent_id: str, row: GoalSession, chain: Sequence[ColumnElement[bool]]
 ) -> dict[str, Any]:
-    """Job launches of the chain's shell calls that ran (``spend.job_launches``), and when the newest one was."""
+    """Job launches of the chain's shell calls that ran (``spend.job_launches``, which reads every shell call as
+    ``spend.jobs_launched_today`` does), when the newest one was, and whether more shell calls ran than were read."""
+    cap = LAUNCH_ROWS_CAP
     launched = 0
     last: datetime | None = None
+    rows: list[Any] = []
     if chain:
         found = await session.execute(
             select(ToolCallLog.input_text, ToolCallLog.started_at)
             .where(
-                *_window(agent_id, row, chain),
-                ToolCallLog.tool_name == "bash",
-                ToolCallLog.outcome.in_(RAN_OUTCOMES),
-                ToolCallLog.input_text.like("%runner.sh%"),
+                *_window(agent_id, row, chain), ToolCallLog.tool_name == "bash", ToolCallLog.outcome.in_(RAN_OUTCOMES)
             )
             .order_by(ToolCallLog.started_at.desc(), ToolCallLog.id.desc())
-            .limit(LAUNCH_ROWS_CAP)
+            .limit(cap + 1)
         )
-        for input_text, started_at in found.all():
-            count = job_launches(input_text)
-            launched += count
-            if count and last is None:
-                last = started_at
-    return {"launched": launched, "last_launch_at": _iso(last)}
+        rows = list(found.all())
+    for input_text, started_at in rows[:cap]:
+        count = job_launches(input_text)
+        launched += count
+        if count and last is None:
+            last = started_at
+    return {"launched": launched, "last_launch_at": _iso(last), "capped": len(rows) > cap}
 
 
 async def read_activity(session: AsyncSession, agent_id: str, goal_id: UUID, *, log_enabled: bool) -> dict[str, Any]:
@@ -350,12 +350,14 @@ async def read_activity(session: AsyncSession, agent_id: str, goal_id: UUID, *, 
         )
         calls = list(found.all())
     kept = calls[:cap]
-    answer["last_call_at"] = _iso(kept[0].started_at) if kept else None
+    # Newest first by when each call ended: a long command that ended last is the last call.
+    by_end = sorted(kept, key=_ended, reverse=True)
+    answer["last_call_at"] = _iso(_ended(by_end[0])) if by_end else None
     answer["calls"] = {"total": len(kept), "errors": sum(1 for c in kept if c.is_error), "capped": len(calls) > cap}
     if is_open:
         answer["jobs"] = await _launches(session, agent_id, row, chain)
-        answer["recent"] = [_call_words(c) for c in kept[:RECENT_SHOWN]]
-    answer["work_sessions"] = _work_sessions(kept)
+        answer["recent"] = [_call_words(c) for c in by_end[:RECENT_SHOWN]]
+    answer["work_sessions"] = _work_sessions(by_end)
     return answer
 
 
@@ -370,7 +372,6 @@ def _answer(
         else {
             "n": row.n,
             "open": row.ended_at is None,
-            "trigger": row.trigger,
             "started_at": _iso(row.started_at),
             "ended_at": _iso(row.ended_at),
         },
