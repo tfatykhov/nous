@@ -57,7 +57,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.api.session_referent import ChannelLastReply
 from nous.api.smart_compress import add_cache_key, smart_compress
-from nous.api.status_line import with_tail_note
+from nous.api.status_line import STATUS_LINE_KINDS, render_status_line, with_tail_note
 from nous.api.tool_classes import refuse_denylist
 from nous.autonomy import tool_guard
 from nous.brain.brain import Brain
@@ -4442,6 +4442,30 @@ class AgentRunner:
             )
         return SingleCall(_with_alias_note(alias_note, dispatched.text), dispatched.is_error, dispatched.send_key)
 
+    def _status_note(
+        self,
+        ctx: ExecutionContext,
+        turns: int,
+        max_turns: int,
+        tool_calls: int,
+        max_tool_calls: int | None,
+        ledger: ExecutionLedger | None,
+        *,
+        thinking_off: bool,
+    ) -> str | None:
+        """This round's status line (``nous.api.status_line``), or None: the setting is off, the turn's kind is not
+        one that gets it (``STATUS_LINE_KINDS``), or the request asks for thinking (``thinking_off`` is the loop's,
+        the same test the request builder applies)."""
+        if not self._settings.status_line_enabled or ctx.kind not in STATUS_LINE_KINDS or not thinking_off:
+            return None
+        return render_status_line(
+            round_number=turns + 1,
+            max_rounds=max_turns,
+            tool_calls=tool_calls,
+            max_tool_calls=max_tool_calls,
+            ledger=ledger,
+        )
+
     async def _tool_loop(
         self,
         system_prompt: str | dict[str, str],
@@ -4539,6 +4563,9 @@ class AgentRunner:
         turns = 0
         total_tool_calls = 0
         max_turns = self._settings.max_turns
+        # Status line: every line sent this run, as (index in messages, text). Each is sent again, unchanged and at
+        # its place, on every later call of the run: the history the model saw is never edited. Never in messages.
+        sent_notes: list[tuple[int, str]] = []
 
         # F061: detect whether forced tool_choice is safe for this call. Forced
         # tool_choice is incompatible with extended thinking — Anthropic only
@@ -4626,6 +4653,15 @@ class AgentRunner:
             }
             if tool_choice_arg is not None:
                 _call_kwargs["tool_choice"] = tool_choice_arg
+            # Status line: this round's line goes after the last message (the newest user message), the earlier
+            # ones stay where they were sent. Passed only when there is one, as tool_choice above.
+            note = self._status_note(
+                ctx, turns, max_turns, total_tool_calls, max_tool_calls, ledger, thinking_off=thinking_off
+            )
+            if note is not None:
+                sent_notes.append((len(messages) - 1, note))
+            if sent_notes:
+                _call_kwargs["tail_notes"] = list(sent_notes)
             api_response = await self._call_api(**_call_kwargs, call_context=call_context)
 
             # F035.4: Update context log with response metadata
@@ -5076,6 +5112,7 @@ class AgentRunner:
                     model_override=model_override,
                     is_background=is_background,
                     call_context=call_context,
+                    **({"tail_notes": list(sent_notes)} if sent_notes else {}),  # the lines sent, no new one
                 )
                 if final.usage:
                     total_usage["input_tokens"] += final.usage.get("input_tokens", 0)
@@ -5112,6 +5149,7 @@ class AgentRunner:
                 model_override=model_override,
                 is_background=is_background,
                 call_context=call_context,
+                **({"tail_notes": list(sent_notes)} if sent_notes else {}),  # the lines sent, no new one
             )
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)
