@@ -18,11 +18,21 @@ the rows keeps every item a rule would need the row for.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import uuid
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
+
+from sqlalchemy import and_, exists, select, true
+from sqlalchemy.orm import aliased
+
+from nous.heartbeat.schemas import Finding, SuppressionReport
+
+logger = logging.getLogger(__name__)
 
 Mode = Literal["off", "shadow", "on"]
 _MODES: frozenset[str] = frozenset({"off", "shadow", "on"})
@@ -36,6 +46,14 @@ _NOTE_PREFIX = re.compile(r"^\s*(HEARTBEAT FALSE-POSITIVE|Heartbeat triage\b|HEA
 _NOTE_TAG = "hb-note"
 # The same leading filler the check strips before its question test on episodes (checks.py, _FILLER_PREFIX).
 _FILLER_PREFIX = re.compile(r"^\s*(?:(?:hey|ok|okay)[\s,!.:-]+)+", re.IGNORECASE)
+# Reasons the daily digest line counts.
+AGE_REASONS = frozenset({"age_snapshot", "age_fact", "age_ongoing"})
+# Seconds one batched read of the rows may take. After a failed read no other read runs in that check run.
+READ_TIMEOUT_SECONDS = 2.0
+
+# fact id -> (last_confirmed, a newer active fact has the same subject and attribute keys)
+Rows = dict[str, tuple[datetime | None, bool]]
+FetchRows = Callable[[list[str]], Awaitable[Rows]]
 
 
 def parse_mode(value: object) -> Mode:
@@ -263,3 +281,166 @@ def evaluate(c: Candidate, cfg: PendingFilterConfig, now: datetime) -> Verdict:
         if mode == "shadow":
             return Verdict("shadow_drop", reason)
     return KEEP
+
+
+# --- One check run: the ledger, and the filter the check holds ---
+
+
+@dataclass
+class Ledger:
+    """The state of one check run: verdicts by item, the rows read, and the report being built."""
+
+    now: datetime = field(default_factory=lambda: datetime.now(UTC))
+    report: SuppressionReport = field(default_factory=SuppressionReport)
+    verdicts: dict[tuple[str, str], Verdict] = field(default_factory=dict)
+    rows: Rows = field(default_factory=dict)
+    requested: set[str] = field(default_factory=set)  # fact ids a read was attempted for
+    age_hidden: list[str] = field(default_factory=list)  # ids hidden by an age rule (the daily digest)
+    read_failed: bool = False
+    logged_error: bool = False
+    logged_read_failure: bool = False
+
+
+class PendingFilter:
+    """The filters as the self-initiated check uses them: one instance per check, one ``Ledger`` per run.
+
+    ``enabled`` is False when every mode is off: the check then builds no ledger and calls nothing here.
+    ``needs_rows`` is True when a layer that reads ``last_confirmed`` or the slot keys is not off.
+    ``fetch_rows`` replaces the batched read (tests).
+    """
+
+    def __init__(
+        self,
+        cfg: PendingFilterConfig,
+        *,
+        db: Any = None,
+        agent_id: str = "",
+        check_name: str = "self_initiated",
+        fetch_rows: FetchRows | None = None,
+    ) -> None:
+        self.cfg = cfg
+        self.enabled = cfg.kind != "off" or cfg.age != "off" or cfg.supersede != "off"
+        self.needs_rows = cfg.age != "off" or cfg.supersede != "off"
+        self._db = db
+        self._agent_id = agent_id
+        self._check_name = check_name
+        self._fetch_rows: FetchRows | None = fetch_rows or (self._read_rows if db is not None else None)
+
+    def new_ledger(self) -> Ledger:
+        return Ledger()
+
+    async def prefetch(self, facts: Iterable[Any], ledger: Ledger) -> None:
+        """Read ``last_confirmed`` and the same-key flag of one search result list, in one bounded read.
+
+        Never raises (a cancellation passes through). On a failure or a timeout no further read runs this run, the
+        items of the list stay without their row (a rule that needs it does not fire) and one error is counted.
+        """
+        if not self.needs_rows or ledger.read_failed or self._fetch_rows is None:
+            return
+        try:
+            ids: list[str] = []
+            for fact in facts:
+                fid = str(fact.id)
+                if fid in ledger.requested:
+                    continue
+                try:
+                    uuid.UUID(fid)
+                except ValueError:
+                    continue
+                ledger.requested.add(fid)
+                ids.append(fid)
+            if not ids:
+                return
+            ledger.rows.update(await asyncio.wait_for(self._fetch_rows(ids), READ_TIMEOUT_SECONDS))
+        except Exception:
+            ledger.read_failed = True
+            ledger.report.errors += 1
+            if not ledger.logged_read_failure:
+                ledger.logged_read_failure = True
+                logger.warning(
+                    "F116: the pending filter could not read the fact rows; items that need them surface this run",
+                    exc_info=True,
+                )
+
+    def screen_fact(self, fact: Any, ledger: Ledger) -> Verdict:
+        """The verdict on a fact the check is about to raise, recorded once per run. Never raises."""
+        try:
+            key = ("fact", str(fact.id))
+            cached = ledger.verdicts.get(key)
+            if cached is not None:
+                return cached
+            c = fact_candidate(fact)
+            row = ledger.rows.get(c.id)
+            if row is not None:
+                c.rows_known = True
+                c.last_confirmed = _datetime(row[0])
+                c.newer_same_key = bool(row[1])
+            return self._decide(c, key, ledger)
+        except Exception:
+            return self._failed(ledger)
+
+    def screen_episode(self, ep: Any, ledger: Ledger) -> Verdict:
+        """The verdict on an episode the check is about to raise, recorded once per run. Never raises."""
+        try:
+            key = ("episode", str(ep.id))
+            cached = ledger.verdicts.get(key)
+            if cached is not None:
+                return cached
+            return self._decide(episode_candidate(ep), key, ledger)
+        except Exception:
+            return self._failed(ledger)
+
+    def _decide(self, c: Candidate, key: tuple[str, str], ledger: Ledger) -> Verdict:
+        verdict = evaluate(c, self.cfg, ledger.now)
+        if verdict.decision != "keep" and verdict.reason is not None:
+            fingerprint = Finding(source=c.source_label, summary=c.summary, check_name=self._check_name).fingerprint()
+            ledger.report.add(
+                verdict.reason,
+                shadow=verdict.decision == "shadow_drop",
+                fingerprint=fingerprint,
+                kind=c.kind,
+                item_id=c.id,
+            )
+            if verdict.decision == "drop" and verdict.reason in AGE_REASONS:
+                ledger.age_hidden.append(c.id)
+        ledger.verdicts[key] = verdict
+        return verdict
+
+    @staticmethod
+    def _failed(ledger: Ledger) -> Verdict:
+        ledger.report.errors += 1
+        if not ledger.logged_error:
+            ledger.logged_error = True
+            logger.error("F116: the pending filter could not evaluate an item; it surfaces", exc_info=True)
+        return KEEP
+
+    async def _read_rows(self, ids: list[str]) -> Rows:
+        """One read: ``last_confirmed`` of each fact and whether a newer active, not superseded fact of the same
+        agent has the same non-null subject and attribute keys (a pair linked by ``contradiction_of`` does not
+        count). Named columns only; no write."""
+        from nous.storage.models import Fact
+
+        newer = aliased(Fact)
+        newer_same_key = and_(
+            Fact.subject_key.is_not(None),
+            Fact.attribute_key.is_not(None),
+            exists().where(
+                newer.agent_id == Fact.agent_id,
+                newer.subject_key == Fact.subject_key,
+                newer.attribute_key == Fact.attribute_key,
+                newer.subject_key.is_not(None),
+                newer.active == true(),
+                newer.superseded_by.is_(None),
+                newer.id != Fact.id,
+                newer.learned_at > Fact.learned_at,
+                newer.contradiction_of.is_distinct_from(Fact.id),
+                Fact.contradiction_of.is_distinct_from(newer.id),
+            ),
+        ).label("newer_same_key")
+        stmt = select(Fact.id, Fact.last_confirmed, newer_same_key).where(
+            Fact.agent_id == self._agent_id,
+            Fact.id.in_([uuid.UUID(i) for i in ids]),
+        )
+        async with self._db.session() as session:
+            result = await session.execute(stmt)
+            return {str(row.id): (row.last_confirmed, bool(row.newer_same_key)) for row in result}

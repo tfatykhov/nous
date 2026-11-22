@@ -6,9 +6,12 @@ read against real rows. The check with the filters wired in is tested in tests/t
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import itertools
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -16,9 +19,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from nous.heart.schemas import EpisodeSummary, FactSummary
+from nous.heartbeat import pending_filter
 from nous.heartbeat.pending_filter import (
     KEEP,
     Candidate,
+    PendingFilter,
     PendingFilterConfig,
     Verdict,
     episode_candidate,
@@ -26,7 +31,8 @@ from nous.heartbeat.pending_filter import (
     fact_candidate,
     parse_mode,
 )
-from nous.heartbeat.schemas import CheckResult, SuppressionReport
+from nous.heartbeat.schemas import CheckResult, Finding, SuppressionReport
+from nous.storage.models import Fact
 
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
 MODES = ("off", "shadow", "on")
@@ -575,3 +581,385 @@ class TestBuilders:
         e = episode_candidate(MagicMock())
         assert e.kind == "episode" and e.outcome is None and e.started_at is None
         assert evaluate(c, ALL_ON, NOW) == KEEP and evaluate(e, ALL_ON, NOW) == KEEP
+
+
+# ---------------------------------------------------------------------------
+# PendingFilter and its ledger, with the batched read replaced
+# ---------------------------------------------------------------------------
+
+
+def _summary_fact(
+    text: str,
+    *,
+    age_days: float,
+    source: str = "enumerative_extractor",
+    category: str | None = None,
+    fid: uuid.UUID | None = None,
+) -> FactSummary:
+    return FactSummary(
+        id=fid or uuid.uuid4(),
+        content=text,
+        category=category,
+        subject=None,
+        confidence=1.0,
+        active=True,
+        actionable=True,
+        actionable_confidence=0.85,
+        learned_at=datetime.now(UTC) - timedelta(days=age_days),
+        source=source,
+    )
+
+
+class _Rows:
+    """A stand-in for the batched read: records each call, answers every id with no confirmation."""
+
+    def __init__(self, *, newer_same_key: set[str] = frozenset(), fail: Exception | None = None, sleep: float = 0):
+        self.calls: list[list[str]] = []
+        self._newer = newer_same_key
+        self._fail = fail
+        self._sleep = sleep
+
+    async def __call__(self, ids: list[str]) -> dict[str, tuple[datetime | None, bool]]:
+        self.calls.append(list(ids))
+        if self._sleep:
+            await asyncio.sleep(self._sleep)
+        if self._fail is not None:
+            raise self._fail
+        return {i: (None, i in self._newer) for i in ids}
+
+
+def _logged(caplog, level: int) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "nous.heartbeat.pending_filter" and r.levelno == level]
+
+
+def _filter(rows: _Rows | None = None, **modes: str) -> PendingFilter:
+    return PendingFilter(_cfg(**modes), fetch_rows=rows)
+
+
+class TestPendingFilterSwitches:
+    @pytest.mark.parametrize(
+        ("modes", "enabled", "needs_rows"),
+        [
+            ({}, False, False),
+            ({"kind": "shadow"}, True, False),
+            ({"kind": "on"}, True, False),
+            ({"age": "shadow"}, True, True),
+            ({"supersede": "on"}, True, True),
+            ({"kind": "on", "age": "on", "supersede": "on"}, True, True),
+        ],
+    )
+    def test_enabled_and_needs_rows(self, modes, enabled, needs_rows):
+        f = _filter(**modes)
+        assert (f.enabled, f.needs_rows) == (enabled, needs_rows)
+
+
+class TestPrefetch:
+    async def test_one_call_per_list_and_each_id_once(self):
+        rows = _Rows()
+        f = _filter(rows, age="shadow")
+        ledger = f.new_ledger()
+        a, b, c = (_summary_fact("x", age_days=1) for _ in range(3))
+
+        await f.prefetch([a, b], ledger)
+        await f.prefetch([b, c], ledger)
+        await f.prefetch([a, c], ledger)
+
+        assert rows.calls == [[str(a.id), str(b.id)], [str(c.id)]]
+        assert set(ledger.rows) == {str(a.id), str(b.id), str(c.id)}
+
+    async def test_ids_that_are_not_uuids_are_not_read(self):
+        rows = _Rows()
+        f = _filter(rows, supersede="shadow")
+        ledger = f.new_ledger()
+        mock = MagicMock()
+        mock.id = "fact-1"
+
+        await f.prefetch([mock], ledger)
+        assert rows.calls == []
+
+    async def test_no_read_when_age_and_supersede_are_off(self):
+        rows = _Rows()
+        f = _filter(rows, kind="on")
+        await f.prefetch([_summary_fact("x", age_days=40)], f.new_ledger())
+        assert rows.calls == []
+
+    async def test_no_read_without_a_database(self):
+        f = PendingFilter(_cfg(age="on"))
+        ledger = f.new_ledger()
+        fact = _summary_fact("synthetic: send the invoice", age_days=40, source="user_direct")
+        await f.prefetch([fact], ledger)
+        assert ledger.rows == {} and not ledger.read_failed and ledger.report.errors == 0
+        assert f.screen_fact(fact, ledger) == KEEP
+
+    @pytest.mark.parametrize("how", ["raises", "times_out"])
+    async def test_a_failed_read_keeps_every_item_that_needs_the_row(self, how, monkeypatch, caplog):
+        if how == "raises":
+            rows = _Rows(fail=RuntimeError("database is down"))
+        else:
+            monkeypatch.setattr(pending_filter, "READ_TIMEOUT_SECONDS", 0.05)
+            rows = _Rows(sleep=5)
+        f = _filter(rows, age="on")
+        ledger = f.new_ledger()
+        old = _summary_fact("synthetic: send the invoice", age_days=40, source="user_direct")
+        later = _summary_fact("synthetic: call the bank", age_days=40, source="user_direct")
+
+        with caplog.at_level(logging.WARNING, logger="nous.heartbeat.pending_filter"):
+            await f.prefetch([old], ledger)
+            await f.prefetch([later], ledger)
+
+        assert ledger.read_failed
+        assert len(rows.calls) == 1, "no read after the first failure in a run"
+        assert f.screen_fact(old, ledger) == KEEP
+        assert f.screen_fact(later, ledger) == KEEP
+        assert ledger.report.errors == 1
+        assert not ledger.report.suppressed and not ledger.report.shadow_suppressed
+        assert len(_logged(caplog, logging.WARNING)) == 1
+
+    async def test_a_new_ledger_reads_again(self):
+        rows = _Rows(fail=RuntimeError("down"))
+        f = _filter(rows, age="on")
+        fact = _summary_fact("x", age_days=1)
+        await f.prefetch([fact], f.new_ledger())
+        await f.prefetch([fact], f.new_ledger())
+        assert len(rows.calls) == 2
+
+    async def test_a_cancellation_is_not_swallowed(self):
+        f = _filter(_Rows(fail=asyncio.CancelledError()), age="on")
+        with pytest.raises(asyncio.CancelledError):
+            await f.prefetch([_summary_fact("x", age_days=1)], f.new_ledger())
+
+
+class TestScreen:
+    async def test_a_fact_is_evaluated_and_counted_once(self):
+        f = _filter(_Rows(), age="on")
+        ledger = f.new_ledger()
+        fact = _summary_fact(TEXT_4ECBEEEA, age_days=21)
+        await f.prefetch([fact], ledger)
+
+        first = f.screen_fact(fact, ledger)
+        second = f.screen_fact(fact, ledger)
+
+        assert first == second == Verdict("drop", "age_snapshot")
+        assert ledger.report.suppressed == {"age_snapshot": 1}
+        assert len(ledger.report.items) == 1
+        assert ledger.age_hidden == [str(fact.id)]
+
+    async def test_the_recorded_fingerprint_is_the_would_be_findings(self):
+        f = _filter(_Rows(), age="shadow")
+        ledger = f.new_ledger()
+        fact = _summary_fact(TEXT_78CCACAC, age_days=44)
+        await f.prefetch([fact], ledger)
+
+        assert f.screen_fact(fact, ledger) == Verdict("shadow_drop", "age_snapshot")
+
+        finding = Finding(
+            source="facts",
+            summary=f"Pending action: {fact.content[:100]}",
+            check_name="self_initiated",
+        )
+        assert ledger.report.shadow_items == [
+            {"fingerprint": finding.fingerprint(), "kind": "fact", "id": str(fact.id), "reason": "age_snapshot"}
+        ]
+        assert ledger.age_hidden == [], "shadow hides nothing"
+
+    def test_an_episode_is_recorded_with_its_would_be_fingerprint(self):
+        f = _filter(age="on")
+        ledger = f.new_ledger()
+        ep = EpisodeSummary(
+            id=uuid.uuid4(),
+            title="t",
+            summary="I'll look into the flaky upload test",
+            outcome="ongoing",
+            started_at=datetime.now(UTC) - timedelta(days=60),
+            tags=[],
+        )
+
+        assert f.screen_episode(ep, ledger) == Verdict("drop", "age_ongoing")
+        finding = Finding(
+            source="episodes", summary=f"Unresolved commitment: {ep.summary}", check_name="self_initiated"
+        )
+        assert ledger.report.items[0]["fingerprint"] == finding.fingerprint()
+        assert ledger.age_hidden == [str(ep.id)]
+
+    def test_a_kept_item_is_not_recorded(self):
+        f = _filter(kind="on")
+        ledger = f.new_ledger()
+        assert f.screen_fact(_summary_fact("TODO: send the invoice", age_days=1), ledger) == KEEP
+        assert not ledger.report
+
+    def test_without_the_row_the_newer_same_key_rule_is_silent(self):
+        f = _filter(supersede="on")
+        ledger = f.new_ledger()
+        assert f.screen_fact(_summary_fact("x", age_days=1), ledger) == KEEP
+
+    async def test_the_newer_same_key_rule_records_from_the_row(self):
+        fact = _summary_fact("x", age_days=1)
+        f = _filter(_Rows(newer_same_key={str(fact.id)}), supersede="on")
+        ledger = f.new_ledger()
+        await f.prefetch([fact], ledger)
+        assert f.screen_fact(fact, ledger) == Verdict("shadow_drop", "newer_same_key")
+        assert ledger.report.shadow_suppressed == {"newer_same_key": 1} and not ledger.report.suppressed
+
+    def test_an_error_while_evaluating_keeps_the_item(self, monkeypatch, caplog):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("bad rule")
+
+        monkeypatch.setattr(pending_filter, "evaluate", boom)
+        f = _filter(kind="on")
+        ledger = f.new_ledger()
+
+        with caplog.at_level(logging.ERROR, logger="nous.heartbeat.pending_filter"):
+            assert f.screen_fact(_summary_fact("x", age_days=1), ledger) == KEEP
+            assert f.screen_fact(_summary_fact("y", age_days=1), ledger) == KEEP
+            ep = EpisodeSummary(id=uuid.uuid4(), title="t", summary="s", outcome=None, started_at=NOW, tags=[])
+            assert f.screen_episode(ep, ledger) == KEEP
+
+        assert ledger.report.errors == 3
+        assert len(_logged(caplog, logging.ERROR)) == 1, "one ERROR line per run"
+
+    def test_an_object_without_an_id_keeps(self):
+        f = _filter(kind="on")
+        ledger = f.new_ledger()
+        assert f.screen_fact(object(), ledger) == KEEP
+        assert f.screen_episode(object(), ledger) == KEEP
+        assert ledger.report.errors == 2
+
+
+# ---------------------------------------------------------------------------
+# The batched read against real rows
+# ---------------------------------------------------------------------------
+
+
+class _SessionDb:
+    """Hands the test's own session (rolled back after the test) to the filter's read."""
+
+    def __init__(self, session):
+        self._session = session
+
+    @asynccontextmanager
+    async def session(self):
+        yield self._session
+
+
+@pytest.mark.postgres_only
+class TestBatchedRead:
+    @pytest.fixture
+    def agent(self) -> str:
+        return f"test-f116-read-{uuid.uuid4().hex[:12]}"
+
+    @pytest.fixture
+    def make(self, session, agent):
+        async def make(**kwargs) -> Fact:
+            values = {
+                "id": uuid.uuid4(),
+                "agent_id": agent,
+                "content": "synthetic fact",
+                "active": True,
+                "learned_at": NOW - timedelta(days=10),
+            }
+            values.update(kwargs)
+            fact = Fact(**values)
+            session.add(fact)
+            await session.flush()
+            return fact
+
+        return make
+
+    def _filter(self, session, agent) -> PendingFilter:
+        return PendingFilter(_cfg(supersede="shadow"), db=_SessionDb(session), agent_id=agent)
+
+    async def _read(self, f: PendingFilter, *facts: Fact) -> dict[str, tuple[datetime | None, bool]]:
+        return await f._read_rows([str(x.id) for x in facts])
+
+    async def test_an_older_fact_with_a_newer_same_key_fact(self, session, agent, make):
+        older = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=10))
+        newer = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=2))
+
+        rows = await self._read(self._filter(session, agent), older, newer)
+
+        assert rows[str(older.id)][1] is True
+        assert rows[str(newer.id)][1] is False
+
+    @pytest.mark.parametrize("direction", ["newer_contradicts_older", "older_contradicts_newer"])
+    async def test_a_contradiction_pair_does_not_count(self, session, agent, make, direction):
+        older = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=10))
+        if direction == "newer_contradicts_older":
+            newer = await make(
+                subject_key="backup",
+                attribute_key="time",
+                learned_at=NOW - timedelta(days=2),
+                contradiction_of=older.id,
+            )
+        else:
+            newer = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=2))
+            older.contradiction_of = newer.id
+            await session.flush()
+
+        rows = await self._read(self._filter(session, agent), older)
+
+        assert rows[str(older.id)][1] is False
+
+    @pytest.mark.parametrize(
+        ("older_keys", "newer_keys"),
+        [((None, None), (None, None)), (("backup", None), ("backup", None)), ((None, "time"), (None, "time"))],
+    )
+    async def test_missing_keys_do_not_count(self, session, agent, make, older_keys, newer_keys):
+        older = await make(subject_key=older_keys[0], attribute_key=older_keys[1], learned_at=NOW - timedelta(days=9))
+        await make(subject_key=newer_keys[0], attribute_key=newer_keys[1], learned_at=NOW - timedelta(days=1))
+        rows = await self._read(self._filter(session, agent), older)
+        assert rows[str(older.id)][1] is False
+
+    async def test_another_agents_fact_does_not_count(self, session, agent, make):
+        older = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=10))
+        await make(
+            agent_id=f"{agent}-other", subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=1)
+        )
+        rows = await self._read(self._filter(session, agent), older)
+        assert rows[str(older.id)][1] is False
+
+    async def test_another_agents_fact_is_not_read(self, session, agent, make):
+        other = await make(agent_id=f"{agent}-other")
+        assert await self._read(self._filter(session, agent), other) == {}
+
+    @pytest.mark.parametrize("state", ["inactive", "superseded"])
+    async def test_a_newer_fact_that_is_inactive_or_superseded_does_not_count(self, session, agent, make, state):
+        older = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=10))
+        if state == "inactive":
+            await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=1), active=False)
+        else:
+            newest = await make(subject_key="other", attribute_key="x", learned_at=NOW)
+            await make(
+                subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=1), superseded_by=newest.id
+            )
+        rows = await self._read(self._filter(session, agent), older)
+        assert rows[str(older.id)][1] is False
+
+    async def test_last_confirmed_is_returned(self, session, agent, make):
+        confirmed_at = NOW - timedelta(days=1)
+        confirmed = await make(last_confirmed=confirmed_at)
+        never = await make()
+        rows = await self._read(self._filter(session, agent), confirmed, never)
+        assert rows[str(confirmed.id)][0] == confirmed_at
+        assert rows[str(never.id)][0] is None
+
+    async def test_one_call_with_five_ids_returns_five_rows(self, session, agent, make):
+        facts = [await make(content=f"synthetic fact {i}") for i in range(5)]
+        rows = await self._read(self._filter(session, agent), *facts)
+        assert set(rows) == {str(x.id) for x in facts}
+
+    async def test_the_read_through_the_database(self, db, agent):
+        f = PendingFilter(_cfg(age="on"), db=db, agent_id=agent)
+        assert await f._read_rows([str(uuid.uuid4())]) == {}
+
+    async def test_prefetch_through_the_read_feeds_the_rules(self, session, agent, make):
+        older = await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=40))
+        await make(subject_key="backup", attribute_key="time", learned_at=NOW - timedelta(days=2))
+        f = PendingFilter(_cfg(age="shadow", supersede="on"), db=_SessionDb(session), agent_id=agent)
+        ledger = f.new_ledger()
+        summary = _summary_fact("synthetic fact", age_days=40, source="user_direct", fid=older.id)
+
+        await f.prefetch([summary], ledger)
+
+        assert ledger.rows[str(older.id)] == (None, True)
+        assert f.screen_fact(summary, ledger) == Verdict("shadow_drop", "age_fact")
+        assert ledger.report.errors == 0
