@@ -512,6 +512,7 @@ def test_a_skipped_file_check_and_a_flag_from_the_other():
         "\u0413\u043e\u0442\u043e\u0432\u043e: \u0444\u0430\u0439\u043b /ws/out/report.md "
         "\u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d, PR #12 \u043e\u0442\u043a\u0440\u044b\u0442.",
         "\u5b8c\u6210\u3002`/ws/out/report.md`",
+        "\u0413\u043e\u0442\u043e\u0432\u043e: /ws/reports/quarterly-summary-for-the-owner.md",
         "1234 / 5678 = 0.217",
     ],
 )
