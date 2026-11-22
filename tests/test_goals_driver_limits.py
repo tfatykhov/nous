@@ -1779,6 +1779,25 @@ async def test_a_paced_sessions_close_keeps_an_interval_that_ends_later(env_fact
     assert (await _goal(w, goal)).next_wake_at == closed.ended_at + timedelta(seconds=2 * week)
 
 
+async def test_a_change_of_session_settings_applies_from_the_next_start(env_factory):  # noqa: F811
+    """The owner sets a goal to once a day while its session runs: the session runs on as it started, the close
+    reads the new time, and the next start counts the session that ran today."""
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    wake = (await _goal(w, goal)).next_wake_at
+    minute = _minute(local, hours=-1)
+    changed = await w.store.change_sessions(goal.id, changes={"daily_at_minute": minute}, actor="owner")
+    assert (changed.state, changed.next_wake_at, changed.daily_at_minute) == ("active", wake, minute)
+    still = await _session(w, session.id)
+    assert (still.ended_at, still.root_id, still.started_at) == (None, session.root_id, session.started_at)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, minute, days=1)
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+
+
 async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_factory, monkeypatch):  # noqa: F811
     """The hold's wake is written under the guard every wake write has: a wake changed since it was read stays."""
     w, _zone, local = await _paced(env_factory)

@@ -520,6 +520,7 @@ NO_MODE = {
     "resume",
     "request_run_now",
     "raise_budget",
+    "change_sessions",
     "extend_deadline",
     "add_note",
     "grant_tool",
