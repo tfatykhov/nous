@@ -2297,6 +2297,29 @@ def create_app(
             logger.error("Dashboard autonomy error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_loop_numbers(request: Request) -> JSONResponse:
+        """GET /dashboard/loop-numbers — what a finished task, workflow step or goal session costs in tokens, and how
+        many finished ones nobody outside the agent checked, for the window and the one before it. Read-only; ``days``
+        1 to 90, default 7. With ``NOUS_LOOP_NUMBERS_ENABLED`` off: 200 {"enabled": false} and no session."""
+        from nous.api.autonomy_dashboard import parse_days
+        from nous.api.loop_numbers_dashboard import get_loop_numbers
+
+        try:
+            days = parse_days(request.query_params.get("days"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not settings.loop_numbers_enabled:
+            return JSONResponse({"enabled": False})
+        try:
+            async with database.session() as session:
+                data = await get_loop_numbers(
+                    session, settings.agent_id, days=days, claims_recorded=settings.f026_persistence_enabled
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard loop numbers error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_memory_write_health(request: Request) -> JSONResponse:
         """GET /dashboard/memory-write-health — P4: the daily write-health rollup, every rule evaluated now and the
         latest acknowledgements. Read-only; ``days`` 1 to 90, default 30. With the check off: 200 {"enabled": false}
@@ -4065,6 +4088,7 @@ def create_app(
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
         Route("/dashboard/autonomy", dashboard_autonomy),
+        Route("/dashboard/loop-numbers", dashboard_loop_numbers),
         owner_guard.route(
             "/dashboard/memory-write-health/acknowledge",
             dashboard_memory_write_health_acknowledge,

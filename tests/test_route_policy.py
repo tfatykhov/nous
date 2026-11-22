@@ -226,6 +226,7 @@ READS: set[str] = {
     "/dashboard/intentions",
     "/dashboard/attention",
     "/dashboard/autonomy",
+    "/dashboard/loop-numbers",
     "/dashboard/memory-write-health",
     "/dashboard/density",
     "/dashboard/consolidation/{cycle_id}",

@@ -2490,6 +2490,14 @@ class Settings(BaseSettings):
     model_call_text_block_max_chars: int = 200000
     model_call_text_retention_days: int = 7
 
+    # The agent loop's numbers. GET /dashboard/loop-numbers says what a finished task, workflow step or goal session
+    # costs in tokens and how many finished ones nobody outside the agent checked (nous/api/loop_numbers_dashboard.py);
+    # off, it answers {"enabled": false} and reads nothing. The status line adds one short line to each model call of a
+    # task, workflow step, scheduled run or continuation turn: the round, the tool calls used and the changes made so
+    # far (nous/api/status_line.py). It is sent in that call only, never saved; off, every call is as before.
+    loop_numbers_enabled: bool = False
+    status_line_enabled: bool = False
+
     # F091: Retrieval telemetry. Master flag ships ON — header rows, leg
     # summaries and graph expansions are cheap, and a telemetry system that
     # lands dark measures nothing. The expensive part is the per-candidate
