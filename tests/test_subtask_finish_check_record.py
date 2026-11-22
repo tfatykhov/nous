@@ -13,10 +13,11 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.dialects import postgresql
 
 from nous.heart.subtasks import SubtaskManager
+from nous.storage.models import Subtask
 
 RECORD = {
     "v": 1,
@@ -155,23 +156,26 @@ BASE_NAMES_ALL = sorted(
 )
 
 
-# The SQL of the UPDATE that complete() built before metadata_patch existed (bf260047), compiled for Postgres.
-_WHERE = "WHERE heart.subtasks.id = %(id_1)s::UUID AND (heart.subtasks.status NOT IN (__[POSTCOMPILE_status_1]))"
-BASE_SQL_MINIMAL = (
-    "UPDATE heart.subtasks SET status=%(status)s::VARCHAR, result=%(result)s::VARCHAR, "
-    "completed_at=%(completed_at)s::TIMESTAMP WITH TIME ZONE " + _WHERE
-)
-BASE_SQL_ALL = (
-    "UPDATE heart.subtasks SET status=%(status)s::VARCHAR, result=%(result)s::VARCHAR, delivered=%(delivered)s, "
-    "completed_at=%(completed_at)s::TIMESTAMP WITH TIME ZONE, report_jsonb=%(report_jsonb)s::JSONB, "
-    "final_outcome=%(final_outcome)s::VARCHAR, attempts=%(attempts)s::INTEGER, tokens_in=%(tokens_in)s::INTEGER, "
-    "tokens_out=%(tokens_out)s::INTEGER, tool_calls_made=%(tool_calls_made)s::INTEGER, "
-    "payload_schema_valid=%(payload_schema_valid)s " + _WHERE
-)
-
-
 def _sql(statement) -> str:
     return str(statement.compile(dialect=postgresql.dialect()))
+
+
+def _reference(keys: list[str]) -> str:
+    """The UPDATE complete() built before metadata_patch existed (bf260047): the guarded row, these columns set.
+
+    Compiled by the installed SQLAlchemy, so the comparison does not depend on how a version renders casts.
+    """
+    statement = (
+        update(Subtask)
+        .where(Subtask.id == uuid.uuid4())
+        .where(Subtask.status.notin_(("cancelled", "completed", "failed")))
+        .values(**{key: None for key in keys})
+    )
+    return _sql(statement)
+
+
+BASE_KEYS_MINIMAL = ["status", "result", "completed_at"]
+BASE_KEYS_ALL = [*BASE_KEYS_MINIMAL, *ALL_ARGS]
 
 
 async def test_without_a_patch_the_statement_is_unchanged():
@@ -183,7 +187,9 @@ async def test_without_a_patch_the_statement_is_unchanged():
     await manager.complete(uuid.uuid4(), "done", metadata_patch=None, **ALL_ARGS)
 
     assert [_bound_names(s) for s in keeper.statements] == [BASE_NAMES_MINIMAL, BASE_NAMES_ALL, BASE_NAMES_ALL]
-    assert [_sql(s) for s in keeper.statements] == [BASE_SQL_MINIMAL, BASE_SQL_ALL, BASE_SQL_ALL]
+    reference_all = _reference(BASE_KEYS_ALL)
+    assert [_sql(s) for s in keeper.statements] == [_reference(BASE_KEYS_MINIMAL), reference_all, reference_all]
+    assert "metadata" not in reference_all
 
 
 async def test_with_a_patch_the_same_statement_also_sets_the_metadata():
@@ -194,10 +200,8 @@ async def test_with_a_patch_the_same_statement_also_sets_the_metadata():
 
     [statement] = keeper.statements
     sql = " ".join(_sql(statement).split())
-    assert (
-        "metadata=(CASE WHEN (jsonb_typeof(heart.subtasks.metadata) = %(jsonb_typeof_1)s::VARCHAR) "
-        "THEN heart.subtasks.metadata ELSE jsonb_build_object() END || CAST(%(param_1)s::JSONB AS JSONB))"
-    ) in sql
+    assert "metadata=(CASE WHEN (jsonb_typeof(heart.subtasks.metadata) = " in sql
+    assert "THEN heart.subtasks.metadata ELSE jsonb_build_object() END || " in sql
     assert set(BASE_NAMES_ALL) < set(_bound_names(statement))
 
 
