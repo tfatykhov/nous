@@ -1,0 +1,375 @@
+{
+ "generated_at_commit": "bf2600471ecbc0f170a008db8bcc4f0fc2776f1f",
+ "scenarios": {
+  "api_error": {
+   "complete": [],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": false,
+       "outcome": "errored",
+       "reason": "RuntimeError: the model API answered 529",
+       "report": null
+      },
+      null
+     ],
+     {
+      "attempts": 1,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "tool_calls_made": 0
+     }
+    ]
+   ],
+   "fail": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "RuntimeError: the model API answered 529"
+     ],
+     {
+      "attempts": 1,
+      "final_outcome": "errored",
+      "payload_schema_valid": null,
+      "report_jsonb": null,
+      "tokens_in": 0,
+      "tokens_out": 0,
+      "tool_calls_made": 0
+     }
+    ]
+   ]
+  },
+  "empty_then_valid": {
+   "complete": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+     ],
+     {
+      "attempts": 2,
+      "final_outcome": "completed",
+      "payload_schema_valid": null,
+      "report_jsonb": {
+       "blocked_reason": "",
+       "confidence": 0.9,
+       "confidence_reported": true,
+       "evidence_refs": [],
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "incomplete": false,
+       "next_actions": [],
+       "payload": null,
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      },
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": true,
+       "outcome": "completed",
+       "reason": "",
+       "report": {
+        "blocked_reason": "",
+        "confidence": 0.9,
+        "confidence_reported": true,
+        "evidence_refs": [],
+        "findings": [
+         "a",
+         "b",
+         "c"
+        ],
+        "incomplete": false,
+        "next_actions": [],
+        "payload": null,
+        "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+       }
+      },
+      {
+       "confidence": 0.9,
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      }
+     ],
+     {
+      "attempts": 2,
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ],
+   "fail": []
+  },
+  "incomplete_blocked": {
+   "complete": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "Could not reach the data source; the site refused every request made to it."
+     ],
+     {
+      "attempts": 1,
+      "final_outcome": "incomplete_blocked",
+      "payload_schema_valid": null,
+      "report_jsonb": {
+       "blocked_reason": "the site refused the requests",
+       "confidence_reported": false,
+       "evidence_refs": [],
+       "findings": [],
+       "incomplete": true,
+       "next_actions": [],
+       "payload": null,
+       "summary": "Could not reach the data source; the site refused every request made to it."
+      },
+      "tokens_in": 100,
+      "tokens_out": 50,
+      "tool_calls_made": 1
+     }
+    ]
+   ],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": false,
+       "outcome": "incomplete_blocked",
+       "reason": "the site refused the requests",
+       "report": {
+        "blocked_reason": "the site refused the requests",
+        "confidence_reported": false,
+        "evidence_refs": [],
+        "findings": [],
+        "incomplete": true,
+        "next_actions": [],
+        "payload": null,
+        "summary": "Could not reach the data source; the site refused every request made to it."
+       }
+      },
+      {
+       "blocked_reason": "the site refused the requests",
+       "incomplete": true,
+       "summary": "Could not reach the data source; the site refused every request made to it."
+      }
+     ],
+     {
+      "attempts": 1,
+      "tokens_in": 100,
+      "tokens_out": 50,
+      "tool_calls_made": 1
+     }
+    ]
+   ],
+   "fail": []
+  },
+  "placeholder_then_valid": {
+   "complete": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+     ],
+     {
+      "attempts": 2,
+      "final_outcome": "completed",
+      "payload_schema_valid": null,
+      "report_jsonb": {
+       "blocked_reason": "",
+       "confidence": 0.9,
+       "confidence_reported": true,
+       "evidence_refs": [],
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "incomplete": false,
+       "next_actions": [],
+       "payload": null,
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      },
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": true,
+       "outcome": "completed",
+       "reason": "",
+       "report": {
+        "blocked_reason": "",
+        "confidence": 0.9,
+        "confidence_reported": true,
+        "evidence_refs": [],
+        "findings": [
+         "a",
+         "b",
+         "c"
+        ],
+        "incomplete": false,
+        "next_actions": [],
+        "payload": null,
+        "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+       }
+      },
+      {
+       "confidence": 0.9,
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      }
+     ],
+     {
+      "attempts": 2,
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ],
+   "fail": []
+  },
+  "two_empties": {
+   "complete": [],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": false,
+       "outcome": "incomplete_no_terminal",
+       "reason": "Subtask exited without calling submit_final_report.",
+       "report": null
+      },
+      null
+     ],
+     {
+      "attempts": 2,
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ],
+   "fail": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "Subtask exited without calling submit_final_report."
+     ],
+     {
+      "attempts": 2,
+      "final_outcome": "incomplete_no_terminal",
+      "payload_schema_valid": null,
+      "report_jsonb": null,
+      "tokens_in": 200,
+      "tokens_out": 100,
+      "tool_calls_made": 2
+     }
+    ]
+   ]
+  },
+  "valid_first": {
+   "complete": [
+    [
+     [
+      "00000000-0000-4000-8000-0000000000f1",
+      "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+     ],
+     {
+      "attempts": 1,
+      "final_outcome": "completed",
+      "payload_schema_valid": null,
+      "report_jsonb": {
+       "blocked_reason": "",
+       "confidence": 0.9,
+       "confidence_reported": true,
+       "evidence_refs": [],
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "incomplete": false,
+       "next_actions": [],
+       "payload": null,
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      },
+      "tokens_in": 100,
+      "tokens_out": 50,
+      "tool_calls_made": 1
+     }
+    ]
+   ],
+   "events": [
+    [
+     [
+      "<subtask>",
+      {
+       "ok": true,
+       "outcome": "completed",
+       "reason": "",
+       "report": {
+        "blocked_reason": "",
+        "confidence": 0.9,
+        "confidence_reported": true,
+        "evidence_refs": [],
+        "findings": [
+         "a",
+         "b",
+         "c"
+        ],
+        "incomplete": false,
+        "next_actions": [],
+        "payload": null,
+        "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+       }
+      },
+      {
+       "confidence": 0.9,
+       "findings": [
+        "a",
+        "b",
+        "c"
+       ],
+       "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness."
+      }
+     ],
+     {
+      "attempts": 1,
+      "tokens_in": 100,
+      "tokens_out": 50,
+      "tool_calls_made": 1
+     }
+    ]
+   ],
+   "fail": []
+  }
+ }
+}

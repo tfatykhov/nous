@@ -36,6 +36,7 @@ from nous.api.subtask_tools import (
     make_submit_final_report_executor,
 )
 from nous.api.tools import build_subtask_prefix
+from nous.cognitive import finish_checks
 from nous.cognitive.claim_verifier import ClaimVerifier, runner_path
 from nous.heart.subtask_report import SubtaskReport
 from nous.heart.subtask_validator import ValidationResult, validate_report
@@ -460,6 +461,14 @@ async def execute_hardened(
         # with the outer caller's overwrite (DB ends up correct but the
         # event is locked at the WRONG outcome — telemetry desyncs from DB).
         if not cancelled:
+            # F113 fixed finish checks: computed synchronously (no await) and written with the outcome.
+            finish_patch = None
+            if (
+                finish_checks.finish_checks_mode_of(settings) != "off"
+                and last_result.ok
+                and last_result.report is not None
+            ):
+                finish_patch = _finish_patch(subtask, session_id, last_result.report, runner=runner, settings=settings)
             try:
                 await asyncio.shield(_persist_outcome(
                     heart,
@@ -471,6 +480,7 @@ async def execute_hardened(
                     tokens_out=total_out,
                     tool_calls_made=total_calls,
                     payload_schema_valid=payload_schema_valid,
+                    finish_patch=finish_patch,
                 ))
             except asyncio.CancelledError:
                 # F061 PR-3 silent-failure review P1.1: CancelledError
@@ -625,6 +635,50 @@ def _check_report_claims(
         )
 
 
+def _finish_patch(
+    subtask,
+    session_id: str,
+    report: SubtaskReport,
+    *,
+    runner,
+    settings,
+) -> dict[str, Any]:
+    """F113 fixed finish checks: the ``finish_check`` record of a validated report.
+
+    ``not_checked`` / ``shared_session`` for a subtask in a shared session (the rule of
+    ``_check_report_claims``: its ledger holds other work's calls); ``not_checked`` / ``no_calls``
+    when the execution ledger is off or the session recorded no call; otherwise the verdict of
+    ``finish_checks.evaluate`` over the summary and findings. Synchronous, so the caller adds no
+    await. Never raises: an error is logged at WARNING by its class name only and recorded as
+    ``not_checked`` / ``check_error``.
+    """
+    try:
+        meta = getattr(subtask, "metadata_", None)
+        if (isinstance(meta, dict) and meta.get("session_id")) or session_id != f"subtask-{subtask.id.hex[:8]}":
+            verdict = finish_checks.FinishVerdict("not_checked", why="shared_session")
+        else:
+            evidence = (
+                runner.session_evidence(session_id) if getattr(settings, "execution_ledger_enabled", False) else []
+            )
+            if not evidence:
+                verdict = finish_checks.FinishVerdict("not_checked", why="no_calls")
+            else:
+                verdict = finish_checks.evaluate(
+                    "\n".join([report.summary, *report.findings]),
+                    evidence,
+                    settings.workspace_dir,
+                    finish_checks.fs_exists,
+                )
+    except Exception as exc:
+        logger.warning(
+            "F113: the finish checks of subtask %s failed (%s)",
+            subtask.id.hex[:8],
+            type(exc).__name__,
+        )
+        verdict = finish_checks.FinishVerdict("not_checked", why="check_error")
+    return finish_checks.record_of(verdict, finish_checks.finish_checks_mode_of(settings))
+
+
 def _build_retry_message(
     task: str,
     prior_payload: dict | None,
@@ -708,8 +762,13 @@ async def _persist_outcome(
     tokens_out: int,
     tool_calls_made: int,
     payload_schema_valid: bool | None = None,
+    finish_patch: dict | None = None,
 ) -> None:
-    """Map ValidationResult onto a heart.subtasks row update."""
+    """Map ValidationResult onto a heart.subtasks row update.
+
+    ``finish_patch`` (F113) is the ``finish_check`` record; given, it is merged into the row's metadata
+    by the same UPDATE as a completed outcome. None leaves ``complete``'s arguments as they were.
+    """
     common = dict(
         attempts=attempts,
         tokens_in=tokens_in,
@@ -724,6 +783,7 @@ async def _persist_outcome(
             last_result.report.summary,
             final_outcome="completed",
             **common,
+            **({"metadata_patch": {"finish_check": finish_patch}} if finish_patch is not None else {}),
         )
         return
 
