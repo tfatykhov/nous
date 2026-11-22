@@ -32,7 +32,7 @@ def _runner(**over: Any) -> AgentRunner:
         agent_id="test-status-line-cache",
         model=over.pop("model", "claude-haiku-4-5-20251001"),
         thinking_mode=over.pop("thinking_mode", "off"),
-        cache_split_system_prompt=False,
+        NOUS_CACHE_SPLIT_SYSTEM_PROMPT=False,
         **over,
     )
     runner = AgentRunner(cognitive=MagicMock(), brain=MagicMock(), heart=MagicMock(), settings=settings)
