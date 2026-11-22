@@ -197,12 +197,15 @@ describe('when the panel reads', () => {
     const idle = { ...GOAL, open_session: null };
     const { rerender } = render(GoalActivity, props({ goal: idle }));
     await waitFor(() => expect(activityReads()).toBe(1));
+    await screen.findByText('Working on a task: Merge the duplicate pairs');
+    await landed();
     await rerender(props({ goal: { ...idle }, tick: 2 }));
     await rerender(props({ goal: { ...idle }, tick: 3 }));
     await settle();
     expect(activityReads()).toBe(1);
     await rerender(props({ goal: { ...GOAL }, tick: 1 }));
     await waitFor(() => expect(activityReads()).toBe(2)); // a session opened: read at once
+    await landed();
     await rerender(props({ goal: { ...GOAL }, tick: 1 }));
     await settle();
     expect(activityReads()).toBe(2);

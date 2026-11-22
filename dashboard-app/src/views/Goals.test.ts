@@ -1194,6 +1194,19 @@ describe('Goals: the page with the activity panel on', () => {
     expect(fold('charter')!.textContent).toContain('Show');
   });
 
+  it('each section holds what its card held', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    const body = (id: string) => document.getElementById(`goal-b.G-0001.${id}`)!;
+    for (const [id, text] of [
+      ['journal', 'Use the 2024 folder.'], ['plan', 'Merge each pair'], ['spend', A.spend_note], ['sessions', 'Listed 14 duplicate pairs.'],
+      ['charter', 'Merge the duplicate notes in the notes folder'], ['limits', '1 hour'],
+    ]) {
+      expect(within(body(id)).getAllByText(text, { exact: true }).length, id).toBeGreaterThan(0);
+    }
+  });
+
   it('with the per-goal tools off on the server there is no tools section and no button for it', async () => {
     go('#/goals/g/G-0001');
     render(Goals);
