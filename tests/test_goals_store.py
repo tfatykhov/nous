@@ -653,3 +653,45 @@ async def test_after_an_overshoot_the_budget_may_still_move_the_right_way(db):
     with pytest.raises(GoalRefused, match="already spent"):
         await store.raise_budget(goal.id, total=2_100_000, actor="host")  # down, below what is spent
     assert (await store.get(goal.id)).total_budget == 2_200_000
+
+
+# ---- goal pacing: a goal created to work once a day ---------------------------------------------------------------
+
+PACED = {
+    "goals_enabled": True,
+    "continuation_enabled": True,
+    "intentions_enabled": True,
+    "result_inbox_enabled": True,
+    "subtask_enabled": True,
+    "goals_pacing_enabled": True,
+    "goals_timezone": "America/New_York",
+}
+
+
+async def test_a_goal_created_to_work_once_a_day_keeps_its_time_and_says_so(db):
+    store = _store(db, **PACED)
+    assert store._settings.goals_pacing_enabled is True
+    goal = await _draft(store, daily_at_minute=540)
+    assert (goal.daily_at_minute, goal.preset) == (540, "small")
+    assert [(r.actor, r.text) for r in await _journal(store, goal)] == [
+        ("host", "Created as a draft (small limits)."),
+        ("host", "Once a day from 09:00 (America/New_York)."),
+    ]
+    plain = await _draft(store)
+    assert plain.daily_at_minute is None
+    assert [r.text for r in await _journal(store, plain)] == ["Created as a draft (small limits)."]
+
+
+async def test_a_once_a_day_goal_is_refused_while_pacing_is_off(db):
+    store = _store(db)
+    with pytest.raises(GoalRefused, match="^Once-a-day goals are off on this server.$"):
+        await _draft(store, daily_at_minute=540)
+    assert await store.list() == []
+
+
+@pytest.mark.parametrize("minute", [-1, 1440, True, "09:00", 540.0])
+async def test_a_time_of_day_out_of_range_is_refused_in_words(db, minute):
+    store = _store(db, **PACED)
+    with pytest.raises(GoalRefused, match="^the time of day must be from 00:00 to 23:59$"):
+        await _draft(store, daily_at_minute=minute)
+    assert await store.list() == []

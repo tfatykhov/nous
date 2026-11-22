@@ -19,6 +19,9 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+# The store's refusals while pacing is off.
+CREATE_OFF = "Once-a-day goals are off on this server."
+CHANGE_OFF = "Changing a goal's session settings is off on this server."
 PACED = "paced"  # it is not yet the time of day set for the goal
 DAY_SESSIONS = "day_sessions"  # the day's one session has started
 MINUTES_PER_DAY = 24 * 60

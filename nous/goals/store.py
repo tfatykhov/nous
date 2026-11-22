@@ -31,8 +31,9 @@ from nous.api import tool_policy
 from nous.api.tool_classes import McpIdentity
 from nous.brain.continuation import owner_channel
 from nous.goals import commands as goal_commands
+from nous.goals import pacing
 from nous.goals.commands import CONTAINED_VALUES, MODE_COMMANDS, MODE_CONTAINED, CommandsRequest, mode_refs
-from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, validate
+from nous.goals.envelope import Envelope, EnvelopeError, envelope_for, minute_problem, validate
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
@@ -280,6 +281,7 @@ class GoalStore:
         tools: Sequence[tuple[str, McpIdentity | None]] = (),
         proof: str | None = None,
         commands: CommandsRequest | None = None,
+        daily_at_minute: int | None = None,
     ) -> Goal:
         """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given. ``tools`` (F115
         per-goal tools, the owner's only): each ``(tool, identity)`` the goal may use without asking, granted in the
@@ -289,10 +291,20 @@ class GoalStore:
         ``commands`` (the owner's only, with ``NOUS_GOAL_COMMANDS_ENABLED`` on): the goal's tasks may run any command
         for ``hours`` hours from its approval, 1 to the host's ceiling and to the goal's deadline, when ``confirm`` is
         ``commands.confirm_sentence(hours)`` (surrounding spaces aside). Written as ``mode = 'commands'`` with its
-        hours and no end yet, with an owner ``state`` row whose evidence names ``proof``, in the same transaction."""
+        hours and no end yet, with an owner ``state`` row whose evidence names ``proof``, in the same transaction.
+
+        ``daily_at_minute`` (goal pacing, with ``NOUS_GOALS_PACING_ENABLED`` on): the goal works once a day, from that
+        minute of the day in the configured zone, with one more creation row saying so. Refused with pacing off."""
         actor = _PROPOSER_ACTOR.get(proposed_by)
         if actor is None:
             raise GoalRefused(f"proposed_by must be one of {', '.join(_PROPOSER_ACTOR)}")
+        tz = pacing.zone(self._settings)
+        if daily_at_minute is not None:
+            if tz is None:
+                raise GoalRefused(pacing.CREATE_OFF)
+            problem = minute_problem(daily_at_minute)
+            if problem is not None:
+                raise GoalRefused(problem)
         if commands is not None:
             if proposed_by != "owner":
                 raise GoalRefused(goal_commands.PROPOSER)
@@ -347,10 +359,15 @@ class GoalStore:
                 proposed_by=proposed_by,
                 origin_channel=channel,
                 **mode,
+                daily_at_minute=daily_at_minute,
             )
             s.add(goal)
             await s.flush()
             self.add_journal_row(s, goal.id, "state", f"Created as a draft ({preset_name} limits).", actor=actor)
+            if daily_at_minute is not None:
+                assert tz is not None
+                text = f"Once a day from {pacing.at_words(daily_at_minute, tz)}."
+                self.add_journal_row(s, goal.id, "state", text, actor=actor)
             for tool, identity in tools:
                 assert proof is not None
                 self._add_grant(s, goal.id, tool, identity, proof=proof)
