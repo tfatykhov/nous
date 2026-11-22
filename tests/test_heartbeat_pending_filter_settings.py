@@ -101,3 +101,23 @@ def test_the_rows_follow_the_known_false_positives_row():
 )
 def test_the_bounds_are_inclusive(clean_env, field, edge):
     assert getattr(Settings(_env_file=None, **{field: edge}), field) == edge
+
+
+def _compose() -> dict:
+    yaml = pytest.importorskip("yaml")
+    root = Path(__file__).resolve().parents[1]
+    return yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+
+
+def _env_of(service: dict) -> dict[str, str]:
+    env = service.get("environment") or {}
+    if isinstance(env, list):
+        return dict(item.split("=", 1) if "=" in item else (item, "") for item in env)
+    return {k: str(v) for k, v in env.items()}
+
+
+def test_compose_passes_every_f116_setting_with_the_code_default(clean_env):
+    nous_env = _env_of(_compose()["services"]["nous"])
+    for env, default in F116_DEFAULTS.items():
+        assert nous_env.get(env) == f"${{{env}:-{default}}}", env
+        assert default == str(Settings.model_fields[_field(env)].default), env
