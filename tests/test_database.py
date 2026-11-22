@@ -123,7 +123,7 @@ async def test_all_tables_exist(db):
         ("brain", "goal_journal"),
         # F115 the tools the owner allowed one goal to use without asking (migration 117)
         ("brain", "goal_tool_grants"),
-        # heart (20)
+        # heart (21)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;
         # episode <-> decision now derived from the shared session_id)
@@ -150,6 +150,8 @@ async def test_all_tables_exist(db):
         ("heart", "result_inbox_state"),
         # F098 Phase C: result memory log (migration 082)
         ("heart", "result_memory_log"),
+        # F116 why a stale pending item stopped surfacing (migration 119)
+        ("heart", "pending_resolutions"),
     }
     async with db.engine.connect() as conn:
         result = await conn.execute(
