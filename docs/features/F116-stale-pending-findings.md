@@ -1,6 +1,6 @@
 # F116: Stale "Pending action" / "Unresolved commitment" findings
 
-**Status:** PR 1 (this page and migration 119, `heart.pending_resolutions`; no behaviour change) in review; it supersedes #952. PR 2 to PR 6 not started; see [Rollout](#53-rollout). Every layer ships behind its own setting, default `off`. Design approved by Tim on 2026-11-21 with all the defaults in [Decisions](#9-decisions-tim-2026-11-21).
+**Status:** PR 1 (this page and migration 119, `heart.pending_resolutions`; no behaviour change) and PR 2 (L1, L4 and L3a in `nous/heartbeat/pending_filter.py`, each with its own mode, default `off`; see [5.6](#56-pr-2-as-built-l1-l4-and-l3a)) in review; PR 1 supersedes #952. PR 3 to PR 6 not started; see [Rollout](#53-rollout). Every layer ships behind its own setting, default `off`. Design approved by Tim on 2026-11-21 with all the defaults in [Decisions](#9-decisions-tim-2026-11-21).
 **Base:** code references are at `origin/main` `bf260047` (re-checked 2026-11-21 when this page was written); lines drift, re-grep at build.
 **Related:** Issue #369 (closed), F047 actionability, F034.1/F034.4 finding lifecycle, [F111](F111-obligation-ledger.md) obligation ledger, PR #711 (known false positives), PR #503 / #786 (shipped parts of #369).
 
@@ -193,6 +193,36 @@ Each step is its own small PR.
 | `evaluate` raises | caught per candidate; candidate surfaces; ERROR counter |
 
 A real open item must never disappear without a row in `pending_resolutions` or a counter increment plus the daily digest.
+
+### 5.6 PR 2 as built: L1, L4 and L3a
+
+The self-initiated check calls the filter last on each of its three paths, right before it would build a finding, so the filter only counts an item that passed every existing check, and a hidden item takes no `max_pending_items` slot. (The promise scan fills up to `max_pending_items` of its own before the check keeps the slots the fact paths left, so an episode past those slots is screened and counted too.) With every mode `off` the check builds no per-run state and calls nothing of the filter. The fingerprint recorded for an item is the one the finding would have had.
+
+| Setting | Default | Range |
+|---|---|---|
+| `NOUS_HEARTBEAT_PENDING_KIND_MODE` | `off` | `off`, `shadow`, `on` |
+| `NOUS_HEARTBEAT_PENDING_AGE_MODE` | `off` | `off`, `shadow`, `on` |
+| `NOUS_HEARTBEAT_PENDING_SUPERSEDE_MODE` | `off` | `off`, `shadow`, `on` |
+| `NOUS_HEARTBEAT_PENDING_SNAPSHOT_TTL_HOURS` | `336` | 24 to 2160 |
+| `NOUS_HEARTBEAT_PENDING_FACT_MAX_AGE_HOURS` | `720` | 72 to 8760 |
+| `NOUS_HEARTBEAT_PENDING_EPISODE_MAX_AGE_HOURS` | `720` | 72 to 8760 |
+
+A mode that is not one of the three words is `off`. The settings are read when the check is built, so a change needs a restart. The episode limit is a setting of its own. `..._EPISODE_MODE` and `..._REFERENT_*` come with L5 and L2.
+
+How the code relates to the design above:
+
+1. The search result the check gets carries neither `last_confirmed` nor the slot keys. The filter reads them with one query per search result list (named columns of `heart.facts`, 2 seconds at most). After a failed read no other read runs in that check run, and no item is hidden by a rule that needs the row.
+2. No new index: the same-key lookup uses `idx_facts_conflict_slot` (migration 064).
+3. `inactive` is a defensive rule: search returns active facts only and builds each result from the same row.
+4. A newer active fact with the same subject and attribute keys is recorded as `newer_same_key` in shadow only, whatever the mode. The write path keeps two active facts with the same keys and no marker when it judged them compatible (intervals that coexist, a different `event_date`, a relation that is neither an update nor a contradiction, a confidence under 0.8, no classifier answer), and two open tasks about one subject can look like that. A pair linked by `contradiction_of` is not counted.
+5. The question rule on facts is a trailing `?` only (after a leading ok or hey), so a fact such as "What remains: send the invoice" is a task. Episodes keep the check's existing question test.
+6. With a mode not `off`, a tick whose findings were all hidden still writes its `heartbeat_tick` event, with `findings_count` 0 and no triage.
+7. The report travels on the check's result (`CheckResult.suppression`), not on an attribute of the check: a run started from `POST /heartbeat/check/{name}/trigger` can run beside a tick. The runner adds a tick's reports to the event; the report of a started run is returned with it and not counted.
+8. The counts since start are on the runner (`get_stats()["pending_filter"]` and `GET /heartbeat/status`), not in the finding store, which knows only the findings it ingested.
+
+The keyword fallback searches rule facts only (`category="rule"` filters both search legs), so with KIND `on` every result of that search is hidden. The call is kept as it is: with KIND `off` or in `shadow` it runs as before and is measured. With KIND `on` and no embedding provider the check raises no fact finding.
+
+The write-time half of L1 (`rule` in `_HARD_NO_CATEGORIES`, the note prefixes) and the L1 backfill come with PR 3, when KIND is turned on: a verdict stored on a fact outlives the setting.
 
 ## 6. Interaction notes
 - F047 stays the write-time verdict; this feature adds read-time gates and one reason-bearing close path.
