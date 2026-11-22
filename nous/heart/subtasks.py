@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, select, text, update
+from sqlalchemy import String, case, cast, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 
 from nous.brain import intentions
@@ -231,9 +231,13 @@ class SubtaskManager:
             values["delivered"] = delivered
         if metadata_patch is not None:
             # A Python dict cast to JSONB, so it is bound as one JSON object (as in heartbeat/dynamic.py).
-            values["metadata_"] = func.coalesce(Subtask.metadata_, func.jsonb_build_object()).op("||")(
-                cast(metadata_patch, JSONB)
+            # Metadata that is not a JSON object (an array, a JSON null) is replaced by {} first: `||` on it
+            # would build an array.
+            current = case(
+                (func.jsonb_typeof(Subtask.metadata_) == "object", Subtask.metadata_),
+                else_=func.jsonb_build_object(),
             )
+            values["metadata_"] = current.op("||")(cast(metadata_patch, JSONB))
 
         async with self._db.session() as session:
             # Audit DG-2/HT-4: do not resurrect an already-terminal row. A

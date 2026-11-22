@@ -13,11 +13,19 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
 from nous.heart.subtasks import SubtaskManager
 
-RECORD = {"v": 1, "mode": "shadow", "verdict": "flagged", "failed": ["named_file_missing"], "why": None}
+RECORD = {
+    "v": 1,
+    "mode": "shadow",
+    "verdict": "flagged",
+    "failed": ["named_file_missing"],
+    "skipped": [],
+    "why": None,
+}
 
 
 def _manager(db) -> SubtaskManager:
@@ -57,6 +65,23 @@ async def test_a_row_cancelled_first_keeps_its_metadata(db):
     row = await manager.get(subtask.id)
     assert row.status == "cancelled"
     assert row.metadata_ == {"max_attempts": 1}
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("stored", ["[1, 2]", "null", '"text"', "7"])
+async def test_a_patch_on_metadata_that_is_not_an_object_writes_an_object(db, stored):
+    manager = _manager(db)
+    subtask = await manager.create("research X")
+    async with db.session() as session:
+        await session.execute(
+            text("UPDATE heart.subtasks SET metadata = CAST(:stored AS jsonb) WHERE id = :id"),
+            {"stored": stored, "id": subtask.id},
+        )
+        await session.commit()
+
+    await manager.complete(subtask.id, "done", final_outcome="completed", metadata_patch={"finish_check": RECORD})
+
+    assert (await manager.get(subtask.id)).metadata_ == {"finish_check": RECORD}
 
 
 @pytest.mark.postgres_only
@@ -130,6 +155,25 @@ BASE_NAMES_ALL = sorted(
 )
 
 
+# The SQL of the UPDATE that complete() built before metadata_patch existed (bf260047), compiled for Postgres.
+_WHERE = "WHERE heart.subtasks.id = %(id_1)s::UUID AND (heart.subtasks.status NOT IN (__[POSTCOMPILE_status_1]))"
+BASE_SQL_MINIMAL = (
+    "UPDATE heart.subtasks SET status=%(status)s::VARCHAR, result=%(result)s::VARCHAR, "
+    "completed_at=%(completed_at)s::TIMESTAMP WITH TIME ZONE " + _WHERE
+)
+BASE_SQL_ALL = (
+    "UPDATE heart.subtasks SET status=%(status)s::VARCHAR, result=%(result)s::VARCHAR, delivered=%(delivered)s, "
+    "completed_at=%(completed_at)s::TIMESTAMP WITH TIME ZONE, report_jsonb=%(report_jsonb)s::JSONB, "
+    "final_outcome=%(final_outcome)s::VARCHAR, attempts=%(attempts)s::INTEGER, tokens_in=%(tokens_in)s::INTEGER, "
+    "tokens_out=%(tokens_out)s::INTEGER, tool_calls_made=%(tool_calls_made)s::INTEGER, "
+    "payload_schema_valid=%(payload_schema_valid)s " + _WHERE
+)
+
+
+def _sql(statement) -> str:
+    return str(statement.compile(dialect=postgresql.dialect()))
+
+
 async def test_without_a_patch_the_statement_is_unchanged():
     keeper = _StatementKeeper()
     manager = SubtaskManager(keeper, "agent-test")
@@ -139,7 +183,7 @@ async def test_without_a_patch_the_statement_is_unchanged():
     await manager.complete(uuid.uuid4(), "done", metadata_patch=None, **ALL_ARGS)
 
     assert [_bound_names(s) for s in keeper.statements] == [BASE_NAMES_MINIMAL, BASE_NAMES_ALL, BASE_NAMES_ALL]
-    assert all("metadata" not in str(s.compile(dialect=postgresql.dialect())) for s in keeper.statements)
+    assert [_sql(s) for s in keeper.statements] == [BASE_SQL_MINIMAL, BASE_SQL_ALL, BASE_SQL_ALL]
 
 
 async def test_with_a_patch_the_same_statement_also_sets_the_metadata():
@@ -149,8 +193,11 @@ async def test_with_a_patch_the_same_statement_also_sets_the_metadata():
     await manager.complete(uuid.uuid4(), "done", metadata_patch={"finish_check": RECORD}, **ALL_ARGS)
 
     [statement] = keeper.statements
-    sql = str(statement.compile(dialect=postgresql.dialect()))
-    assert "metadata=(coalesce(heart.subtasks.metadata, jsonb_build_object()) ||" in " ".join(sql.split())
+    sql = " ".join(_sql(statement).split())
+    assert (
+        "metadata=(CASE WHEN (jsonb_typeof(heart.subtasks.metadata) = %(jsonb_typeof_1)s::VARCHAR) "
+        "THEN heart.subtasks.metadata ELSE jsonb_build_object() END || CAST(%(param_1)s::JSONB AS JSONB))"
+    ) in sql
     assert set(BASE_NAMES_ALL) < set(_bound_names(statement))
 
 
