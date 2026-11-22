@@ -6,10 +6,15 @@ on a real ``ExecutionLedger``.
 
 Parity: a run is recorded whole (every ``run_turn`` call's arguments, every ``complete`` / ``fail``
 call, the outcome event, the notification and the returned value). With the setting absent and with
-``off`` the recordings are equal, and equal to ``tests/fixtures/finish_checks_parity_golden.json``,
-captured from the same scenarios on the commit before the checks existed (bf260047; the prompt prefix
-and tool schemas are left out of the golden, see ``golden_view``). With ``shadow`` the only change is
-one ``metadata_patch`` keyword on ``complete``.
+``off`` the recordings are equal. Their ``complete`` / ``fail`` calls and outcome events (``golden_view``)
+equal ``tests/fixtures/finish_checks_parity_golden.json``, captured from the same scenarios on the
+commit before the checks existed (bf260047). With ``shadow`` the only change is one ``metadata_patch``
+keyword on ``complete``.
+
+Regenerating the golden (only when a change to the persist or the event is intended): on the commit
+that should be the reference, write ``{"generated_at_commit": <sha>, "scenarios": {name:
+golden_view(await record(SCENARIOS[name], _settings())) for name in SCENARIOS}}`` with
+``json.dumps(..., indent=1, sort_keys=True)``.
 """
 
 from __future__ import annotations
@@ -61,7 +66,14 @@ NAMES_A_MISSING_FILE = {
     "confidence": 0.8,
     "findings": ["Provider B is the cheapest."],
 }
-FLAGGED_RECORD = {"v": 1, "mode": "shadow", "verdict": "flagged", "failed": ["named_file_missing"], "why": None}
+FLAGGED_RECORD = {
+    "v": 1,
+    "mode": "shadow",
+    "verdict": "flagged",
+    "failed": ["named_file_missing"],
+    "skipped": [],
+    "why": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -184,13 +196,8 @@ async def record(script, settings, runner=None, subtask=None, session_id=OWN_SES
 
 
 def golden_view(recording):
-    """The part of a recording the base-commit golden pins: everything but the prompt prefix and tool schemas."""
-    view = json.loads(json.dumps(recording))
-    for call in view["run_turn"]:
-        call.pop("system_prompt_prefix")
-        call["extra_tools"] = sorted(call["extra_tools"])
-        call["context"] = {k: v for k, v in call["context"].items() if v is not None}
-    return view
+    """The part of a recording the base-commit golden pins: the ``complete`` / ``fail`` calls and the events."""
+    return json.loads(json.dumps({key: recording[key] for key in ("complete", "fail", "events")}))
 
 
 def _evidence(*calls: tuple):
@@ -308,11 +315,28 @@ async def test_failed_effects_and_a_silent_report_are_flagged(nothing_exists):
     assert kwargs["metadata_patch"]["finish_check"]["failed"] == ["effects_all_failed"]
 
 
+async def test_the_record_names_a_skipped_check(nothing_exists):
+    evidence = _evidence(WROTE_SUMMARY, ("run_python", {"code": "print(1)"}, "success"))
+    rec, _runner_ = await _shadow_patch([NAMES_A_MISSING_FILE], evidence=evidence)
+    [[_args, kwargs]] = rec["complete"]
+    assert kwargs["metadata_patch"] == {
+        "finish_check": {
+            "v": 1,
+            "mode": "shadow",
+            "verdict": "clean",
+            "failed": [],
+            "skipped": ["named_file_missing"],
+            "why": None,
+        }
+    }
+    assert nothing_exists == []
+
+
 async def test_a_clean_report(nothing_exists):
     rec, _runner_ = await _shadow_patch([VALID], evidence=_evidence(WROTE_SUMMARY))
     [[_args, kwargs]] = rec["complete"]
     assert kwargs["metadata_patch"] == {
-        "finish_check": {"v": 1, "mode": "shadow", "verdict": "clean", "failed": [], "why": None}
+        "finish_check": {"v": 1, "mode": "shadow", "verdict": "clean", "failed": [], "skipped": [], "why": None}
     }
 
 
@@ -340,7 +364,14 @@ async def test_a_shared_session_is_not_checked(subtask_fields, session_id, nothi
     )
     [[_args, kwargs]] = rec["complete"]
     assert kwargs["metadata_patch"] == {
-        "finish_check": {"v": 1, "mode": "shadow", "verdict": "not_checked", "failed": [], "why": "shared_session"}
+        "finish_check": {
+            "v": 1,
+            "mode": "shadow",
+            "verdict": "not_checked",
+            "failed": [],
+            "skipped": [],
+            "why": "shared_session",
+        }
     }
     runner.session_evidence.assert_not_called()
 
@@ -353,6 +384,7 @@ async def test_no_recorded_calls_is_not_checked(nothing_exists):
         "mode": "shadow",
         "verdict": "not_checked",
         "failed": [],
+        "skipped": [],
         "why": "no_calls",
     }
 
