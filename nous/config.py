@@ -2367,6 +2367,17 @@ class Settings(BaseSettings):
     # matching findings are auto-closed at ingest instead of triaged.
     # Missing/invalid file => no rules. Empty string disables.
     heartbeat_known_fp_path: str = "/tmp/nous-workspace/heartbeat/known_false_positives.json"
+    # F116: filters of the self-initiated check's pending items (nous/heartbeat/pending_filter.py). Each mode is
+    # off, shadow (evaluate and record what it would hide, still emit) or on (hide). Any other text is off, so a
+    # mode is plain text rather than a fixed choice. Read once when the check is built: a change needs a restart.
+    heartbeat_pending_kind_mode: str = "off"  # L1: rule, preference and person facts; triage and suppression notes
+    heartbeat_pending_age_mode: str = "off"  # L4: age caps and facts that read as a question
+    heartbeat_pending_supersede_mode: str = "off"  # L3a: superseded or inactive facts
+    # L4: how long a status line written by the enumerative extractor counts, and the cap for other facts and for
+    # ongoing episodes, in hours.
+    heartbeat_pending_snapshot_ttl_hours: int = Field(default=336, ge=24, le=2160)
+    heartbeat_pending_fact_max_age_hours: int = Field(default=720, ge=72, le=8760)
+    heartbeat_pending_episode_max_age_hours: int = Field(default=720, ge=72, le=8760)
 
     # F034.3: Self-tuning
     heartbeat_tuning_enabled: bool = False  # off by default until stable

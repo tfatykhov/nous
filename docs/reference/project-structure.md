@@ -104,6 +104,7 @@ nous/
 │   │   ├── memory_write_health_check.py # P4 MemoryWriteHealthCheck: hourly, quiet hours too, findings off chat (chat_delivery False) and never actionable
 │   │   ├── work_queue.py       # F064.6 WorkQueueCheck (file_jsonl adapter)
 │   │   ├── finding_store.py    # F034.1 finding lifecycle persistence
+│   │   ├── pending_filter.py   # F116: kind, age and supersession filters of the self-initiated check's pending items (off/shadow/on each)
 │   │   ├── tuner.py            # F034.3 self-tuning pass
 │   │   ├── quiet_hours.py      # F099: in_quiet_hours / quiet_hours_end, shared by the heartbeat and the owner pushes
 │   │   ├── commitment_watcher.py # F111 PR B1: the overdue watcher — one Telegram ping per overdue commitment, claim/finalize/release, dead-man line

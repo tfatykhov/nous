@@ -87,6 +87,8 @@ class FindingStore:
             existing = self._findings[fp]
             existing.last_seen = datetime.now(UTC)
             existing.absent_ticks = 0  # Reset — finding is still active
+            if finding.replaces_stored:
+                existing.finding = finding  # F116: the latest numbers of a line whose fingerprint stays the same
 
             if existing.state == FindingState.RESOLVED:
                 # Re-opened — check flapping

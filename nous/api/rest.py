@@ -2963,14 +2963,19 @@ def create_app(
 
         last_dag_tick = getattr(heartbeat_runner, "last_dag_tick", None)
         dag_tick_pending_since = getattr(heartbeat_runner, "dag_tick_pending_since", None)
-        return JSONResponse({
+        body = {
             "checks": heartbeat_runner.registry.get_status(),
             "tokens_used_today": heartbeat_runner.tokens_used_today,
             "daily_budget": settings.heartbeat_daily_token_budget,
             "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
             "last_dag_tick": last_dag_tick.isoformat() if last_dag_tick else None,
             "dag_tick_pending_since": dag_tick_pending_since.isoformat() if dag_tick_pending_since else None,
-        })
+        }
+        # F116: the pending filters' counts since start, once a filter that is not off has reported.
+        pending_filter = getattr(heartbeat_runner, "pending_filter_stats", None)
+        if isinstance(pending_filter, dict) and pending_filter:
+            body["pending_filter"] = pending_filter
+        return JSONResponse(body)
 
     async def heartbeat_trigger(request: Request) -> JSONResponse:
         """POST /heartbeat/trigger — force immediate tick."""

@@ -39,7 +39,7 @@ from nous.heartbeat.dynamic import (
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.quiet_hours import in_quiet_hours
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
-from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
+from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult, SuppressionReport
 from nous.heartbeat.send_result import SendResult, result_for_exception, result_for_status
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -168,6 +168,9 @@ class HeartbeatRunner:
             min_samples=getattr(settings, "heartbeat_tuning_min_samples", None),
         )
         self._last_tune: datetime | None = None
+        # F116: running totals of the pending filters' reports (counts by reason, errors), since start. None until
+        # the first report, so nothing is added to the stats while every filter is off.
+        self._pending_totals: dict | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -735,6 +738,8 @@ class HeartbeatRunner:
         all_findings: list[Finding] = []
         successful_checks: set[str] = set()
         current_fingerprints: dict[str, set[str]] = {}
+        # F116: what the pending filters hid or recorded this tick (stays empty while every filter is off).
+        tick_report = SuppressionReport()
 
         # #273: Fire on_complete callbacks for self-disabled dynamic checks
         # (F099 Phase 0b: with the findings of the run that disabled the check)
@@ -793,6 +798,9 @@ class HeartbeatRunner:
                 check.mark_success()
                 successful_checks.add(check.name)
                 run_succeeded = True
+                suppression = getattr(result, "suppression", None)
+                if isinstance(suppression, SuppressionReport) and suppression:
+                    self._record_suppression(suppression, tick_report)
 
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
@@ -914,32 +922,69 @@ class HeartbeatRunner:
                 logger.exception("Heartbeat triage crashed")
 
             # Emit event for audit trail
-            if self._bus:
-                tick_event = Event(
-                    type="heartbeat_tick",
-                    agent_id=self._settings.agent_id,
-                    data={
-                        "findings_count": len(all_findings),
-                        "checks_run": len(due_checks),
-                        "tokens_used_today": self._tokens_used_today,
-                        "findings": [
-                            {
-                                "source": f.source,
-                                "summary": f.summary,
-                                "urgency": f.urgency,
-                                "check_name": f.check_name,
-                            }
-                            for f in all_findings
-                        ],
-                        "by_source": dict(Counter(f.source for f in all_findings)),
-                        "by_urgency": dict(Counter(f.urgency for f in all_findings)),
-                    },
-                )
-                tick_event.trace_id = tick_event.event_id  # Root event
-                self._current_tick_event = tick_event
-                await self._bus.emit(tick_event)
+            await self._emit_tick_event(all_findings, due_checks, tick_report, current=True)
+        elif tick_report:
+            # F116: a filter hid every finding of this tick (or could not evaluate one): no triage, but the event
+            # records what was hidden.
+            await self._emit_tick_event(all_findings, due_checks, tick_report, current=False)
 
         return all_findings
+
+    def _record_suppression(self, report: SuppressionReport, tick_report: SuppressionReport) -> None:
+        """F116: add one check run's filter report to this tick's report and to the running totals."""
+        try:
+            tick_report.merge(report)
+            totals = self._pending_totals or {"suppressed": {}, "shadow_suppressed": {}, "errors": 0}
+            for key, counts in (("suppressed", report.suppressed), ("shadow_suppressed", report.shadow_suppressed)):
+                for reason, count in counts.items():
+                    totals[key][reason] = totals[key].get(reason, 0) + count
+            totals["errors"] += report.errors
+            self._pending_totals = totals
+        except Exception:
+            logger.warning("F116: the pending filter's report of this run could not be recorded", exc_info=True)
+
+    async def _emit_tick_event(
+        self,
+        all_findings: list[Finding],
+        due_checks: list[BaseCheck],
+        tick_report: SuppressionReport,
+        *,
+        current: bool,
+    ) -> None:
+        """Emit the tick's ``heartbeat_tick`` event. ``current``: it becomes the parent of this tick's triage events.
+
+        F116: when a pending filter hid or recorded something this tick, the event also carries ``suppressed``,
+        ``suppressed_items``, ``shadow_suppressed``, ``shadow_suppressed_items`` and ``suppression_errors``.
+        """
+        if not self._bus:
+            return
+        data = {
+            "findings_count": len(all_findings),
+            "checks_run": len(due_checks),
+            "tokens_used_today": self._tokens_used_today,
+            "findings": [
+                {
+                    "source": f.source,
+                    "summary": f.summary,
+                    "urgency": f.urgency,
+                    "check_name": f.check_name,
+                }
+                for f in all_findings
+            ],
+            "by_source": dict(Counter(f.source for f in all_findings)),
+            "by_urgency": dict(Counter(f.urgency for f in all_findings)),
+        }
+        if tick_report:
+            data["suppressed"] = dict(tick_report.suppressed)
+            data["suppressed_items"] = [dict(item) for item in tick_report.items]
+            data["shadow_suppressed"] = dict(tick_report.shadow_suppressed)
+            data["shadow_suppressed_items"] = [dict(item) for item in tick_report.shadow_items]
+            data["suppression_errors"] = tick_report.errors
+        tick_event = Event(type="heartbeat_tick", agent_id=self._settings.agent_id, data=data)
+        tick_event.trace_id = tick_event.event_id  # Root event
+        if current:
+            self._current_tick_event = tick_event
+        await self._bus.emit(tick_event)
 
     # ------------------------------------------------------------------
     # Auto-resolve absent findings
@@ -1553,15 +1598,32 @@ class HeartbeatRunner:
             return None
         return self._dag_pending_since
 
+    @property
+    def pending_filter_stats(self) -> dict | None:
+        """F116: what the pending filters hid (``suppressed``) or recorded in shadow (``shadow_suppressed``), by
+        reason, and the items they could not evaluate (``errors``), since start. None until the first report."""
+        totals = self._pending_totals
+        if totals is None:
+            return None
+        return {
+            "suppressed": dict(totals["suppressed"]),
+            "shadow_suppressed": dict(totals["shadow_suppressed"]),
+            "errors": totals["errors"],
+        }
+
     def get_stats(self) -> dict:
         """F035.1: Return heartbeat runner statistics."""
-        return {
+        stats = {
             "total_ticks": self._tick_count,
             "last_tick_at": self._last_tick.isoformat() if self._last_tick else None,
             "currently_running": self._running,
             "tokens_used_today": self._tokens_used_today,
             "budget_remaining": max(0, self._settings.heartbeat_daily_token_budget - self._tokens_used_today),
         }
+        pending_filter = self.pending_filter_stats
+        if pending_filter is not None:
+            stats["pending_filter"] = pending_filter
+        return stats
 
     async def trigger_tick(self) -> list[Finding]:
         """Force an immediate tick (for REST endpoint)."""
