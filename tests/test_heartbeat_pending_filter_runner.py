@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import dataclasses
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from nous.config import Settings
+from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner
-from nous.heartbeat.schemas import CheckResult, Finding, SuppressionReport
+from nous.heartbeat.schemas import (
+    CheckResult,
+    Finding,
+    FindingAction,
+    FindingState,
+    SuppressionReport,
+    TrackedFinding,
+)
 
 TODAYS_KEYS = ["findings_count", "checks_run", "tokens_used_today", "findings", "by_source", "by_urgency"]
 REPORT_KEYS = ["suppressed", "suppressed_items", "shadow_suppressed", "shadow_suppressed_items", "suppression_errors"]
@@ -266,3 +276,87 @@ class TestStatusRoute:
         runner = _runner(_ReportingCheck([], None))
         monkeypatch.setattr(HeartbeatRunner, "pending_filter_stats", property(lambda self: value))
         assert "pending_filter" not in await _status(runner)
+
+
+# ---------------------------------------------------------------------------
+# FindingStore: a finding that asks for its stored payload to be replaced
+# ---------------------------------------------------------------------------
+
+
+def _store() -> FindingStore:
+    store = FindingStore()
+    store._startup_time = datetime.now(UTC) - timedelta(hours=1)  # past the start-up quiet window
+    return store
+
+
+def _line(count: int, *, replaces: bool) -> Finding:
+    return Finding(
+        source="facts",
+        summary=f"Pending items hidden by age cap: {count}",
+        urgency="low",
+        needs_action=False,
+        raw_data={"detection": "age_digest", "count": count},
+        check_name="self_initiated",
+        replaces_stored=replaces,
+    )
+
+
+def _without_payload(tracked: TrackedFinding) -> dict:
+    """Every tracked field but the payload and the two clock readings."""
+    return {
+        f.name: getattr(tracked, f.name)
+        for f in dataclasses.fields(tracked)
+        if f.name not in {"finding", "first_seen", "last_seen"}
+    }
+
+
+class TestFindingStoreReplacesStored:
+    def test_the_flag_is_off_by_default_and_not_part_of_the_fingerprint(self):
+        assert Finding(source="s", summary="x").replaces_stored is False
+        assert _line(3, replaces=True).fingerprint() == _line(3, replaces=False).fingerprint()
+        assert _line(3, replaces=True).fingerprint() == _line(4, replaces=True).fingerprint()
+
+    def test_without_the_flag_the_first_payload_stays(self):
+        store = _store()
+        first, second = _line(3, replaces=False), _line(4, replaces=False)
+
+        actions = [store.ingest(first), store.ingest(second)]
+
+        tracked = store.get_tracked(first.fingerprint())
+        assert actions == [FindingAction.TRIAGE, FindingAction.SUPPRESS]
+        assert tracked.finding is first
+        assert tracked.seen_count == 2
+
+    @pytest.mark.parametrize("state", [None, FindingState.ACKNOWLEDGED, FindingState.RESOLVED])
+    def test_with_the_flag_only_the_payload_changes(self, state):
+        plain, flagged = _store(), _store()
+        for store, replaces in ((plain, False), (flagged, True)):
+            store.ingest(_line(3, replaces=replaces))
+            fp = _line(3, replaces=replaces).fingerprint()
+            if state == FindingState.ACKNOWLEDGED:
+                store.acknowledge(fp)
+            elif state == FindingState.RESOLVED:
+                store.resolve(fp)
+
+        newer_plain, newer_flagged = _line(4, replaces=False), _line(4, replaces=True)
+        assert plain.ingest(newer_plain) == flagged.ingest(newer_flagged)
+
+        fp = newer_plain.fingerprint()
+        assert plain.get_tracked(fp).finding.summary == "Pending items hidden by age cap: 3"
+        assert flagged.get_tracked(fp).finding is newer_flagged
+        assert _without_payload(flagged.get_tracked(fp)) == _without_payload(plain.get_tracked(fp))
+
+    def test_a_flagged_finding_escalates_once_like_any_other(self):
+        store = _store()
+        store.ingest(_line(3, replaces=True))
+        fp = _line(3, replaces=True).fingerprint()
+        store.acknowledge(fp)
+        store.get_tracked(fp).first_seen = datetime.now(UTC) - timedelta(days=5)
+
+        escalating = _line(3, replaces=True)
+        assert store.ingest(escalating) == FindingAction.ESCALATE
+        escalating.urgency = "normal"  # what the runner does to an escalated finding
+        later = [store.ingest(_line(n, replaces=True)) for n in (4, 5, 6)]
+
+        assert later == [FindingAction.SUPPRESS] * 3
+        assert store.get_tracked(fp).finding.summary == "Pending items hidden by age cap: 6"

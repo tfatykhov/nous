@@ -32,6 +32,10 @@ class Finding:
     # False: owner-only, for the dashboard: never sent to chat (Telegram) at any urgency, never handed to the model
     # through a2ui. The runner sets it from BaseCheck.chat_delivery.
     chat_delivery: bool = True
+    # True: when the finding store already tracks this fingerprint, the stored finding becomes this one (its summary,
+    # counts and raw_data), for a line whose numbers change while its fingerprint does not. Not part of the
+    # fingerprint. Set only by the self-initiated check's daily age line (F116).
+    replaces_stored: bool = False
 
     def fingerprint(self) -> str:
         """Stable hash for dedup. Strips volatile parts (counts, timestamps)."""

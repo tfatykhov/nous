@@ -13,7 +13,7 @@ import imaplib
 import logging
 import re
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, get_args
 
 from nous.brain import Brain, continuation
@@ -284,8 +284,6 @@ class SelfInitiatedCheck(BaseCheck):
         except Exception:
             logger.warning("F116: the pending filter could not be set up; every filter mode is off", exc_info=True)
             self._pending = PendingFilter(PendingFilterConfig())
-        # UTC date of the last "Pending items hidden by age cap" line a heartbeat tick took (kept in memory only).
-        self._last_age_digest: date | None = None
 
     async def _ensure_prototypes(self) -> list[list[float]]:
         """Embed prototype strings on first success, cache result.
@@ -629,16 +627,14 @@ class SelfInitiatedCheck(BaseCheck):
         )
 
     def _append_age_digest(self, findings: list[Finding], ledger: Ledger) -> None:
-        """F116: with the age filter on, one low-urgency line counting the items it hid this run, until a heartbeat
-        tick has taken that day's line (``age_digest_recorded``).
+        """F116: with the age filter on, every run that hid items carries one low-urgency line with this run's count.
 
         Appended after the cut, so it never displaces a finding. The digits of the count normalise away, so the line
-        has one fingerprint every day; needs_action=False keeps it out of the model's triage turn.
+        keeps one fingerprint and the finding store tracks it as one finding that stays present while items are
+        hidden; replaces_stored keeps the store's copy at the latest count. needs_action=False keeps it out of the
+        model's triage turn.
         """
         if self._pending.cfg.age != "on" or not ledger.age_hidden:
-            return
-        today = ledger.now.astimezone(UTC).date()
-        if self._last_age_digest == today:
             return
         count = len(ledger.age_hidden)
         findings.append(
@@ -647,21 +643,10 @@ class SelfInitiatedCheck(BaseCheck):
                 summary=f"Pending items hidden by age cap: {count}",
                 urgency="low",
                 needs_action=False,
-                raw_data={
-                    "detection": "age_digest",
-                    "count": count,
-                    "ids": ledger.age_hidden[:20],
-                    "date": today.isoformat(),
-                },
+                raw_data={"detection": "age_digest", "count": count, "ids": ledger.age_hidden[:20]},
+                replaces_stored=True,
             )
         )
-
-    def age_digest_recorded(self, finding: Finding) -> None:
-        """F116: a heartbeat tick took this daily age line; no other line is added that UTC day (kept in memory)."""
-        try:
-            self._last_age_digest = date.fromisoformat(finding.raw_data["date"])
-        except (KeyError, TypeError, ValueError):
-            logger.debug("F116: an age line without a usable date: %r", finding.raw_data)
 
     @staticmethod
     def _looks_like_pending(content: str) -> bool:

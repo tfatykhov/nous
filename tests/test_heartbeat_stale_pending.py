@@ -26,10 +26,11 @@ from sqlalchemy.dialects import postgresql
 from nous.config import Settings
 from nous.heart.schemas import EpisodeSummary, FactSummary
 from nous.heartbeat.checks import PENDING_PROTOTYPES, SelfInitiatedCheck
+from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.pending_filter import PendingFilter
 from nous.heartbeat.registry import CheckRegistry
 from nous.heartbeat.runner import HeartbeatRunner
-from nous.heartbeat.schemas import Finding
+from nous.heartbeat.schemas import Finding, FindingState
 
 CHECK_NAME = "self_initiated"
 KEYWORD_QUERY = "follow-up pending action TODO"
@@ -587,7 +588,6 @@ class TestAgeFilter:
 
         result = await check.run()
 
-        now = datetime.now(UTC)
         f = sc.facts
         hidden = [str(f[k].id) for k in ("78ccacac", "8f248bc2", "4ecbeeea", "a02b0102")]
         assert _as_tuples(result.findings) == [
@@ -597,7 +597,7 @@ class TestAgeFilter:
                 "Pending items hidden by age cap: 4",
                 "low",
                 False,
-                {"detection": "age_digest", "count": 4, "ids": hidden, "date": now.date().isoformat()},
+                {"detection": "age_digest", "count": 4, "ids": hidden},
             ),
         ]
         assert result.suppression.suppressed == {"age_snapshot": 4}
@@ -629,7 +629,6 @@ class TestAgeFilter:
                     "detection": "age_digest",
                     "count": 2,
                     "ids": [str(f["synthetic_rule_3"].id), str(e["synthetic_ongoing_60d"].id)],
-                    "date": datetime.now(UTC).date().isoformat(),
                 },
             ),
         ]
@@ -748,47 +747,43 @@ class TestDigest:
         heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [*old, *fresh[:3]], PENDING_PROTOTYPES[1]: fresh[3:]})
         return heart, embeddings, old
 
-    async def test_after_the_cut_until_a_tick_records_it_then_not_again_that_day(self):
-        heart, embeddings, old = self._setup(datetime.now(UTC))
+    async def test_every_run_that_hid_items_carries_the_line_with_its_own_count(self):
+        now = datetime.now(UTC)
+        heart, embeddings, old = self._setup(now)
         check = _check(heart, embeddings, age="on")
 
         first = await check.run()
         second = await check.run()
-        firsts, seconds = _digests(first), _digests(second)
-        check.age_digest_recorded(seconds[0])
+        heart.facts.search = _scripted({PENDING_PROTOTYPES[0]: [old[0]]})
         third = await check.run()
-        check._last_age_digest = datetime.now(UTC).date() - timedelta(days=1)
-        fourth = await check.run()
 
-        today = datetime.now(UTC).date().isoformat()
-        assert len(firsts) == 1 and first.findings[-1] is firsts[0]
-        assert (firsts[0].summary, firsts[0].urgency, firsts[0].needs_action) == (
+        (a,), (b,), (c,) = _digests(first), _digests(second), _digests(third)
+        assert first.findings[-1] is a
+        assert (a.summary, a.urgency, a.needs_action, a.replaces_stored) == (
             "Pending items hidden by age cap: 2",
             "low",
             False,
+            True,
         )
-        assert firsts[0].raw_data == {
-            "detection": "age_digest",
-            "count": 2,
-            "ids": [str(o.id) for o in old],
-            "date": today,
-        }
-        assert len(seconds) == 1, "a run whose line no tick took does not use up the day"
-        assert _digests(third) == [], "a tick took today's line"
-        assert third.suppression.suppressed == {"age_snapshot": 2}, "the items stay hidden"
-        fourths = _digests(fourth)
-        assert len(fourths) == 1
-        firsts[0].check_name = fourths[0].check_name = CHECK_NAME
-        assert fourths[0].fingerprint() == firsts[0].fingerprint()
+        assert a.raw_data == {"detection": "age_digest", "count": 2, "ids": [str(o.id) for o in old]}
+        assert (b.summary, b.raw_data) == (a.summary, a.raw_data)
+        assert (c.summary, c.raw_data["count"], c.raw_data["ids"]) == (
+            "Pending items hidden by age cap: 1",
+            1,
+            [str(old[0].id)],
+        )
+        a.check_name = c.check_name = CHECK_NAME
+        assert c.fingerprint() == a.fingerprint(), "one finding for the store, whatever the count"
 
-    def test_a_line_from_another_day_does_not_mark_today(self):
-        heart, embeddings, _ = self._setup(datetime.now(UTC))
-        check = _check(heart, embeddings, age="on")
-        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={"date": "2026-01-01"}))
-        assert check._last_age_digest == datetime(2026, 1, 1).date()
-        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={"date": "not a date"}))
-        check.age_digest_recorded(Finding(source="facts", summary="x", raw_data={}))
-        assert check._last_age_digest == datetime(2026, 1, 1).date()
+    async def test_a_run_that_hid_nothing_carries_no_line(self):
+        now = datetime.now(UTC)
+        fresh = _fact(_synthetic_id(90), "synthetic: task 0", now=now, age_days=1)
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: [fresh]})
+        result = await _check(heart, embeddings, age="on").run()
+        assert _digests(result) == [] and _as_tuples(result.findings) == [_pending(fresh, "embedding")]
+
+    def test_the_check_findings_do_not_replace_the_stored_payload(self):
+        assert Finding(source="facts", summary="x").replaces_stored is False
 
     async def test_the_digest_can_make_the_list_one_longer_than_the_cap(self):
         heart, embeddings, _ = self._setup(datetime.now(UTC), kept=5)
@@ -825,45 +820,107 @@ def _digests(result) -> list[Finding]:
 
 
 class TestDigestThroughTheRunner:
-    """The day's line is used up when a tick takes it, not by a run started by hand."""
+    """With the age filter on, the line is in every tick while items stay hidden: the finding store keeps one
+    acknowledged finding that is never auto-resolved meanwhile, lists it in the daily digest, holds the latest count,
+    and no model turn or message is started for it."""
 
-    def _runner(self, check: SelfInitiatedCheck, bus: AsyncMock) -> HeartbeatRunner:
+    def _runner(self, check: SelfInitiatedCheck, bus: AsyncMock, store: FindingStore) -> HeartbeatRunner:
         registry = CheckRegistry()
         registry.register(check)
+        settings = _settings()
+        settings.heartbeat_daily_token_budget = 50_000
         runner = HeartbeatRunner(
-            settings=_settings(),
+            settings=settings,
             registry=registry,
             runner=AsyncMock(),
             brain=AsyncMock(),
             heart=AsyncMock(),
             bus=bus,
             http_client=AsyncMock(),
+            finding_store=store,
         )
-        runner._triage = AsyncMock()
+        runner._cognitive_triage = AsyncMock()
+        runner._send_telegram = AsyncMock()
         return runner
+
+    def _store(self) -> FindingStore:
+        store = FindingStore()
+        store._startup_time = datetime.now(UTC) - timedelta(hours=1)  # past the start-up quiet window
+        return store
 
     def _summaries(self, bus: AsyncMock) -> list[list[str]]:
         events = [c.args[0] for c in bus.emit.call_args_list if c.args[0].type == "heartbeat_tick"]
         return [[f["summary"] for f in e.data["findings"]] for e in events]
 
-    async def test_two_ticks_carry_one_line_and_a_triggered_run_uses_none(self):
+    async def _ticks(self, runner: HeartbeatRunner, check: SelfInitiatedCheck, n: int) -> None:
+        for _ in range(n):
+            check.last_run = None  # due again
+            await runner._tick()
+
+    def _line(self, store: FindingStore):
+        lines = [t for t in store._findings.values() if t.finding.raw_data.get("detection") == "age_digest"]
+        assert len(lines) == 1
+        return lines[0]
+
+    async def test_present_on_every_tick_with_the_latest_count(self):
         now = datetime.now(UTC)
-        old = [_fact(_synthetic_id(80 + i), f"synthetic: status {i}", now=now, age_days=40) for i in range(2)]
+        old = [_fact(_synthetic_id(80 + i), f"synthetic: status {i}", now=now, age_days=40) for i in range(3)]
         heart, embeddings = _custom({PENDING_PROTOTYPES[0]: old})
         check = _check(heart, embeddings, age="on")
-        bus = AsyncMock()
-        runner = self._runner(check, bus)
-        line = "Pending items hidden by age cap: 2"
+        bus, store = AsyncMock(), self._store()
+        runner = self._runner(check, bus, store)
 
         triggered = await runner.trigger_check(CHECK_NAME)
-        check.last_run = None  # due again
-        await runner._tick()
-        check.last_run = None
-        await runner._tick()
+        await self._ticks(runner, check, 4)
+        heart.facts.search = _scripted({PENDING_PROTOTYPES[0]: old[:2]})
+        await self._ticks(runner, check, 1)
 
-        assert [f.summary for f in triggered.findings] == [line]
-        assert self._summaries(bus) == [[line], []]
-        assert check._last_age_digest == now.date()
+        three, two = "Pending items hidden by age cap: 3", "Pending items hidden by age cap: 2"
+        assert [f.summary for f in triggered.findings] == [three]
+        assert self._summaries(bus) == [[three]] * 4 + [[two]]
+        line = self._line(store)
+        assert (line.state, line.seen_count, line.absent_ticks) == (FindingState.ACKNOWLEDGED, 5, 0)
+        assert line.finding.summary == two
+        assert line.finding.raw_data == {"detection": "age_digest", "count": 2, "ids": [str(o.id) for o in old[:2]]}
+        assert [t.finding.summary for t in store.get_digest_items()] == [two]
+        runner._cognitive_triage.assert_not_awaited()
+        runner._send_telegram.assert_not_awaited()
+
+    async def test_resolved_once_nothing_is_hidden(self):
+        now = datetime.now(UTC)
+        old = [_fact(_synthetic_id(80), "synthetic: status 0", now=now, age_days=40)]
+        fresh = [_fact(_synthetic_id(90), "synthetic: task 0", now=now, age_days=1)]
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: old})
+        check = _check(heart, embeddings, age="on")
+        store = self._store()
+        runner = self._runner(check, AsyncMock(), store)
+
+        await self._ticks(runner, check, 2)
+        heart.facts.search = _scripted({PENDING_PROTOTYPES[0]: fresh})
+        await self._ticks(runner, check, 2)
+
+        assert self._line(store).state == FindingState.RESOLVED
+
+    async def test_a_line_present_for_days_escalates_once_and_never_alerts(self):
+        now = datetime.now(UTC)
+        old = [_fact(_synthetic_id(80), "synthetic: status 0", now=now, age_days=40)]
+        heart, embeddings = _custom({PENDING_PROTOTYPES[0]: old})
+        check = _check(heart, embeddings, age="on")
+        store = self._store()
+        runner = self._runner(check, AsyncMock(), store)
+
+        await self._ticks(runner, check, 1)
+        self._line(store).first_seen = now - timedelta(days=5)  # five days of the same line
+        await self._ticks(runner, check, 1)
+        escalated_at = self._line(store).last_escalated_at
+        await self._ticks(runner, check, 6)
+
+        line = self._line(store)
+        assert escalated_at is not None and line.escalated is True
+        assert line.last_escalated_at == escalated_at, "one step up the ladder, once"
+        assert line.state == FindingState.ACKNOWLEDGED and line.finding.urgency == "low"
+        runner._cognitive_triage.assert_not_awaited()
+        runner._send_telegram.assert_not_awaited()
 
 
 class TestFingerprintsUnchanged:
