@@ -89,6 +89,8 @@ def render_status_line(
 
 
 def with_tail_note(message: dict[str, Any], note: str) -> dict[str, Any]:
-    """A new message: ``message`` with one text block, ``note``, after its content blocks. Mutates nothing; the block
-    has no ``cache_control``."""
-    return {**message, "content": [*message["content"], {"type": "text", "text": note}]}
+    """A new message: ``message`` with one text block, ``note``, after its content (a string content becomes the one
+    text block the API reads it as). Mutates nothing; the block has no ``cache_control``."""
+    content = message["content"]
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    return {**message, "content": [*blocks, {"type": "text", "text": note}]}

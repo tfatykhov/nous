@@ -17,7 +17,7 @@ import time
 import unicodedata
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -57,6 +57,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.api.session_referent import ChannelLastReply
 from nous.api.smart_compress import add_cache_key, smart_compress
+from nous.api.status_line import with_tail_note
 from nous.api.tool_classes import refuse_denylist
 from nous.autonomy import tool_guard
 from nous.brain.brain import Brain
@@ -2768,6 +2769,7 @@ class AgentRunner:
         model_override: str | None = None,
         tool_choice: dict[str, Any] | None = None,
         call_context: CallContext | None = None,
+        tail_notes: Sequence[tuple[int, str]] | None = None,
     ) -> tuple[dict[str, Any], CallContext | None]:
         """Build Anthropic Messages API request payload, and ``call_context`` with this call's context estimate.
 
@@ -2781,6 +2783,11 @@ class AgentRunner:
         F036: system_prompt may be a dict[str, str] (tier -> text) when
         cache_split_system_prompt is enabled. Builds 3 system blocks with
         optimized cache_control placement.
+
+        Status line (``nous.api.status_line``): ``tail_notes`` is (index in ``messages``, text) of every line this run
+        has sent, each added after the content of its user message in this payload only, with no ``cache_control``.
+        The newest is on the last user message, after its marked block. None when the payload asks for thinking.
+        ``messages`` itself is never changed.
         """
         # Add cache_control to last user message for prompt caching
         cached_messages = list(messages)
@@ -2921,6 +2928,14 @@ class AgentRunner:
                     "budget_tokens": self._settings.thinking_budget,
                 }
 
+        # Status line: each line at its own user message, after the cache breakpoint of the newest. payload["messages"]
+        # is cached_messages, a copy: a replaced entry is a new dict, so the caller's messages stay as they were.
+        if tail_notes and "thinking" not in payload:
+            for index, note in tail_notes:
+                if 0 <= index < len(cached_messages) and cached_messages[index].get("role") == "user":
+                    if cached_messages[index].get("content"):  # an empty content was not marked: nothing to follow
+                        cached_messages[index] = with_tail_note(cached_messages[index], note)
+
         # Effort parameter ("high" is API default, so only send if different)
         # Supported by Sonnet 4.6, Opus 4.6 and Haiku 5+. Legacy Haiku (e.g. Haiku 4.5) does NOT support it.
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
@@ -3001,6 +3016,7 @@ class AgentRunner:
         is_background: bool = False,
         tool_choice: dict[str, Any] | None = None,
         call_context: CallContext | None = None,
+        tail_notes: Sequence[tuple[int, str]] | None = None,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
@@ -3013,6 +3029,8 @@ class AgentRunner:
         terminal tool call on the penultimate turn.
         F108: call_context says who makes the call (``_call_context``); it reaches a client that takes one, with
         this call's context estimate.
+        Status line: ``tail_notes`` (``_build_api_payload_and_context``), passed by ``_tool_loop`` only when it has
+        a line to send.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -3025,6 +3043,7 @@ class AgentRunner:
             model_override=model_override,
             tool_choice=tool_choice,
             call_context=call_context,
+            tail_notes=tail_notes,
         )
         if is_background:
             if self._settings.api_background_streaming_enabled:

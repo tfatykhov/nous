@@ -143,3 +143,10 @@ def test_with_tail_note_returns_new_objects_and_leaves_its_input_alone() -> None
     assert out["content"][:-1] == message["content"]
     assert out["content"][-1] == {"type": "text", "text": "[Run status.]"}
     assert out["role"] == "user"
+
+
+def test_with_tail_note_reads_a_string_content_as_one_text_block() -> None:
+    message = {"role": "user", "content": "Write the notes."}
+    out = with_tail_note(message, "[Run status.]")
+    assert message == {"role": "user", "content": "Write the notes."}
+    assert out["content"] == [{"type": "text", "text": "Write the notes."}, {"type": "text", "text": "[Run status.]"}]
