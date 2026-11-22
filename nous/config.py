@@ -1563,6 +1563,13 @@ class Settings(BaseSettings):
     goal_commands_enabled: bool = False
     # The most hours such a goal may run any command from its approval (also never past its deadline).
     goal_commands_max_hours: int = Field(default=24, ge=1, le=2160)
+    # Goal pacing (nous/goals/pacing.py): the owner may set a goal to work once a day, from a time of day in
+    # goals_timezone, and may change an existing goal's session settings from its page. Needs goals_enabled and a
+    # goals_timezone that is a known zone; without them a WARNING and it stays off. Default off.
+    goals_pacing_enabled: bool = False
+    # The one time zone of the once-a-day goals' days and times: an IANA name such as America/New_York. Read only
+    # with goals_pacing_enabled on. The day budget, job launches and quiet hours stay on the UTC day.
+    goals_timezone: str = Field(default="", max_length=64)
 
     # F115 autonomy settings: the owner changes the limits of background work on the dashboard (nous/autonomy). Each
     # change is a row of nous_system.autonomy_settings with a record in autonomy_settings_log, applied in place on
@@ -4452,6 +4459,27 @@ class Settings(BaseSettings):
                 "NOUS_GOALS_ENABLED=true needs %s; goals stay OFF.", " and ".join(missing)
             )
             object.__setattr__(self, "goals_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_goals_pacing_dependency(self) -> "Settings":
+        """Goal pacing counts a once-a-day goal's sessions by the day of one time zone: it needs goals and a zone that
+        loads. Runs after the goals validator, so goals forced off force this off too. The zone is not read while the
+        flag is off."""
+        if not self.goals_pacing_enabled:
+            return self
+        from nous.goals.pacing import zone
+
+        needed = {
+            "NOUS_GOALS_ENABLED=true": self.goals_enabled,
+            "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)": zone(self) is not None,
+        }
+        missing = [name for name, on in needed.items() if not on]
+        if missing:
+            logging.getLogger(__name__).warning(
+                "NOUS_GOALS_PACING_ENABLED=true needs %s; goal pacing stays OFF.", " and ".join(missing)
+            )
+            object.__setattr__(self, "goals_pacing_enabled", False)
         return self
 
     @model_validator(mode="after")

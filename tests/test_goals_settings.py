@@ -67,7 +67,72 @@ def test_compose_passes_every_goals_setting_with_a_real_default():
         assert f"- {name}=${{{name}:-{default}}}" in text, name
 
 
+def _reference_row(name: str, default: str) -> str:
+    """How the environment reference starts a setting's row: an empty default is written ``(empty)``."""
+    return f"| `{name}` | {f'`{default}`' if default else '(empty)'} |"
+
+
 def test_every_goals_setting_has_a_row_in_the_environment_reference():
     text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
     for name, default in DEFAULTS.items():
-        assert f"| `{name}` | `{default}` |" in text, name
+        assert _reference_row(name, default) in text, name
+
+
+# ---- goal pacing: once-a-day goals and the session settings form --------------------------------------------------
+
+GOALS_ON = {**ON, "subtask_enabled": True, "goals_enabled": True}
+# The pacing settings' reference rows. Their compose lines are checked once the names are in DEFAULTS.
+PACING_DEFAULTS = {"NOUS_GOALS_PACING_ENABLED": "false", "NOUS_GOALS_TIMEZONE": ""}
+
+
+def test_pacing_is_off_by_default_with_no_zone():
+    settings = Settings(_env_file=None)
+    assert settings.goals_pacing_enabled is False
+    assert settings.goals_timezone == ""
+
+
+def test_pacing_and_its_zone_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("NOUS_GOALS_PACING_ENABLED", "true")
+    monkeypatch.setenv("NOUS_GOALS_TIMEZONE", "America/New_York")
+    settings = Settings(_env_file=None, **GOALS_ON)
+    assert (settings.goals_pacing_enabled, settings.goals_timezone) == (True, "America/New_York")
+
+
+def test_pacing_with_a_known_zone_stays_on():
+    settings = Settings(_env_file=None, goals_pacing_enabled=True, goals_timezone="Asia/Kolkata", **GOALS_ON)
+    assert settings.goals_pacing_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("values", "named"),
+    [
+        ({"goals_timezone": "America/New_York", **ON}, "NOUS_GOALS_ENABLED=true"),
+        ({"goals_timezone": "", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
+        ({"goals_timezone": "Mars/Olympus", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
+        ({"goals_timezone": "../etc/passwd", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
+    ],
+)
+def test_pacing_needs_goals_and_a_known_zone_and_says_so(caplog, values, named):
+    with caplog.at_level(logging.WARNING):
+        settings = Settings(_env_file=None, goals_pacing_enabled=True, **values)
+    assert settings.goals_pacing_enabled is False
+    assert "NOUS_GOALS_PACING_ENABLED=true needs" in caplog.text
+    assert named in caplog.text
+
+
+def test_the_zone_is_never_read_while_pacing_is_off(caplog):
+    with caplog.at_level(logging.WARNING):
+        settings = Settings(_env_file=None, goals_timezone="Mars/Olympus", **GOALS_ON)
+    assert settings.goals_pacing_enabled is False
+    assert "NOUS_GOALS_TIMEZONE" not in caplog.text
+
+
+def test_a_zone_name_is_at_most_64_characters():
+    with pytest.raises(ValueError):
+        Settings(_env_file=None, goals_timezone="A" * 65)
+
+
+def test_every_pacing_setting_has_a_row_in_the_environment_reference():
+    text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
+    for name, default in PACING_DEFAULTS.items():
+        assert _reference_row(name, default) in text, name
