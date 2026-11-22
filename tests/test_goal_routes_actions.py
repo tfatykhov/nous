@@ -9,7 +9,7 @@ store accepts it."""
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -193,7 +193,8 @@ async def test_sessions_changes_the_settings_and_answers_the_goals_detail(db) ->
     assert answer["id"] == str(goal.id) and "sessions" in answer["actions"]
     assert (answer["sessions_per_day"], answer["stall_limit"], answer["quiet_hours_ok"]) == (1, 5, True)
     assert (answer["daily_at"], answer["preset"], answer["state"]) == ("09:30", "custom", "active")
-    assert answer["next_wake_at"] == goal.next_wake_at.isoformat()
+    # once a day changed on an active goal with no session open: its wake is now, so the driver decides again
+    assert datetime.fromisoformat(answer["next_wake_at"]) >= goal.next_wake_at
     assert answer["journal"][0]["actor"] == "owner"
     assert answer["journal"][0]["text"].startswith("Session settings: sessions per day 2 -> 1; ")
     off = await env.call("POST", f"/goals/{goal.id}/sessions", json={"daily": False})

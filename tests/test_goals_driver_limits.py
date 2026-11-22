@@ -1842,6 +1842,19 @@ async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_fac
     assert (await _goal(w, goal)).next_wake_at < before
 
 
+@pytest.mark.parametrize("to", ["as_often_as_allowed", "an_earlier_time"])
+async def test_a_paced_goal_changed_to_start_sooner_is_decided_again_at_the_next_tick(env_factory, to):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    later = _minute(local, hours=1)
+    await _set_goal(w, goal, daily_at_minute=later, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == _slot(zone, local, later)  # it waits for its time
+    minute = None if to == "as_often_as_allowed" else _minute(local, hours=-1)
+    await w.store.change_sessions(goal.id, changes={"daily_at_minute": minute}, actor="owner")
+    assert len((await w.driver.tick()).started) == 1
+
+
 # ---- once a day: a day whose session a hold kept past local midnight is owed --------------------------------------
 
 EIGHT_PM = 20 * 60

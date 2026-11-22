@@ -659,9 +659,12 @@ class GoalStore:
         is refused. A change of one of the first four makes the goal ``custom``. One owner ``state`` row says each
         change, old to new, in fixed words.
 
-        Only these columns are written: never the goal's state, its wake or its request, so a change never starts,
-        wakes, resumes or pauses anything. A session that is open runs on as it started; the driver reads the new
-        values at the next start, under the goal row's lock."""
+        Only these columns are written, and never the goal's state or its request, so a change never resumes or
+        pauses anything. The wake moves only when once a day or its time changes on an active goal with no open
+        session: to now, or to the end of the shortest gap after its newest session when that is later, so the driver
+        decides again at its next tick (a goal that no longer waits for tomorrow's time is not left waiting for it). A
+        session that is open runs on as it started; the driver reads the new values at the next start, under the goal
+        row's lock, and the session's close sets the wake."""
         _owner_only(actor, "change a goal's session settings")
         tz = pacing.zone(self._settings)
         if tz is None:
@@ -694,9 +697,21 @@ class GoalStore:
             values = dict(changed)
             if _SIZE_FIELDS & set(changed):
                 values["preset"] = CUSTOM
+            if "daily_at_minute" in changed and goal.state == "active" and await self._open_session(s, goal.id) is None:
+                gap = changed.get("min_interval_seconds", goal.min_interval_seconds)
+                values["next_wake_at"] = await self._after_gap(s, goal.id, now, gap)
             return await self._apply(
                 s, goal, LIVE_STATES, values, actor=actor, note=f"Session settings: {'; '.join(words)}."
             )
+
+    async def _after_gap(self, s: AsyncSession, goal_id: UUID, now: datetime, seconds: int) -> datetime:
+        """``now``, or the end of a gap of ``seconds`` after the goal's newest session ended when that is later."""
+        ended = await s.scalar(
+            select(func.max(GoalSession.ended_at)).where(
+                GoalSession.agent_id == self.agent_id, GoalSession.goal_id == goal_id
+            )
+        )
+        return now if ended is None else max(now, ended + timedelta(seconds=seconds))
 
     async def extend_deadline(self, ref: GoalRef, *, days: int, actor: str) -> Goal:
         """``days`` more. A draft's length (``deadline_days``, applied at approval) grows, up to 90 days. An approved
