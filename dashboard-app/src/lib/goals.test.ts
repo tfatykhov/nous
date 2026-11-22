@@ -7,7 +7,7 @@ import {
   refusalText, resumeLabel, sessionOutcomeWord, spanText, stateWord, type Action, type CreateForm, type GoalDetail, type GoalState, type LostChange, type PauseReason,
 } from './goals';
 import * as goals from './goals';
-import { DETAIL_KEYS, NOW, OPTIONS, SPEND_NOTE, goalDetail, goalRow } from './testing/goalFixtures';
+import { DETAIL_KEYS, NOW, OPTIONS, PACING, SPEND_NOTE, goalDetail, goalRow } from './testing/goalFixtures';
 
 // F114 goals PR 2: the Goals screen's words, rules and requests (no DOM).
 
@@ -62,7 +62,7 @@ describe('state words', () => {
 
 describe('actions', () => {
   it('the list of actions is the server order', () => {
-    expect([...ACTIONS]).toEqual(['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel', 'contained']);
+    expect([...ACTIONS]).toEqual(['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'sessions', 'deadline', 'note', 'cancel', 'contained']);
   });
 
   it('spending and ending actions say so before they act; pause and note ask nothing', () => {
@@ -394,5 +394,91 @@ describe('the tools a goal may use without asking (F115)', () => {
       expect(text).not.toMatch(GLYPH);
       expect(text).toMatch(/[.]$|^[A-Z][a-z]/);
     }
+  });
+});
+
+describe('goal pacing: how often a goal works, and changing its session settings', () => {
+  const options = OPTIONS({ pacing: PACING() });
+  const goal = goalDetail({ sessions_per_day: 4, min_interval_seconds: 3600, jobs_per_day: 2, quiet_hours_ok: false, stall_limit: 3, daily_at: null });
+  const start = () => goals.sessionsForm(goal, options);
+
+  it('the action is "Change how it works", it asks first, and its sentence says when it applies', () => {
+    expect(ACTION_TEXT.sessions.label).toBe('Change how it works');
+    expect(asksFirst('sessions')).toBe(true);
+    expect(confirmText('sessions', goal, { driverRunning: true })).toBe(goals.SESSIONS_NOTE);
+    expect(goals.SESSIONS_NOTE).toBe(
+      'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now. ' +
+        'If the goal already has that many sessions in a row that finished nothing, it is paused.',
+    );
+  });
+
+  it('how often, in words', () => {
+    expect(goals.howOftenText({ daily_at: '09:00' }, options)).toBe('Once a day, from 09:00 (America/New_York)');
+    expect(goals.howOftenText({ daily_at: null }, options)).toBe('As often as its limits allow');
+    expect(goals.dailyHint('America/New_York')).toBe('Time of day in America/New_York. It starts one session at that time each day.');
+  });
+
+  it('the form starts from the goal, with the gap in minutes and the default time', () => {
+    expect(start()).toEqual({
+      sessions_per_day: '4', gap_minutes: '60', jobs_per_day: '2', quiet_hours_ok: false, stall_limit: '3', daily: false, daily_at: '09:00',
+    });
+    expect(goals.sessionsForm({ ...goal, daily_at: '07:30' }, options)).toMatchObject({ daily: true, daily_at: '07:30' });
+  });
+
+  it('only what changed is sent', () => {
+    expect(goals.sessionsBody({ ...start(), sessions_per_day: '1' }, start())).toEqual({ sessions_per_day: 1 });
+    expect(goals.sessionsBody({ ...start(), gap_minutes: '90', stall_limit: '5' }, start())).toEqual({ min_interval_seconds: 5400, stall_limit: 5 });
+    expect(goals.sessionsBody({ ...start(), quiet_hours_ok: true, jobs_per_day: '0' }, start())).toEqual({ jobs_per_day: 0, quiet_hours_ok: true });
+    expect(goals.sessionsBody({ ...start(), daily: true }, start())).toEqual({ daily: true, daily_at: '09:00' });
+    expect(goals.sessionsBody({ ...start(), sessions_per_day: ' 04 ' }, start())).toEqual({});
+    const daily = goals.sessionsForm({ ...goal, daily_at: '07:30' }, options);
+    expect(goals.sessionsBody({ ...daily, daily_at: '08:15' }, daily)).toEqual({ daily: true, daily_at: '08:15' });
+    expect(goals.sessionsBody({ ...daily, daily: false }, daily)).toEqual({ daily: false });
+    expect(goals.sessionsBody({ ...daily }, daily)).toEqual({});
+  });
+
+  it('a gap that is not whole minutes is kept unless it is changed', () => {
+    const odd = goals.sessionsForm({ ...goal, min_interval_seconds: 90 }, options);
+    expect(odd.gap_minutes).toBe('1.5');
+    expect(goals.sessionsProblem({ ...odd, stall_limit: '4' }, odd, options)).toBeNull();
+    expect(goals.sessionsBody({ ...odd, stall_limit: '4' }, odd)).toEqual({ stall_limit: 4 });
+  });
+
+  it('a value out of its range is said in words, and nothing changed asks for a change', () => {
+    const problem = (over: Partial<goals.SessionsForm>) => goals.sessionsProblem({ ...start(), ...over }, start(), options);
+    expect(problem({})).toBe('Change a setting first.');
+    expect(problem({ sessions_per_day: '1' })).toBeNull();
+    expect(problem({ sessions_per_day: '25' })).toBe('Sessions per day must be at least 1 and at most 24.');
+    expect(problem({ sessions_per_day: 'x' })).toBe('Sessions per day must be a whole number.');
+    expect(problem({ gap_minutes: '0' })).toBe('The shortest gap between sessions must be at least 1 and at most 10,080 minutes.');
+    expect(problem({ gap_minutes: '10080' })).toBeNull();
+    expect(problem({ jobs_per_day: '21' })).toBe('Jobs per day must be at least 0 and at most 20.');
+    expect(problem({ stall_limit: '11' })).toBe('The stall limit must be at least 1 and at most 10.');
+    expect(problem({ stall_limit: '0' })).toBe('The stall limit must be at least 1 and at most 10.');
+    expect(problem({ daily: true, daily_at: '9:00' })).toBe('Type the time of day as HH:MM, from 00:00 to 23:59.');
+    expect(problem({ daily: true, daily_at: '24:00' })).toBe('Type the time of day as HH:MM, from 00:00 to 23:59.');
+    expect(problem({ daily: true, daily_at: '23:59' })).toBeNull();
+    const narrower = OPTIONS({ pacing: PACING({ stall_limit: { low: 2, high: 5 } }) });
+    expect(goals.sessionsProblem({ ...start(), stall_limit: '6' }, start(), narrower)).toBe('The stall limit must be at least 2 and at most 5.');
+  });
+
+  it('a lost answer is replaced on the owner\'s own row of the change', () => {
+    const lost: LostChange = { action: 'sessions', at: NOW, before: beforeChange(goal) };
+    const top = goal.journal[0].seq;
+    const row = (seq: number, actor: string, text: string) => ({ seq, session_n: null, kind: 'state', actor, text, evidence: [], created_at: null });
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'owner', 'Session settings: stall limit 3 -> 4.'), ...goal.journal] })).toBe(true);
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'chain', 'Session settings: stall limit 3 -> 4.'), ...goal.journal] })).toBe(false);
+    expect(changeLanded(lost, { ...goal, journal: [row(top + 1, 'owner', 'Budget: total 1 -> 2 tokens.'), ...goal.journal] })).toBe(false);
+    expect(changeLanded(lost, goal)).toBe(false);
+  });
+
+  it('the create form sends a time of day only for once a day, and checks it', () => {
+    const daily = { ...form(), daily: true, daily_at: '07:45' };
+    expect(createProblems(daily, options)).toEqual([]);
+    expect(createBody(daily)).toMatchObject({ daily_at: '07:45' });
+    expect('daily_at' in createBody({ ...daily, daily: false })).toBe(false);
+    expect('daily_at' in createBody(form())).toBe(false);
+    expect(createProblems({ ...daily, daily_at: '7:45' }, options)).toEqual(['Type the time of day as HH:MM, from 00:00 to 23:59.']);
+    expect(createProblems({ ...daily, daily: false, daily_at: '7:45' }, options)).toEqual([]);
   });
 });

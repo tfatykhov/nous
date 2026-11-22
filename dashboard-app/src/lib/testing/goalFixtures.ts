@@ -2,7 +2,7 @@
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
 import type {
   CommandsOptions, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords,
-  NewGoalTools,
+  NewGoalTools, PacingOptions,
 } from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
@@ -142,6 +142,15 @@ export const COMMANDS_NOW = (over: Partial<GoalCommandsNow> = {}): GoalCommandsN
   active: [
     { ref: 'G-0003', title: 'Ship the fix', until: '2026-11-15T20:00:00+00:00', says: 'G-0003 may run any command until 2026-11-15 20:00 UTC.' },
   ],
+  ...over,
+});
+
+/** Goal pacing, with its flag on: GET /goals/options `pacing` in its real shape. A goal's detail then also has
+ * `daily_at` (after `stall_limit`); pass it in `goalDetail`'s `over`. */
+export const PACING = (over: Partial<PacingOptions> = {}): PacingOptions => ({
+  zone: 'America/New_York',
+  stall_limit: { low: 1, high: 10 },
+  default_at: '09:00',
   ...over,
 });
 

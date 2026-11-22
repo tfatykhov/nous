@@ -5,7 +5,7 @@
   import {
     CHANNEL_HINT, DRAFT_NOTE, LIMIT_LABEL, PRESET_LABEL, PRESET_NAMES, createBody, createGoal, createProblems, formatNumber, limitFields,
     commandsMostHours, commandsProblem, commandsSentence, createRefusalText, newGoalTools, presetLine, typedNumber,
-    type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
+    HOW_OFTEN_TEXT, dailyHint, type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
   } from '../../lib/goals';
 
   // The form that makes a draft (POST /goals). A preset's numbers come from GET /goals/options, never from here;
@@ -14,10 +14,13 @@
   // tools on, the tools the goal may use without asking can be chosen here too; Create then asks once for the lot.
   // With goals that may run any command on, the owner may choose that here, and only here: the hours from approval,
   // the server's description, and the server's sentence typed (spaces around it aside); Create stays off until then.
+  // With goal pacing on, "How often should it work?" follows the sizes: as often as the size allows, or once a day from
+  // a time of the server's zone; the time is sent only for once a day.
   let { options, onCreated }: { options: GoalOptions; onCreated: (ref: string) => void } = $props();
 
   const presets = $derived(PRESET_NAMES.filter((name) => options.presets?.[name]));
   const startLimits = () => options.presets?.small;
+  const startAt = () => options.pacing?.default_at ?? '09:00';
   let form = $state<CreateForm>({
     title: '',
     objective: '',
@@ -27,6 +30,8 @@
     limits: limitFields(startLimits() ?? { total_budget: 0, day_budget: 0, deadline_days: 0, sessions_per_day: 0, min_interval_seconds: 0, jobs_per_day: 0, quiet_hours_ok: false }),
     quiet_hours_ok: startLimits()?.quiet_hours_ok ?? false,
     origin_channel: '',
+    daily: false,
+    daily_at: startAt(),
   });
   let chosen = $state<string[]>([]);
   let confirmingTools = $state(false);
@@ -52,6 +57,7 @@
     form.custom = !form.custom;
   }
 
+  const pacing = $derived(options.pacing ?? null);
   const pick = $derived(options.tools ?? null);
   const chosenRows = $derived((pick?.available ?? []).filter((o) => chosen.includes(o.tool)));
 
@@ -162,6 +168,27 @@
       {/if}
     </div>
 
+    {#if pacing}
+      <fieldset class="often" id="goal-new-often" disabled={sending}>
+        <legend>How often should it work?</legend>
+        <label class="check">
+          <input type="radio" name="goal-new-often" checked={!form.daily} onchange={() => { form.daily = false; }} />
+          {HOW_OFTEN_TEXT.often}
+        </label>
+        <label class="check">
+          <input type="radio" name="goal-new-often" checked={form.daily} onchange={() => { form.daily = true; }} />
+          {HOW_OFTEN_TEXT.daily}
+        </label>
+        {#if form.daily}
+          <div class="field narrow">
+            <label for="goal-new-daily-at">Time of day</label>
+            <input id="goal-new-daily-at" type="time" bind:value={form.daily_at} aria-describedby="goal-new-daily-hint" />
+            <span class="hint" id="goal-new-daily-hint">{dailyHint(pacing.zone)}</span>
+          </div>
+        {/if}
+      </fieldset>
+    {/if}
+
     {#if pick}
       <GoalTools {pick} bind:chosen disabled={sending} />
     {/if}
@@ -271,6 +298,10 @@
   .commands-body { display: flex; flex-direction: column; gap: 0.75rem; }
   .description { margin: 0; font-size: 0.8125rem; line-height: 1.5; color: var(--warn-text); overflow-wrap: anywhere; }
   .field.narrow { max-width: 12rem; }
+  .often { display: flex; flex-direction: column; align-items: flex-start; gap: 0.25rem; border: 0; margin: 0; padding: 0;
+    min-width: 0; }
+  .often .check { grid-column: auto; }
+  .often .field { margin-top: 0.25rem; }
   .sentence { margin: 0; font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
   @media (max-width: 768px) {
     .cards, .limits { grid-template-columns: minmax(0, 1fr); }
