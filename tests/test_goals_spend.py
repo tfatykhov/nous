@@ -84,3 +84,42 @@ async def test_goal_spent_is_the_sum_of_the_sessions_and_today_counts_from_the_u
         assert await spend.goal_spent(s, agent, goal.id) == (742, 42)
         assert await spend.goal_spent(s, agent, uuid.uuid4()) == (0, 0)
         assert await spend.goal_spent(s, "another-agent", goal.id) == (0, 0)
+
+
+async def test_sessions_started_today_counts_from_the_utc_day_or_from_the_instant_given(db):
+    """Without ``since`` the count starts at the UTC day of ``now``; goal pacing gives it the start of the local day."""
+    agent = f"goals-spend-{uuid.uuid4().hex[:8]}"
+    store = GoalStore(db, agent, Settings(_env_file=None, agent_id=agent, telegram_chat_id=""))
+    goal = await store.create(
+        title="Tidy", objective="Tidy the notes", done_when="Tidy", proposed_by="host", origin_channel="telegram:1"
+    )
+    async with db.session() as s:
+        midnight = (await s.execute(select(func.date_trunc("day", func.clock_timestamp(), "UTC")))).scalar_one()
+        for n, started in enumerate(
+            [midnight - timedelta(seconds=1), midnight, midnight + timedelta(hours=1)], start=1
+        ):
+            s.add(
+                GoalSession(
+                    agent_id=agent,
+                    goal_id=goal.id,
+                    n=n,
+                    trigger="timer",
+                    first_subtask_id=uuid.uuid4(),
+                    started_at=started,
+                    ended_at=started,
+                    outcome="no_step",
+                )
+            )
+        await s.commit()
+    now = midnight + timedelta(hours=2)
+    async with db.session() as s:
+
+        async def count(since=None, of=agent) -> int:
+            return await spend.sessions_started_today(s, of, goal.id, now=now, since=since)
+
+        assert await spend.sessions_started_today(s, agent, goal.id, now=now) == 2
+        assert await count() == 2
+        assert await count(midnight - timedelta(hours=5)) == 3
+        assert await count(midnight + timedelta(minutes=1)) == 1
+        assert await count(now) == 0
+        assert await count(midnight, of="another-agent") == 0

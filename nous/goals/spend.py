@@ -65,14 +65,17 @@ async def goal_spent(
     return int(total), int(today)
 
 
-async def sessions_started_today(session: AsyncSession, agent_id: str, goal_id: UUID, *, now: datetime) -> int:
-    """How many of the goal's sessions started since the start of the UTC day of ``now``."""
+async def sessions_started_today(
+    session: AsyncSession, agent_id: str, goal_id: UUID, *, now: datetime, since: datetime | None = None
+) -> int:
+    """How many of the goal's sessions started since the start of the UTC day of ``now``, or since ``since`` when it
+    is given (goal pacing: the start of the local day)."""
     return int(
         await session.scalar(
             select(func.count()).where(
                 GoalSession.agent_id == agent_id,
                 GoalSession.goal_id == goal_id,
-                GoalSession.started_at >= day_start(now),
+                GoalSession.started_at >= (day_start(now) if since is None else since),
             )
         )
         or 0
