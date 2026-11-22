@@ -75,6 +75,19 @@ def test_the_bounds_are_enforced(clean_env, field, bad):
         Settings(_env_file=None, **{field: bad})
 
 
+def test_the_docs_have_the_rows():
+    doc = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
+    for env, default in F116_DEFAULTS.items():
+        assert f"| `{env}` | `{default}` |" in doc, env
+
+
+def test_the_rows_follow_the_known_false_positives_row():
+    lines = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8").splitlines()
+    names = [line.split("`")[1] for line in lines if line.startswith("| `NOUS_HEARTBEAT_")]
+    at = names.index("NOUS_HEARTBEAT_KNOWN_FP_PATH")
+    assert names[at + 1 : at + 7] == list(F116_DEFAULTS)
+
+
 @pytest.mark.parametrize(
     ("field", "edge"),
     [
