@@ -1623,6 +1623,62 @@ export interface IntentionsData {
   continuation: boolean; window?: string; roots: IntentionRoot[]; metrics: IntentionMetrics | null;
 }
 
+// ── /dashboard/loop-numbers (what a finished job costs; nous/api/loop_numbers_dashboard.py) ──
+
+export interface LoopOutsideCheck {
+  confirmed: number;
+  unconfirmed: number;
+  taken_back: number;
+  unscored: number;
+  unconfirmed_share: number | null;
+  provisional: number;
+  flagged: number | null;
+}
+
+export interface LoopUnit {
+  done: number;
+  not_done: number;
+  tokens_in: { done: number; not_done: number };
+  tokens_out: { done: number; not_done: number };
+  tokens_per_finished: number | null;
+  output_per_finished: number | null;
+  done_tokens: { mean: number | null; p50: number | null };
+  by_final_outcome: Record<string, number>;
+  outside_check: LoopOutsideCheck;
+}
+
+export interface LoopGoalSessions {
+  sessions: number;
+  sessions_without_step: number;
+  steps_closed: number;
+  spent: number;
+  spent_without_step: number;
+  tokens_per_finished: number | null;
+  outside_check: null;
+}
+
+export interface LoopWindow {
+  from: string;
+  to: string;
+  truncated: boolean;
+  tasks: LoopUnit;
+  workflow_steps: LoopUnit;
+  goal_sessions: LoopGoalSessions;
+}
+
+export type LoopNumbersData =
+  | { enabled: false }
+  | {
+      enabled: true;
+      window_days: number;
+      counts_cached_input: false;
+      scorer_ran: boolean;
+      claims_recorded: boolean;
+      notes: string[];
+      current: LoopWindow;
+      previous: LoopWindow;
+    };
+
 // ── /dashboard/autonomy (task scores, the owner's attention, autonomy inventory) ──
 
 export interface ScoreStats {

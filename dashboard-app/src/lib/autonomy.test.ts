@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { bars, count, coverageFrom, fixBaseline, fixLatest, fixOutcome, fixState, pct, score, scorerHealth, settledSpan, SCORER_STALE_MIN } from './autonomy';
-import type { JobFixRow } from './types/api';
+import { bars, count, coverageFrom, fixBaseline, fixLatest, fixOutcome, fixState, loopRow, pct, score, scorerHealth, settledSpan, SCORER_STALE_MIN, tokens } from './autonomy';
+import type { JobFixRow, LoopWindow } from './types/api';
 
 const NOW = Date.parse('2026-10-17T21:00:00Z');
 const minsAgo = (m: number) => new Date(NOW - m * 60000).toISOString();
@@ -138,5 +138,40 @@ describe('check and fix', () => {
     expect(fixLatest(fix({ applied_at: minsAgo(30), settled_at: null }))).toBe(minsAgo(30));
     expect(fixLatest(fix({ started_at: null }))).toBeNull();
     expect(fixLatest(fix({ applied_at: minsAgo(30), stopped_at: minsAgo(5) }))).toBe(minsAgo(5));
+  });
+});
+
+describe('what a finished job costs', () => {
+  const unit = (over: Record<string, unknown> = {}) => ({
+    done: 4, not_done: 1, tokens_in: { done: 4000, not_done: 900 }, tokens_out: { done: 400, not_done: 60 },
+    tokens_per_finished: 1340, output_per_finished: 115, done_tokens: { mean: 1100, p50: 1100 }, by_final_outcome: {},
+    outside_check: { confirmed: 1, unconfirmed: 3, taken_back: 0, unscored: 0, unconfirmed_share: 0.75, provisional: 3, flagged: 0 },
+    ...over,
+  });
+  const w = {
+    from: 'a', to: 'b', truncated: false, tasks: unit(), workflow_steps: unit({ done: 0, tokens_per_finished: null }),
+    goal_sessions: { sessions: 3, sessions_without_step: 1, steps_closed: 2, spent: 9000, spent_without_step: 2500,
+      tokens_per_finished: 4500, outside_check: null },
+  } as LoopWindow;
+
+  it('reads a task row: finished, cost, output only, spent on unfinished work and the share', () => {
+    expect(loopRow('tasks', w)).toEqual({
+      key: 'tasks', label: 'Tasks', finished: 4, cost: 1340, output: 115, unfinished: 960, share: 0.75, measured: true,
+    });
+    expect(loopRow('workflow_steps', w)).toMatchObject({ label: 'Workflow steps', finished: 0, cost: null });
+  });
+
+  it('reads a goal session row by its closed steps, with no share', () => {
+    expect(loopRow('goal_sessions', w)).toEqual({
+      key: 'goal_sessions', label: 'Goal sessions', finished: 2, cost: 4500, output: null, unfinished: 2500, share: null,
+      measured: false,
+    });
+  });
+
+  it('formats tokens as whole numbers and nothing as a dash, never 0', () => {
+    expect(tokens(13400.4)).toBe('13,400');
+    expect(tokens(0)).toBe('0');
+    expect(tokens(null)).toBe('—');
+    expect(tokens(undefined)).toBe('—');
   });
 });

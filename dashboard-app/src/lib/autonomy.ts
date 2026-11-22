@@ -3,7 +3,7 @@
  * No DOM, no fetch — unit-tested in autonomy.test.ts.
  */
 import { fmtDay, fmtWhen, type Verdict } from './harness';
-import type { AutonomyData, JobFixRow } from './types/api';
+import type { AutonomyData, JobFixRow, LoopWindow } from './types/api';
 
 /** The nous-scorer service starts a pass every 15 minutes (docker-compose.yml). */
 export const SCORER_INTERVAL_MIN = 15;
@@ -62,6 +62,50 @@ export function pct(share: number | null | undefined): string {
 /** A count with thousands separators: 18,310. */
 export function count(n: number): string {
   return n.toLocaleString('en-US');
+}
+
+/** A token figure as a whole number with separators; "—" when there was nothing to divide (never 0). */
+export function tokens(n: number | null | undefined): string {
+  return n == null ? '—' : count(Math.round(n));
+}
+
+// ── What a finished job costs (GET /dashboard/loop-numbers) ──
+
+/** One row of the panel: a unit's numbers for one window. ``share`` is null when it is not measured or not known. */
+export interface LoopRow {
+  key: 'tasks' | 'workflow_steps' | 'goal_sessions';
+  label: string;
+  finished: number;
+  cost: number | null;
+  output: number | null;
+  unfinished: number;
+  share: number | null;
+  measured: boolean;
+}
+
+export const LOOP_UNITS = [
+  ['tasks', 'Tasks'],
+  ['workflow_steps', 'Workflow steps'],
+  ['goal_sessions', 'Goal sessions'],
+] as const;
+
+/**
+ * A unit's row. Tasks and workflow steps: finished units, tokens of every unit that ended over the finished ones,
+ * the output part of it, tokens spent on units that did not finish, and the share no one outside checked. A goal
+ * session finishes steps: its row counts closed steps and the tokens of sessions that closed none, and has no share.
+ */
+export function loopRow(key: LoopRow['key'], w: LoopWindow): LoopRow {
+  const label = LOOP_UNITS.find(([k]) => k === key)![1];
+  if (key === 'goal_sessions') {
+    const g = w.goal_sessions;
+    return { key, label, finished: g.steps_closed, cost: g.tokens_per_finished, output: null,
+      unfinished: g.spent_without_step, share: null, measured: false };
+  }
+  const u = w[key];
+  return {
+    key, label, finished: u.done, cost: u.tokens_per_finished, output: u.output_per_finished,
+    unfinished: u.tokens_in.not_done + u.tokens_out.not_done, share: u.outside_check.unconfirmed_share, measured: true,
+  };
 }
 
 /** A score (−1 to 1) to two decimals; "—" when absent. */
