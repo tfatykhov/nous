@@ -208,12 +208,14 @@ nous/
 │       ├── entry_gate.py # The chat routes and the inbound MCP server require the owner's or the proxy's secret (on /mcp, the owner's secret or the MCP key) under NOUS_OWNER_ENTRY_MODE (off, warn, enforce): the route and mount wrappers, the count by session class and the daily notice
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
+│       ├── loop_numbers_dashboard.py # GET /dashboard/loop-numbers data (NOUS_LOOP_NUMBERS_ENABLED): tokens per finished task, workflow step and goal session, and the share of finished ones no one outside the agent confirmed, for the window and the one before it; read-only, computed on read
 │       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
 │       ├── work_view_dashboard.py # F108 Phase 2: the Work view's and the model-call view's read-only endpoints (GET /dashboard/work/*: the sessions list, one session's trace, the patterns; GET /dashboard/model-calls: the list, one call's detail at /{call_id}, one stored text block's body at /{call_id}/blocks/{part}/{ord}): parameters and cursors, the SQL over agent_turn_log, tool_call_log, model_call_log, model_call_attempt, execution_ledger, heart.episodes and heart.subtasks (the model-call text through TextStore.describe and load_one), TOOL_LANES and WORK_KIND_GROUP
 │       ├── job_fix_dashboard.py # The scoreboard's job_fixes section: every check-and-fix record, read-only, Postgres-only
 │       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
+│       ├── status_line.py      # The status line (NOUS_STATUS_LINE_ENABLED): the kinds of turn that get it, its text (round, tool calls, changes so far) and the helper that adds it to the outgoing request only
 │       ├── session_referent.py # F110 PR 4: ChannelLastReply, the in-process store of each channel's last interactive reply that the runner hands to a new session's first turn (NOUS_SESSION_REFERENT_ENABLED)
 │       ├── preamble.py         # CLAUDE_CODE_PREAMBLE: system block 0 of every Messages request (one definition)
 │       ├── model_caps.py       # What a model accepts, by version: legacy Haiku, Haiku 5+ thinking disabled by default
