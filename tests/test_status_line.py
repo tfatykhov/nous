@@ -95,6 +95,9 @@ def test_the_outside_count_takes_external_and_irreversible_calls() -> None:
         ("learn_fact", {"content": "f"}, "success"),
     )
     assert changes_so_far(ledger) == "3, 2 sent outside"
+    ledger.record("learn_fact", {"content": "g"}, "ok", "success")
+    ledger.actions[-1].side_effect_type = "irreversible"  # no tool is classed so today; the line counts it outside
+    assert changes_so_far(ledger) == "4, 3 sent outside"
 
 
 def test_six_files_show_the_newest_five_and_how_many_more() -> None:

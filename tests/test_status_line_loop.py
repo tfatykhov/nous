@@ -263,6 +263,16 @@ async def test_the_numbers_follow_the_loop():
     assert notes[3].endswith("files written: notes/1.md, notes/3.md.]")
 
 
+async def test_the_tool_calls_count_each_call_of_a_round():
+    both = ApiResponse(
+        content=[*_tool_round(1).content, *_tool_round(2, "read_file").content],
+        stop_reason="tool_use",
+        usage={"input_tokens": 10, "output_tokens": 5},
+    )
+    api = await _loop(_runner(on=True), [both, _reply()])
+    assert "Round 2 of 10. Tool calls used: 2 of 20." in _notes(api.payloads[1])[-1]
+
+
 async def test_a_forced_report_call_carries_the_line():
     from nous.api.subtask_tools import (
         SUBMIT_FINAL_REPORT_SCHEMA,
@@ -331,6 +341,14 @@ async def test_a_request_that_asks_for_thinking_gets_no_line():
     off = await _loop(_runner(on=False, **over), list(SCRIPT))
     assert all("thinking" in p for p in on.payloads)
     assert [_dumps(p) for p in on.payloads] == [_dumps(p) for p in off.payloads]
+
+
+def test_the_loop_asks_for_no_line_when_the_request_asks_for_thinking():
+    """The loop's own test, before the builder's: a line it records as sent is one the request carries."""
+    runner = _runner(on=True)
+    ctx = ExecutionContext(kind="subtask", session_id=SESSION)
+    assert runner._status_note(ctx, 0, 10, 0, 20, None, thinking_off=True) is not None
+    assert runner._status_note(ctx, 0, 10, 0, 20, None, thinking_off=False) is None
 
 
 async def test_the_list_pruning_reads_never_holds_a_line():
