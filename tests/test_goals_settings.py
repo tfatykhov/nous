@@ -110,6 +110,7 @@ def test_pacing_with_a_known_zone_stays_on():
         ({"goals_timezone": "", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
         ({"goals_timezone": "Mars/Olympus", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
         ({"goals_timezone": "../etc/passwd", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
+        ({"goals_timezone": "America", **GOALS_ON}, "NOUS_GOALS_TIMEZONE (a time zone such as America/New_York)"),
     ],
 )
 def test_pacing_needs_goals_and_a_known_zone_and_says_so(caplog, values, named):

@@ -39,7 +39,7 @@ def zone(settings: Any) -> ZoneInfo | None:
         return None
     try:
         return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):  # not a zone, a malformed name, or a directory of zones
         return None
 
 

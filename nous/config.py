@@ -4473,7 +4473,7 @@ class Settings(BaseSettings):
 
         try:
             known = bool(self.goals_timezone) and ZoneInfo(self.goals_timezone) is not None
-        except (ZoneInfoNotFoundError, ValueError):
+        except (ZoneInfoNotFoundError, ValueError, OSError):  # not a zone, a malformed name, or a directory of zones
             known = False
         needed = {
             "NOUS_GOALS_ENABLED=true": self.goals_enabled,

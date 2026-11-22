@@ -179,6 +179,6 @@ def test_zone_is_none_unless_the_flag_is_on():
     assert pacing.zone(SimpleNamespace(goals_pacing_enabled=True, goals_timezone="America/New_York")) == NY
 
 
-@pytest.mark.parametrize("name", ["", "Mars/Olympus", "../etc/passwd", "/etc/localtime"])
+@pytest.mark.parametrize("name", ["", "Mars/Olympus", "../etc/passwd", "/etc/localtime", "America", "Etc"])
 def test_zone_is_none_for_a_name_that_is_not_a_zone(name):
     assert pacing.zone(SimpleNamespace(goals_pacing_enabled=True, goals_timezone=name)) is None
