@@ -1,6 +1,6 @@
 # F116: Stale "Pending action" / "Unresolved commitment" findings
 
-**Status:** PR 1 (this page and migration 119, `heart.pending_resolutions`; no behaviour change) and PR 2 (L1, L4 and L3a in `nous/heartbeat/pending_filter.py`, each with its own mode, default `off`; see [5.6](#56-pr-2-as-built-l1-l4-and-l3a)) in review; PR 1 supersedes #952. PR 3 to PR 6 not started; see [Rollout](#53-rollout). Every layer ships behind its own setting, default `off`. Design approved by Tim on 2026-11-21 with all the defaults in [Decisions](#9-decisions-tim-2026-11-21).
+**Status:** PR 1 (this page and migration 119, `heart.pending_resolutions`; no behaviour change) merged as #953. PR 2 (L1, L4 and L3a in `nous/heartbeat/pending_filter.py`, each with its own mode, default `off`; see [5.6](#56-pr-2-as-built-l1-l4-and-l3a)) in review. PR 3 to PR 6 not started; see [Rollout](#53-rollout). Every layer ships behind its own setting, default `off`. Design approved by Tim on 2026-11-21 with all the defaults in [Decisions](#9-decisions-tim-2026-11-21).
 **Base:** code references are at `origin/main` `bf260047` (re-checked 2026-11-21 when this page was written); lines drift, re-grep at build.
 **Related:** Issue #369 (closed), F047 actionability, F034.1/F034.4 finding lifecycle, [F111](F111-obligation-ledger.md) obligation ledger, PR #711 (known false positives), PR #503 / #786 (shipped parts of #369).
 
