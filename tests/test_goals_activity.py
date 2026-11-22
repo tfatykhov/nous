@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from goal_activity_support import JOB, RUNNER, SECRET, T0, at, bash_input, intent_sid, world_of
+from sqlalchemy import text
 
 from nous.api import work_view_dashboard
 from nous.goals import activity, spend
@@ -106,8 +107,17 @@ async def test_a_workflow_waiting_on_a_wait_step_says_what_for_in_identifiers_on
     assert found["current"]["waiting_for"] == expected
     assert found["current"]["node"] == {"name": "wait_for_job", "type": "wait", "status": "awaiting_check"}
     said = json.dumps(found)
-    for text in ("then email the notes", "owner/private-repo", "the-private-plan", "someone"):
-        assert text not in said
+    for words in ("then email the notes", "owner/private-repo", "the-private-plan", "someone"):
+        assert words not in said
+
+
+async def test_a_steps_name_is_redacted(db):
+    w = await world_of(db)
+    s = await w.session(first_status="completed")
+    await w.workflow(s.root_id, started=at(1), nodes=((f"push {SECRET}", "subtask", "running", at(2), None),))
+    found = await w.read()
+    assert SECRET not in json.dumps(found)
+    assert found["current"]["node"]["name"].startswith("push ") and "REDACTED" in found["current"]["node"]["name"]
 
 
 async def test_a_workflow_with_a_running_step_besides_a_wait_is_running(db):
@@ -318,6 +328,25 @@ async def test_jobs_started_this_session_count_each_launch_and_agree_with_the_da
             session, w.agent, w.goal_id, SimpleNamespace(tool_call_log_enabled=True), now=at(60)
         )
     assert today == found["jobs"]["launched"]
+
+
+async def test_the_launch_rows_read_are_capped_newest_first(db, monkeypatch):
+    monkeypatch.setattr(activity, "LAUNCH_ROWS_CAP", 1)
+    w = await world_of(db)
+    s = await w.session()
+    launch = bash_input(f"{RUNNER} launch nous --prompt-file /workspace/notes/p.md")
+    await w.call(at(1), session_id=intent_sid(s.root_id), input_text=launch)
+    await w.call(at(2), session_id=intent_sid(s.root_id), input_text=launch)
+    assert (await w.read())["jobs"] == {"launched": 1, "last_launch_at": at(2).isoformat()}
+
+
+async def test_the_read_runs_under_its_statement_limit(db):
+    w = await world_of(db)
+    await w.session()
+    async with db.session() as session:
+        await activity.read_activity(session, w.agent, w.goal_id, log_enabled=True)
+        limit = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
+    assert limit == activity.STATEMENT_TIMEOUT == "5s"
 
 
 async def test_no_stored_text_of_a_call_leaves_the_read(db):
