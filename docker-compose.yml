@@ -112,6 +112,7 @@ services:
       - NOUS_GOAL_COMMANDS_MAX_HOURS=${NOUS_GOAL_COMMANDS_MAX_HOURS:-24}
       - NOUS_GOALS_PACING_ENABLED=${NOUS_GOALS_PACING_ENABLED:-false}
       - NOUS_GOALS_TIMEZONE=${NOUS_GOALS_TIMEZONE:-}
+      - NOUS_GOAL_ACTIVITY_ENABLED=${NOUS_GOAL_ACTIVITY_ENABLED:-false}
       # F099 kill switches, both on by default: bash for internal_only turns (lineage_bash_allowed), and in it
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}
