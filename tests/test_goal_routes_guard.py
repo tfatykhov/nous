@@ -31,6 +31,7 @@ READS = {
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
     "/goals/G-0001/tools": {"enabled": False},
+    "/goals/G-0001/activity": {"enabled": False},
     "/goals/commands": {"enabled": False, "allowed": False, "active": []},
 }
 GOAL_ROUTE_SET = {
@@ -40,6 +41,7 @@ GOAL_ROUTE_SET = {
     ("GET", "/goals/commands"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
+    ("GET", "/goals/{ref}/activity"),
     ("PUT", "/goals/{ref}/tools/{tool}"),
     ("DELETE", "/goals/{ref}/tools/{tool}"),
     *{

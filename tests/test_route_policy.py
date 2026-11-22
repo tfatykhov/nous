@@ -137,6 +137,8 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("GET", "/goals/{ref}/tools"): OWNER,
     ("PUT", "/goals/{ref}/tools/{tool}"): OWNER,
     ("DELETE", "/goals/{ref}/tools/{tool}"): OWNER,
+    # What a goal's session is doing now (with its flag off the route answers that the panel is off)
+    ("GET", "/goals/{ref}/activity"): OWNER,
     # A goal that may run any command: the banner's read and the return to contained
     ("GET", "/goals/commands"): OWNER,
     ("POST", "/goals/{ref}/contained"): OWNER,

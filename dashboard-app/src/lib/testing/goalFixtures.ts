@@ -163,6 +163,12 @@ export const DETAIL_KEYS = [
   'plan', 'sessions', 'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
 ];
 
+/** The keys of a real GET /goals/{ref}/activity answer with the panel on, in order. */
+export const ACTIVITY_KEYS = [
+  'enabled', 'activity_enabled', 'log_enabled', 'session', 'phase', 'current', 'running_count', 'last_call_at', 'calls',
+  'jobs', 'recent', 'work_sessions',
+];
+
 // F115 per-goal tools: GET /goals/{ref}/tools in its real shape (nous/api/goal_routes.py `tools_payload`), with the
 // server's own sentences (nous/goals/grants.py) and made-up ids. Refresh it when the route's answer changes.
 export const LEAD =
