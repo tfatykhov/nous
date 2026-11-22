@@ -41,12 +41,12 @@ MAX_DETAIL_CHARS = 200
 Exists = Callable[[str], bool | None]
 
 # A sentence ends at a full stop followed by a space or the end, at ! or ?, at a line break or at a bullet.
-_SENTENCE_END = re.compile(r"(?<=\.)(?:\s+|$)|[!?\n\r]+|\s*•\s*")
-_BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
+_SENTENCE_END = re.compile(r"(?<=\.)(?:\s+|$)|[!?\n\r]+|\s*\u2022\s*")
+_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
 _WRITE_VERB = re.compile(r"\b(?:created|wrote|written|saved|generated|exported)\b", re.IGNORECASE)
 _HEDGE = re.compile(
     r"\b(?:no|not|never|will|would|should|could|may|might|need|needs|to\s+be|if|unless|instead"
-    r"|removed|deleted|moved|renamed|cannot)\b|n['’]t\b",
+    r"|removed|deleted|moved|renamed|cannot)\b|n['\u2019]t\b",
     re.IGNORECASE,
 )
 _BACKTICKED = re.compile(r"`([^`\s]+)`")
@@ -226,7 +226,7 @@ def effects_all_failed(text: str, evidence: Sequence[Evidence]) -> list[Finding]
     effects = [item for item in evidence if _is_effect_call(item)]
     if not effects or any(item.ok for item in effects):
         return []
-    if _FAILURE_WORDS.search(text.replace("’", "'")):
+    if _FAILURE_WORDS.search(text.replace("\u2019", "'")):
         return []
     detail = f"{len(effects)} attempts to change something all failed or were refused; the report does not say so"
     return [Finding(EFFECTS_ALL_FAILED, detail[:MAX_DETAIL_CHARS])]

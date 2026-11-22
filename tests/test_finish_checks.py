@@ -296,7 +296,7 @@ def test_three_failed_calls_are_counted():
         "unable",
         "could not",
         "couldn't",
-        "couldn’t",
+        "couldn\u2019t",
         "cannot",
         "can't",
         "can not",
