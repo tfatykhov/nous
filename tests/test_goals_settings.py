@@ -83,8 +83,6 @@ def test_every_goals_setting_has_a_row_in_the_environment_reference():
 # ---- goal pacing: once-a-day goals and the session settings form --------------------------------------------------
 
 GOALS_ON = {**ON, "subtask_enabled": True, "goals_enabled": True}
-# The pacing settings' reference rows. Their compose lines are checked once the names are in DEFAULTS.
-PACING_DEFAULTS = {"NOUS_GOALS_PACING_ENABLED": "false", "NOUS_GOALS_TIMEZONE": ""}
 
 
 def test_pacing_is_off_by_default_with_no_zone():
@@ -133,9 +131,3 @@ def test_the_zone_is_never_read_while_pacing_is_off(caplog):
 def test_a_zone_name_is_at_most_64_characters():
     with pytest.raises(ValueError):
         Settings(_env_file=None, goals_timezone="A" * 65)
-
-
-def test_every_pacing_setting_has_a_row_in_the_environment_reference():
-    text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
-    for name, default in PACING_DEFAULTS.items():
-        assert _reference_row(name, default) in text, name
