@@ -4452,19 +4452,27 @@ class AgentRunner:
         ledger: ExecutionLedger | None,
         *,
         thinking_off: bool,
+        forced: bool = False,
     ) -> str | None:
         """This round's status line (``nous.api.status_line``), or None: the setting is off, the turn's kind is not
         one that gets it (``STATUS_LINE_KINDS``), or the request asks for thinking (``thinking_off`` is the loop's,
-        the same test the request builder applies)."""
+        the same test the request builder applies). ``forced``: this call is forced to submit the final report.
+        A line that cannot be written is left out of this round only (a WARNING with the exception's class); the
+        lines sent before it are still sent."""
         if not self._settings.status_line_enabled or ctx.kind not in STATUS_LINE_KINDS or not thinking_off:
             return None
-        return render_status_line(
-            round_number=turns + 1,
-            max_rounds=max_turns,
-            tool_calls=tool_calls,
-            max_tool_calls=max_tool_calls,
-            ledger=ledger,
-        )
+        try:
+            return render_status_line(
+                round_number=turns + 1,
+                max_rounds=max_turns,
+                tool_calls=tool_calls,
+                max_tool_calls=max_tool_calls,
+                ledger=ledger,
+                forced=forced,
+            )
+        except Exception as exc:  # the class only: the text may carry a model-written path
+            logger.warning("Status line: not written this round (%s)", type(exc).__name__)
+            return None
 
     async def _tool_loop(
         self,
@@ -4656,7 +4664,14 @@ class AgentRunner:
             # Status line: this round's line goes after the last message (the newest user message), the earlier
             # ones stay where they were sent. Passed only when there is one, as tool_choice above.
             note = self._status_note(
-                ctx, turns, max_turns, total_tool_calls, max_tool_calls, ledger, thinking_off=thinking_off
+                ctx,
+                turns,
+                max_turns,
+                total_tool_calls,
+                max_tool_calls,
+                ledger,
+                thinking_off=thinking_off,
+                forced=tool_choice_arg is not None,
             )
             if note is not None:
                 sent_notes.append((len(messages) - 1, note))

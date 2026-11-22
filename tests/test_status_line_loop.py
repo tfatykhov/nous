@@ -194,7 +194,7 @@ async def test_off_no_call_carries_a_line_and_no_call_gets_the_keyword():
     api = await _loop(runner, list(SCRIPT))
     assert len(api.payloads) == 4
     assert all(_notes(p) == [] for p in api.payloads)
-    assert all("tail_note" not in keys for keys in seen)
+    assert seen and all("tail_notes" not in keys for keys in seen)
 
 
 @pytest.mark.parametrize("kind", ["interactive", "heartbeat_check", "background", "dag_summary"])
@@ -273,7 +273,20 @@ async def test_the_tool_calls_count_each_call_of_a_round():
     assert "Round 2 of 10. Tool calls used: 2 of 20." in _notes(api.payloads[1])[-1]
 
 
-async def test_a_forced_report_call_carries_the_line():
+FORCED_LINE = (
+    "[Run status. This call must be the final report. "
+    "Changes so far in this task: 2; files written: notes/1.md, notes/2.md.]"
+)
+
+
+@pytest.mark.parametrize(
+    ("max_turns", "max_tool_calls"),
+    [(4, 20), (10, 4)],
+    ids=["by_rounds", "by_tool_calls"],
+)
+async def test_a_forced_report_call_says_it_must_be_the_final_report_and_names_no_budget(max_turns, max_tool_calls):
+    """The report is forced from the last two rounds by count, or from two tool calls before the limit: that call's
+    line says so, and the lines before it stay as they were sent."""
     from nous.api.subtask_tools import (
         SUBMIT_FINAL_REPORT_SCHEMA,
         SubtaskReportCollector,
@@ -295,15 +308,43 @@ async def test_a_forced_report_call_carries_the_line():
         usage={"input_tokens": 1, "output_tokens": 1},
     )
     api = await _loop(
-        _runner(on=True, max_turns=4),
+        _runner(on=True, max_turns=max_turns),
         [_tool_round(1), _tool_round(2), report],
+        max_tool_calls=max_tool_calls,
         is_subtask=True,
         extra_tools=extra,
         force_tool_on_penultimate="submit_final_report",
     )
-    forced = [p for p in api.payloads if "tool_choice" in p]
-    assert len(forced) == 1 and "Round 3 of 4." in _notes(forced[0])[-1]
-    assert collector.is_set()
+    assert collector.is_set() and len(api.payloads) == 3
+    first, second, forced = api.payloads
+    assert "tool_choice" in forced and not any("tool_choice" in p for p in (first, second))
+    assert _notes(forced)[-1] == FORCED_LINE
+    assert _notes(forced)[:-1] == _notes(second)  # the earlier lines, unchanged
+    assert "Round 2 of" in _notes(second)[-1]
+
+
+async def test_a_line_that_cannot_be_written_is_left_out_of_that_round_only(monkeypatch, caplog):
+    import nous.api.runner as runner_module
+
+    real = runner_module.render_status_line
+    calls = 0
+
+    def flaky(**kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("a path the line could not take")
+        return real(**kwargs)
+
+    monkeypatch.setattr(runner_module, "render_status_line", flaky)
+    with caplog.at_level("WARNING", logger="nous.api.runner"):
+        api = await _loop(_runner(on=True), list(SCRIPT))
+    assert len(api.payloads) == 4  # the run went on
+    assert [len(_notes(p)) for p in api.payloads] == [1, 1, 2, 3]
+    assert _notes(api.payloads[1]) == _notes(api.payloads[0])  # round 2: no line, round 1's still sent
+    assert "Round 3 of 10." in _notes(api.payloads[2])[-1]
+    warnings = [r.getMessage() for r in caplog.records if "status line" in r.getMessage().lower()]
+    assert warnings and all("ValueError" in w and "a path the line" not in w for w in warnings)
 
 
 async def test_the_closing_call_after_the_tool_call_limit_adds_no_line_and_keeps_the_earlier_ones():

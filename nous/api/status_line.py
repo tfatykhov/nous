@@ -70,10 +70,15 @@ def render_status_line(
     tool_calls: int,
     max_tool_calls: int | None,
     ledger: ExecutionLedger | None,
+    forced: bool = False,
 ) -> str:
     """The line for the call of round ``round_number`` (1-based) of a run of ``max_rounds``. A run is one ``run_turn``:
     a continuation may get a follow-up run, so the line never says the task's last. Rounds and tool calls are this
-    run's; the changes are the whole session's ledger, which a retried attempt shares."""
+    run's; the changes are the whole session's ledger, which a retried attempt shares. ``forced``: this call must
+    submit the final report (the runner forces that tool), so the line says that and names no rounds or tool calls."""
+    changes = [] if ledger is None else [f"Changes so far in this task: {changes_so_far(ledger)}."]
+    if forced:
+        return "[" + " ".join(["Run status. This call must be the final report.", *changes]) + "]"
     calls = f"Tool calls used: {tool_calls}" + (f" of {max_tool_calls}." if max_tool_calls else ".")
     if round_number >= max_rounds:
         limit = "This is the last round of this run that can call tools; after it comes one reply with no tools."
@@ -83,10 +88,7 @@ def render_status_line(
         )
     else:
         limit = f"After round {max_rounds} this run ends with one reply with no tools."
-    parts = [f"Run status. Round {round_number} of {max_rounds}.", calls, limit]
-    if ledger is not None:
-        parts.append(f"Changes so far in this task: {changes_so_far(ledger)}.")
-    return "[" + " ".join(parts) + "]"
+    return "[" + " ".join([f"Run status. Round {round_number} of {max_rounds}.", calls, limit, *changes]) + "]"
 
 
 def with_tail_note(message: dict[str, Any], note: str) -> dict[str, Any]:

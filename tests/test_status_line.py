@@ -60,6 +60,16 @@ def test_the_last_round_says_so() -> None:
     )
 
 
+@pytest.mark.parametrize("round_number", [2, 4])
+def test_a_forced_report_call_says_so_and_names_no_budget(round_number) -> None:
+    counts = {"round_number": round_number, "max_rounds": 4, "tool_calls": 18, "max_tool_calls": 20, "forced": True}
+    ledger = _ledger(("write_file", {"path": "a.md"}, "success"))
+    assert render_status_line(**counts, ledger=ledger) == (
+        "[Run status. This call must be the final report. Changes so far in this task: 1; files written: a.md.]"
+    )
+    assert render_status_line(**counts, ledger=None) == "[Run status. This call must be the final report.]"
+
+
 @pytest.mark.parametrize("limit", [None, 0])
 def test_without_a_tool_call_limit(limit) -> None:
     line = render_status_line(round_number=1, max_rounds=10, tool_calls=0, max_tool_calls=limit, ledger=_ledger())
