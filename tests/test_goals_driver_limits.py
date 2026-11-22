@@ -1369,6 +1369,37 @@ async def test_sessions_per_day_holds_the_start(env_factory):  # noqa: F811
     assert (await _goal(w, goal)).next_wake_at == await _next_utc_midnight(w)
 
 
+@pytest.mark.parametrize(
+    "pacing",
+    [{}, {"goals_pacing_enabled": True, "goals_timezone": "Etc/GMT-14"}],
+    ids=["flag_off_with_a_time_set", "flag_on_with_no_time_set"],
+)
+async def test_without_pacing_a_goal_runs_as_often_as_its_limits_allow(env_factory, pacing):  # noqa: F811
+    """With pacing off, a time written into the row by hand is never read; with it on, a goal with no time runs as
+    before: its sessions count against sessions_per_day on the UTC day, the day's limit wakes it at the next UTC
+    midnight, a close wakes it the interval later, and its first task says nothing of a time of day."""
+    w = await _world(env_factory, **pacing)
+    goal = await _active(w)
+    assert goal.sessions_per_day == 2 and goal.daily_at_minute is None
+    if not pacing:
+        await _set_goal(w, goal, daily_at_minute=0)
+    await _closed(w, goal, ["step_closed"])  # one session today
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert len((await w.driver.tick()).started) == 1  # the day's second
+    session = (await _sessions(w, goal))[-1]
+    async with w.db.session() as s:
+        task = (await s.get(Subtask, session.first_subtask_id)).task
+    assert "one session a day" not in task and "Today is" not in task
+    await _finish(w, await w.env.heart.intentions.get_for_source("subtask", session.first_subtask_id))
+    assert (await w.driver.tick()).closed == 1
+    closed = await _session(w, session.id)
+    after = await _goal(w, goal)
+    assert after.next_wake_at == closed.ended_at + timedelta(seconds=2 * goal.min_interval_seconds)
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert (await _goal(w, goal)).next_wake_at == await _next_utc_midnight(w)
+
+
 async def _quiet_now(w: SimpleNamespace) -> dict:
     hour = (await _db_now(w)).hour
     return {"heartbeat_quiet_start": hour, "heartbeat_quiet_end": (hour + 2) % 24}
