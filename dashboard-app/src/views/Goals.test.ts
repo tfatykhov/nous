@@ -467,7 +467,7 @@ describe('Goals: one column', () => {
 
 describe('Goals: the source', () => {
   const read = (f: string) => markupOf(readFileSync(join(__dirname, f), 'utf-8'));
-  it.each(['Goals.svelte', 'goals/GoalPane.svelte', 'goals/NewGoal.svelte'])('%s renders text only and builds its links', (f) => {
+  it.each(['Goals.svelte', 'goals/GoalPane.svelte', 'goals/NewGoal.svelte', 'goals/GoalActivity.svelte', 'goals/Fold.svelte'])('%s renders text only and builds its links', (f) => {
     const src = read(f);
     expect(src).not.toMatch(/\{@html/);
     expect(src).not.toMatch(/href="#\//);
