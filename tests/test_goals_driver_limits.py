@@ -1760,12 +1760,14 @@ async def test_run_now_before_the_time_starts_and_uses_up_the_day(env_factory): 
 async def test_a_paced_goal_held_by_its_day_budget_still_wakes_at_the_next_utc_midnight(env_factory):  # noqa: F811
     w, zone, local = await _paced(env_factory)
     goal = await _active(w)
+    midnight = await _next_utc_midnight(w)
     minute = _minute(local, hours=-1)
+    if _slot(zone, local, minute, days=1) == midnight:  # tomorrow's time is the next UTC midnight: take another
+        minute -= 1
     await _set_goal(w, goal, daily_at_minute=minute)
     await _closed(w, goal, ["step_closed"], spent=goal.day_budget)
     await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
     assert (await w.driver.tick()).started == ()
-    midnight = await _next_utc_midnight(w)
     assert midnight != _slot(zone, local, minute, days=1)
     assert (await _goal(w, goal)).next_wake_at == midnight
 
