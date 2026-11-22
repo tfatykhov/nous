@@ -344,7 +344,8 @@
         {:else if paneDetail}
           {#if readError}<p class="read-error" role="alert">{readError}</p>{/if}
           {#key paneDetail.id}
-            <GoalPane goal={paneDetail} {options} {halted} {now} {journalAll} onChanged={() => store.refresh()} onMore={showMore} />
+            <GoalPane goal={paneDetail} {options} {halted} {now} {journalAll} onChanged={() => store.refresh()} onMore={showMore}
+              tick={$store.lastUpdated} />
           {/key}
         {:else if missing}
           <section class="card" role="status">

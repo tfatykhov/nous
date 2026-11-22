@@ -3,7 +3,10 @@
   import { Button } from '../../lib/ui/button';
   import { fmtUtc } from '../../lib/harness';
   import GoalTools from './GoalTools.svelte';
+  import GoalActivity from './GoalActivity.svelte';
+  import Fold from './Fold.svelte';
   import {
+    FOLD_DEFAULTS, sessionsSummary,
     ACTION_TEXT, DRIVER_OFF_TEXT, MODE_WORDS, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
     deadlineProblem, typedNumber,
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
@@ -20,6 +23,10 @@
   // words and its one later change, Return to contained, which asks nothing first (it narrows what the goal can do).
   // With the server's goal pacing on, Change how it works opens the goal's session settings here, as the budget form
   // does, and sends only what changed.
+  // With the server's goal activity panel on (`options.activity`), what the goal is doing now comes under the header
+  // (and the run-any-command card), then the journal and the note box, then the plan, spend, sessions, charter,
+  // limits and tools, each a folding section; the header card, which holds every confirmation, never folds. `tick`
+  // is the page poll's last good read: the panel reads on it while a session is open.
   // Every text a session wrote is a text node. Ids of this goal's controls are
   // `goal-<letter>.<ref>[.<action>]`: a ref has no ".", so none can take another's.
   let {
@@ -30,6 +37,7 @@
     journalAll,
     onChanged,
     onMore,
+    tick: pollTick = null,
   }: {
     goal: GoalDetail;
     options: GoalOptions;
@@ -38,7 +46,10 @@
     journalAll: boolean;
     onChanged: () => Promise<void>;
     onMore: () => void;
+    tick?: number | null;
   } = $props();
+
+  let folding = $derived(options.activity === true);
 
   type Note = { text: string; ok: boolean; expect?: string };
   let busy = $state<Action | null>(null);
@@ -250,6 +261,110 @@
   {/if}
 {/snippet}
 
+<!-- What each section holds, under its heading: in a card of its own, or in a folding section. -->
+{#snippet charterPart()}
+  <dl class="facts">
+    <dt>Objective</dt><dd class="text">{goal.objective}</dd>
+    <dt>What done looks like</dt><dd class="text">{goal.done_when}</dd>
+    <dt>Questions and reports go to</dt>
+    <dd>{goal.origin_channel ?? (options.has_default_channel ? 'The default chat' : 'Nowhere: no channel is set')}</dd>
+    <dt>Proposed by</dt><dd>{proposerWord(goal.proposed_by)}</dd>
+  </dl>
+{/snippet}
+
+{#snippet limitsPart()}
+  <dl class="facts">
+    <dt>Total budget</dt><dd>{formatTokens(goal.total_budget)}</dd>
+    <dt>Day budget</dt><dd>{formatTokens(goal.day_budget)}</dd>
+    <dt>Deadline</dt><dd>{goal.deadline_at ? `${fmtUtc(goal.deadline_at)}. ${deadlineText(goal, now)}` : `${goal.deadline_days} days from approval`}</dd>
+    {#if goal.daily_at !== undefined}<dt>How often</dt><dd>{howOftenText(goal, options)}</dd>{/if}
+    <dt>Sessions per day</dt><dd>{sessionsPerDayText(goal)}</dd>
+    <dt>Shortest gap between sessions</dt><dd>{intervalText(goal.min_interval_seconds)}</dd>
+    <dt>Job launches per day</dt><dd>{goal.jobs_per_day}</dd>
+    <dt>Quiet hours</dt><dd>{goal.quiet_hours_ok ? 'Sessions may start in quiet hours' : 'No session starts in quiet hours'}</dd>
+    <dt>Stall limit</dt><dd>{goal.stall_limit} sessions</dd>
+    <dt>Mode</dt><dd>{MODE_WORDS[goal.mode] ?? goal.mode}</dd>
+  </dl>
+{/snippet}
+
+{#snippet spendPart()}
+  <div class="spend">
+    <span>Today</span>
+    <span class="meter" aria-hidden="true"><span class="fill" class:full={goal.spent_today >= goal.day_budget} style:width="{spentPercent(goal.spent_today, goal.day_budget)}%"></span></span>
+    <span>{formatNumber(goal.spent_today)} of {formatTokens(goal.day_budget)}</span>
+    <span>In all</span>
+    <span class="meter" aria-hidden="true"><span class="fill" class:full={goal.spent_total >= goal.total_budget} style:width="{spentPercent(goal.spent_total, goal.total_budget)}%"></span></span>
+    <span>{formatNumber(goal.spent_total)} of {formatTokens(goal.total_budget)}</span>
+  </div>
+  <p class="hint">{goal.spend_note}</p>
+{/snippet}
+
+{#snippet planPart()}
+  {#if goal.plan.length === 0}
+    <p class="hint">No plan yet. A session writes one.</p>
+  {:else}
+    <ul class="steps">
+      {#each openSteps as step, i (i)}
+        <li><span class="step-state">{step.status ?? 'open'}</span> <span class="text">{step.text ?? ''}</span></li>
+      {/each}
+      {#each closedSteps as step, i (i)}
+        <li class="step-closed">
+          <span class="step-state">{step.status ?? 'closed'}</span> <span class="text">{step.text ?? ''}</span>
+          {#if step.closed_session !== undefined}<span class="hint">Closed in session {step.closed_session}.</span>{/if}
+          {@render refs(step.evidence)}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
+
+{#snippet sessionsPart()}
+  {#if goal.sessions_total > goal.sessions.length}<p class="hint">Showing the newest {goal.sessions.length} of {goal.sessions_total}.</p>{/if}
+  {#if goal.sessions.length === 0}
+    <p class="hint">No session has run yet.</p>
+  {:else}
+    <ul class="sessions">
+      {#each goal.sessions as s (s.n)}
+        <li>
+          <span class="session-n">Session {s.n}</span>
+          <span>{fmtUtc(s.started_at)}{sessionLength(s.started_at, s.ended_at) ? `, ${sessionLength(s.started_at, s.ended_at)}` : ''}</span>
+          <span>{sessionOutcomeWord(s.outcome)}</span>
+          <span>{formatTokens(s.spent)}, {s.steps_closed} step{s.steps_closed === 1 ? '' : 's'} closed</span>
+          {#if s.summary}
+            <details class="summary"><summary>Summary</summary><p class="text">{s.summary}</p></details>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
+
+{#snippet journalPart()}
+  {#if goal.journal.length === 0}
+    <p class="hint">Nothing written yet.</p>
+  {:else}
+    <ul class="journal">
+      {#each goal.journal as row (row.seq)}
+        <li class:own={fromOwner(row)}>
+          <span class="journal-head">
+            <span class="kind">{journalKindWord(row.kind)}</span>
+            <span>{actorWord(row.actor)}{row.session_n !== null ? `, session ${row.session_n}` : ''}</span>
+            <span class="when">{fmtUtc(row.created_at)}</span>
+          </span>
+          <p class="text">{row.text}</p>
+          {@render refs(row.evidence)}
+        </li>
+      {/each}
+    </ul>
+    {#if goal.journal.length >= (journalAll ? 200 : 50)}<p class="hint">Showing the newest {goal.journal.length} entries.</p>{/if}
+    {#if !journalAll && goal.journal.length >= 50}
+      <div class="actions">
+        <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={onMore}>Show more</Button>
+      </div>
+    {/if}
+  {/if}
+{/snippet}
+
 <section class="goal" aria-labelledby="goal-h.{goal.ref}">
   <div class="card">
     <div class="goal-head">
@@ -387,116 +502,42 @@
     </div>
   {/if}
 
-  <div class="card">
-    <h3>Charter</h3>
-    <dl class="facts">
-      <dt>Objective</dt><dd class="text">{goal.objective}</dd>
-      <dt>What done looks like</dt><dd class="text">{goal.done_when}</dd>
-      <dt>Questions and reports go to</dt>
-      <dd>{goal.origin_channel ?? (options.has_default_channel ? 'The default chat' : 'Nowhere: no channel is set')}</dd>
-      <dt>Proposed by</dt><dd>{proposerWord(goal.proposed_by)}</dd>
-    </dl>
-  </div>
-
-  <div class="card">
-    <h3>Limits</h3>
-    <dl class="facts">
-      <dt>Total budget</dt><dd>{formatTokens(goal.total_budget)}</dd>
-      <dt>Day budget</dt><dd>{formatTokens(goal.day_budget)}</dd>
-      <dt>Deadline</dt><dd>{goal.deadline_at ? `${fmtUtc(goal.deadline_at)}. ${deadlineText(goal, now)}` : `${goal.deadline_days} days from approval`}</dd>
-      {#if goal.daily_at !== undefined}<dt>How often</dt><dd>{howOftenText(goal, options)}</dd>{/if}
-      <dt>Sessions per day</dt><dd>{sessionsPerDayText(goal)}</dd>
-      <dt>Shortest gap between sessions</dt><dd>{intervalText(goal.min_interval_seconds)}</dd>
-      <dt>Job launches per day</dt><dd>{goal.jobs_per_day}</dd>
-      <dt>Quiet hours</dt><dd>{goal.quiet_hours_ok ? 'Sessions may start in quiet hours' : 'No session starts in quiet hours'}</dd>
-      <dt>Stall limit</dt><dd>{goal.stall_limit} sessions</dd>
-      <dt>Mode</dt><dd>{MODE_WORDS[goal.mode] ?? goal.mode}</dd>
-    </dl>
-  </div>
-
-  <GoalTools {goal} />
-
-  <div class="card">
-    <h3>Spend</h3>
-    <div class="spend">
-      <span>Today</span>
-      <span class="meter" aria-hidden="true"><span class="fill" class:full={goal.spent_today >= goal.day_budget} style:width="{spentPercent(goal.spent_today, goal.day_budget)}%"></span></span>
-      <span>{formatNumber(goal.spent_today)} of {formatTokens(goal.day_budget)}</span>
-      <span>In all</span>
-      <span class="meter" aria-hidden="true"><span class="fill" class:full={goal.spent_total >= goal.total_budget} style:width="{spentPercent(goal.spent_total, goal.total_budget)}%"></span></span>
-      <span>{formatNumber(goal.spent_total)} of {formatTokens(goal.total_budget)}</span>
+  {#if folding}
+    <GoalActivity {goal} {now} tick={pollTick} />
+    <Fold id="journal" refOf={goal.ref} title="Journal" defaultOpen={FOLD_DEFAULTS.journal}>{@render journalPart()}</Fold>
+  {:else}
+    <div class="card">
+      <h3>Charter</h3>
+      {@render charterPart()}
     </div>
-    <p class="hint">{goal.spend_note}</p>
-  </div>
 
-  <div class="card">
-    <h3>Plan</h3>
-    {#if goal.plan.length === 0}
-      <p class="hint">No plan yet. A session writes one.</p>
-    {:else}
-      <ul class="steps">
-        {#each openSteps as step, i (i)}
-          <li><span class="step-state">{step.status ?? 'open'}</span> <span class="text">{step.text ?? ''}</span></li>
-        {/each}
-        {#each closedSteps as step, i (i)}
-          <li class="step-closed">
-            <span class="step-state">{step.status ?? 'closed'}</span> <span class="text">{step.text ?? ''}</span>
-            {#if step.closed_session !== undefined}<span class="hint">Closed in session {step.closed_session}.</span>{/if}
-            {@render refs(step.evidence)}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
+    <div class="card">
+      <h3>Limits</h3>
+      {@render limitsPart()}
+    </div>
 
-  <div class="card">
-    <h3>Sessions</h3>
-    {#if goal.sessions_total > goal.sessions.length}<p class="hint">Showing the newest {goal.sessions.length} of {goal.sessions_total}.</p>{/if}
-    {#if goal.sessions.length === 0}
-      <p class="hint">No session has run yet.</p>
-    {:else}
-      <ul class="sessions">
-        {#each goal.sessions as s (s.n)}
-          <li>
-            <span class="session-n">Session {s.n}</span>
-            <span>{fmtUtc(s.started_at)}{sessionLength(s.started_at, s.ended_at) ? `, ${sessionLength(s.started_at, s.ended_at)}` : ''}</span>
-            <span>{sessionOutcomeWord(s.outcome)}</span>
-            <span>{formatTokens(s.spent)}, {s.steps_closed} step{s.steps_closed === 1 ? '' : 's'} closed</span>
-            {#if s.summary}
-              <details class="summary"><summary>Summary</summary><p class="text">{s.summary}</p></details>
-            {/if}
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
+    <GoalTools {goal} />
 
-  <div class="card">
-    <h3>Journal</h3>
-    {#if goal.journal.length === 0}
-      <p class="hint">Nothing written yet.</p>
-    {:else}
-      <ul class="journal">
-        {#each goal.journal as row (row.seq)}
-          <li class:own={fromOwner(row)}>
-            <span class="journal-head">
-              <span class="kind">{journalKindWord(row.kind)}</span>
-              <span>{actorWord(row.actor)}{row.session_n !== null ? `, session ${row.session_n}` : ''}</span>
-              <span class="when">{fmtUtc(row.created_at)}</span>
-            </span>
-            <p class="text">{row.text}</p>
-            {@render refs(row.evidence)}
-          </li>
-        {/each}
-      </ul>
-      {#if goal.journal.length >= (journalAll ? 200 : 50)}<p class="hint">Showing the newest {goal.journal.length} entries.</p>{/if}
-      {#if !journalAll && goal.journal.length >= 50}
-        <div class="actions">
-          <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={onMore}>Show more</Button>
-        </div>
-      {/if}
-    {/if}
-  </div>
+    <div class="card">
+      <h3>Spend</h3>
+      {@render spendPart()}
+    </div>
+
+    <div class="card">
+      <h3>Plan</h3>
+      {@render planPart()}
+    </div>
+
+    <div class="card">
+      <h3>Sessions</h3>
+      {@render sessionsPart()}
+    </div>
+
+    <div class="card">
+      <h3>Journal</h3>
+      {@render journalPart()}
+    </div>
+  {/if}
 
   {#if goal.actions.includes('note')}
     <div class="card">
@@ -513,6 +554,17 @@
         {@render line(noteResult)}
       </form>
     </div>
+  {/if}
+
+  {#if folding}
+    <Fold id="plan" refOf={goal.ref} title="Plan" defaultOpen={FOLD_DEFAULTS.plan}>{@render planPart()}</Fold>
+    <Fold id="spend" refOf={goal.ref} title="Spend" defaultOpen={FOLD_DEFAULTS.spend}>{@render spendPart()}</Fold>
+    <Fold id="sessions" refOf={goal.ref} title="Sessions" summary={sessionsSummary(goal.sessions_total)} defaultOpen={FOLD_DEFAULTS.sessions}>
+      {@render sessionsPart()}
+    </Fold>
+    <Fold id="charter" refOf={goal.ref} title="Charter" defaultOpen={FOLD_DEFAULTS.charter}>{@render charterPart()}</Fold>
+    <Fold id="limits" refOf={goal.ref} title="Limits" defaultOpen={FOLD_DEFAULTS.limits}>{@render limitsPart()}</Fold>
+    <GoalTools {goal} fold />
   {/if}
 </section>
 

@@ -239,3 +239,44 @@ describe('the tools a goal may use without asking', () => {
     expect(section()!.querySelector('b')).toBeNull();
   });
 });
+
+describe('the tools as a folding section of the goal page', () => {
+  const toggle = () => document.getElementById('goal-f.G-0001.tools') as HTMLButtonElement | null;
+  beforeEach(() => localStorage.clear());
+
+  it('is closed at first, says how many tools are allowed, and holds the same rows and buttons', async () => {
+    current = goalToolsAnswer({ grants: [toolGrant('send_email'), toolGrant('browser_task')] });
+    render(GoalTools, { goal: GOAL, fold: true });
+    await waitFor(() => expect(toggle()).not.toBeNull());
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle()!.textContent).toContain('Tools this goal may use');
+    expect(toggle()!.textContent).toContain('2 allowed');
+    expect(within(section()!).getAllByRole('button', { name: 'Remove', hidden: true }).length).toBe(2);
+    expect(section()!.closest('[hidden]')).not.toBeNull();
+    await fireEvent.click(toggle()!);
+    expect(section()!.closest('[hidden]')).toBeNull();
+    expect(within(rowOf('send_email')).getByRole('button', { name: 'Remove' })).toBeTruthy();
+  });
+
+  it('with none allowed it says so', async () => {
+    current = goalToolsAnswer({ grants: [] });
+    render(GoalTools, { goal: GOAL, fold: true });
+    await waitFor(() => expect(toggle()?.textContent).toContain('None allowed'));
+  });
+
+  it('with the grants off on the server there is no section and no button', async () => {
+    current = { enabled: true, grants_enabled: false } as Answer;
+    render(GoalTools, { goal: GOAL, fold: true });
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(toggle()).toBeNull();
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('a read that fails says so inside the section', async () => {
+    handlers['GET /goals/G-0001/tools'] = () => [500, { error: 'the request could not be processed' }];
+    render(GoalTools, { goal: GOAL, fold: true });
+    await waitFor(() => expect(toggle()).not.toBeNull());
+    expect(within(section()!).getByText("Could not read this goal's tools. The request could not be processed.", { exact: true })).toBeTruthy();
+  });
+});

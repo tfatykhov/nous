@@ -1,11 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { Button } from '../../lib/ui/button';
+  import Fold from './Fold.svelte';
   import {
     TOOLS_ADD_TITLE, TOOLS_NONE_TEXT, TOOLS_NOT_USED_TEXT, TOOLS_TITLE, TOOL_ALLOWED_TEXT, TOOL_ALREADY_ALLOWED_TEXT,
     TOOL_CHOOSE_LABEL,
     TOOL_ALREADY_REMOVED_TEXT, TOOL_RELOAD_TEXT, TOOL_REMOVED_TEXT,
     allowTool, goalTools, removeTool, toolAllowedOnText, toolGroups, toolRefusalText, toolsLimitText, toolsReadFailedText,
+    FOLD_DEFAULTS, toolsSummary,
     type GoalToolOption, type GoalTools, type NewGoalTools,
   } from '../../lib/goals';
 
@@ -16,16 +18,20 @@
   // shown or its state changes, and after every change. With the grants off on the server, nothing is shown.
   // On the create form (`pick`: GET /goals/options `tools`), the same rows with a box each instead of a button: the
   // form asks once for the lot before it creates the goal.
+  // On a goal page that folds (`fold`), the section is a folding one, closed at first, its summary saying how many
+  // tools are allowed; with the grants off it is still not shown at all.
   let {
     goal = null,
     pick = null,
     chosen = $bindable([]),
     disabled = false,
+    fold = false,
   }: {
     goal?: { ref: string; state: string; updated_at: string | null } | null;
     pick?: NewGoalTools | null;
     chosen?: string[];
     disabled?: boolean;
+    fold?: boolean;
   } = $props();
 
   type Note = { text: string; ok: boolean };
@@ -167,9 +173,28 @@
     <p class="hint">{toolsLimitText(pick.limit)}</p>
     <p class="hint">{pick.never}</p>
   </div>
+{:else if on && answer && fold}
+  <Fold id="tools" refOf={goal?.ref ?? ''} title={TOOLS_TITLE} summary={toolsSummary(grants.length)} defaultOpen={FOLD_DEFAULTS.tools}>
+    <div data-section="goal-tools">{@render goalPage(answer)}</div>
+  </Fold>
 {:else if on && answer}
   <div class="card" data-section="goal-tools">
     <h3>{TOOLS_TITLE}</h3>
+    {@render goalPage(answer)}
+  </div>
+{:else if readError !== null && fold}
+  <Fold id="tools" refOf={goal?.ref ?? ''} title={TOOLS_TITLE} defaultOpen={FOLD_DEFAULTS.tools}>
+    <div data-section="goal-tools"><p class="hint">{toolsReadFailedText(readError)}</p></div>
+  </Fold>
+{:else if readError !== null}
+  <div class="card" data-section="goal-tools">
+    <h3>{TOOLS_TITLE}</h3>
+    <p class="hint">{toolsReadFailedText(readError)}</p>
+  </div>
+{/if}
+
+<!-- A goal's tools under the section's heading: in a card of its own, or in a folding section. -->
+{#snippet goalPage(answer: GoalTools)}
     <p class="hint">{answer.applies_in}</p>
     {#if grants.length === 0}
       <p class="hint">{TOOLS_NONE_TEXT}</p>
@@ -236,13 +261,7 @@
     {/each}
     {#if canEdit && answer.limit}<p class="hint">{toolsLimitText(answer.limit)}</p>{/if}
     <p class="hint">{answer.never}</p>
-  </div>
-{:else if readError !== null}
-  <div class="card" data-section="goal-tools">
-    <h3>{TOOLS_TITLE}</h3>
-    <p class="hint">{toolsReadFailedText(readError)}</p>
-  </div>
-{/if}
+{/snippet}
 
 <style>
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
