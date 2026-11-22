@@ -1377,6 +1377,10 @@ class Settings(BaseSettings):
     subtask_work_timeout: int = Field(default=570, ge=1)
     subtask_outcome_persistence_enabled: bool = True
     subtask_force_tool_on_penultimate: bool = True
+    # F113 fixed finish checks (nous/cognitive/finish_checks.py), run on a validated final report:
+    # `off` runs nothing; `shadow` records a verdict in heart.subtasks.metadata.finish_check and
+    # changes nothing else.
+    finish_checks_mode: Literal["off", "shadow"] = "off"
 
     # F062: typed spawn_sync — flag gates both the exposed `payload_schema`
     # property on _SPAWN_TASK_SCHEMA / submit_final_report AND the post-execution
