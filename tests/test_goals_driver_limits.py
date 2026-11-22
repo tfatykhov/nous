@@ -1746,6 +1746,39 @@ async def test_a_paced_goal_held_by_its_day_budget_still_wakes_at_the_next_utc_m
     assert (await _goal(w, goal)).next_wake_at == midnight
 
 
+async def _run_one_session(w: SimpleNamespace, goal: Goal) -> tuple[GoalSession, str]:
+    """A timer session of ``goal`` started and closed with no step: the closed row and its first task."""
+    assert len((await w.driver.tick()).started) == 1
+    session = (await _sessions(w, goal))[-1]
+    async with w.db.session() as s:
+        task = (await s.get(Subtask, session.first_subtask_id)).task
+    await _finish(w, await w.env.heart.intentions.get_for_source("subtask", session.first_subtask_id))
+    assert (await w.driver.tick()).closed == 1
+    return await _session(w, session.id), task
+
+
+async def test_a_paced_sessions_close_wakes_the_goal_at_tomorrows_time(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    minute = _minute(local, hours=-1)
+    await _set_goal(w, goal, daily_at_minute=minute, next_wake_at=func.clock_timestamp())
+    closed, task = await _run_one_session(w, goal)
+    assert task.count(pacing.pace_line(closed.started_at, zone, minute)) == 1  # the time, the zone and the date
+    tomorrow = _slot(zone, local, minute, days=1)
+    assert tomorrow > closed.ended_at + timedelta(seconds=2 * goal.min_interval_seconds)
+    assert (await _goal(w, goal)).next_wake_at == tomorrow
+
+
+async def test_a_paced_sessions_close_keeps_an_interval_that_ends_later(env_factory):  # noqa: F811
+    w, zone, local = await _paced(env_factory)
+    goal = await _active(w)
+    week = 7 * 86_400
+    await _set_goal(w, goal, daily_at_minute=_minute(local, hours=-1), min_interval_seconds=week)
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    closed, _task = await _run_one_session(w, goal)
+    assert (await _goal(w, goal)).next_wake_at == closed.ended_at + timedelta(seconds=2 * week)
+
+
 async def test_the_paced_hold_moves_a_wake_only_while_it_is_the_one_read(env_factory, monkeypatch):  # noqa: F811
     """The hold's wake is written under the guard every wake write has: a wake changed since it was read stays."""
     w, _zone, local = await _paced(env_factory)

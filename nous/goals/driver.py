@@ -812,6 +812,8 @@ class GoalDriver:
             now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
         tools = await self._tool_lines(goal) if self.tool_grants is not None else None
         until = goal_commands.charter_until(goal, now=now, settings=self._settings)
+        tz = self._pace_zone(goal)
+        pace = pacing.pace_line(now, tz, goal.daily_at_minute) if tz is not None else None
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
@@ -825,6 +827,7 @@ class GoalDriver:
                 moved=moved,
                 tools=tools,
                 commands_until=until,
+                pace_line=pace,
             )
 
         task = build(charter.MAX_TASK_CHARS)
@@ -1842,10 +1845,14 @@ class GoalDriver:
             ).rowcount == 1
         else:
             interval = timedelta(seconds=goal.min_interval_seconds * (1 if outcome == "step_closed" else 2))
+            wake = now + interval
+            tz = self._pace_zone(goal)
+            if tz is not None:  # a goal paced once a day: not before the time of the day after the session started
+                wake = max(wake, pacing.wake_after_close(row.started_at, tz, goal.daily_at_minute))
             await s.execute(
                 update(Goal)
                 .where(*active)
-                .values(next_wake_at=now + interval, updated_at=func.clock_timestamp())
+                .values(next_wake_at=wake, updated_at=func.clock_timestamp())
                 .execution_options(synchronize_session=False)
             )
         note = f"Session {row.n} ended: {outcome}, {spent} tokens."
