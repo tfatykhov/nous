@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import subprocess
 import sys
 import uuid
@@ -59,8 +60,9 @@ def _forbid_driver(monkeypatch) -> None:
         {},  # the default: off
         {**CONT, "subtask_enabled": True},  # everything a goal needs, but not the flag
         {"goals_enabled": True},  # the flag without what it needs: the validator turns it off
+        {"goals_pacing_enabled": True, "goals_timezone": "America/New_York"},  # pacing without goals: off too
     ],
-    ids=["default", "dependencies_only", "flag_without_dependencies"],
+    ids=["default", "dependencies_only", "flag_without_dependencies", "pacing_without_goals"],
 )
 async def test_with_goals_off_nothing_is_built_bound_or_read(monkeypatch, flags):
     _forbid_driver(monkeypatch)
@@ -98,6 +100,35 @@ async def test_with_goals_on_one_driver_is_built_and_both_hooks_are_bound(runner
         env.agent
     )
     assert runner._goals is built  # the owner's priority in _launch asks this driver which roots are goals'
+
+
+PACING_LINE = "Goal pacing: once-a-day goals keep the days and times of America/New_York"
+
+
+@pytest.mark.postgres_only
+async def test_with_pacing_on_its_zone_is_logged_once_when_the_driver_is_built(runner_env, caplog):  # noqa: F811
+    env = await runner_env(**GOALS, goals_pacing_enabled=True, goals_timezone="America/New_York")
+    assert env.settings.goals_pacing_enabled is True
+    runner = ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain
+    )
+    with caplog.at_level(logging.INFO, logger="nous.main"):
+        built = main._build_goals(env.settings, database=env.db, heart=env.heart, continuation_runner=runner)
+    assert isinstance(built, GoalDriver)
+    assert [r.getMessage() for r in caplog.records if r.getMessage().startswith("Goal pacing")] == [PACING_LINE]
+
+
+@pytest.mark.postgres_only
+async def test_with_pacing_off_nothing_of_it_is_logged(runner_env, caplog):  # noqa: F811
+    env = await runner_env(**GOALS, goals_timezone="America/New_York")
+    runner = ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain
+    )
+    with caplog.at_level(logging.DEBUG):
+        assert isinstance(
+            main._build_goals(env.settings, database=env.db, heart=env.heart, continuation_runner=runner), GoalDriver
+        )
+    assert not [r for r in caplog.records if "pacing" in r.getMessage().lower() or "America/" in r.getMessage()]
 
 
 def test_create_components_binds_the_hooks_before_anything_runs_and_starts_the_loop_last():  # PIN
