@@ -47,9 +47,11 @@ class StubJudge:
         self.behaviour = behaviour
         self.verdict = verdict
         self.records: list[JudgeInput] = []
+        self.max_calls: list[int | None] = []
 
     async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
         self.records.append(record)
+        self.max_calls.append(max_calls)
         if self.behaviour == "raise":
             raise RuntimeError("the stub judge broke")
         if self.behaviour == "hang":
@@ -334,6 +336,110 @@ async def test_the_daily_limit_counts_decisions_and_reports_of_one_judge_name_to
     await service.close()
     assert reports.records == [] and service.runtime()["over_cap"] == 1
     assert len(await _rows(db, agent)) == 2  # no report row
+
+
+async def _calls_today(db, agent: str, kind: str, calls: int) -> None:
+    """Verdict rows of today of the judge ``shared`` with ``calls`` model requests of ``kind`` in all."""
+    async with db.session() as session:
+        for _ in range(calls):
+            await session.execute(
+                text(
+                    "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
+                    "judge_version, status, verdict, claim_at, calls) VALUES (:a, :k, :s, 'shared', 'x', 'ok', :v, "
+                    "now(), 1)"
+                ),
+                {"a": agent, "k": kind, "s": uuid.uuid4(), "v": "success" if kind == "decision" else "supported"},
+            )
+        await session.commit()
+
+
+async def _decision(db, agent: str) -> uuid.UUID:
+    """A decision with one call in its session, so it can be judged."""
+    decision_id = uuid.uuid4()
+    session_id = f"sess-{decision_id.hex[:8]}"
+    now = datetime.now(UTC)
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "INSERT INTO brain.decisions (id, agent_id, description, confidence, category, stakes, session_id, "
+                "created_at) VALUES (:id, :a, 'Move the backup', 0.7, 'tooling', 'low', :s, :t)"
+            ),
+            {"id": decision_id, "a": agent, "s": session_id, "t": now - timedelta(minutes=5)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO nous_system.tool_call_log (agent_id, session_id, call_index, work_kind, tool_name, "
+                "tool_name_called, outcome, input_text, result_preview, started_at) VALUES (:a, :s, 0, "
+                "'conversation', 'bash', 'bash', 'ok', '{}', 'moved', :t)"
+            ),
+            {"a": agent, "s": session_id, "t": now - timedelta(minutes=4)},
+        )
+        await session.commit()
+    return decision_id
+
+
+def _shared(db, agent: str, cap: int) -> tuple[OutsideJudge, StubJudge, StubJudge]:
+    decisions = StubJudge(name="shared", version="d", verdict="success")
+    reports = StubJudge(name="shared", version="r")
+    service = OutsideJudge(
+        db, _settings(agent, outside_judge_daily_calls=cap), decisions, report_judge=reports, **FAST
+    )
+    return service, decisions, reports
+
+
+async def test_reports_use_at_most_half_the_daily_limit_and_decisions_keep_the_other_half(db, agent):
+    await _calls_today(db, agent, "task_report", 2)  # half of 4 spent on reports
+    service, decisions, reports = _shared(db, agent, cap=4)
+    task_id, _done = await _task(db, agent)
+    decision_id = await _decision(db, agent)
+    service.start()
+    service.submit_report(task_id, claimed_at=datetime.now(UTC))
+    await _drain(service)
+    assert reports.records == [] and service.runtime()["over_cap"] == 1  # not judged now, no row
+    service.submit_decision(decision_id, grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC))
+    await _drain(service)
+    await service.close()
+    assert [record.subject_id for record in decisions.records] == [decision_id] and decisions.max_calls == [2]
+    assert {row["subject_kind"] for row in await _rows(db, agent) if row["subject_id"] in (task_id, decision_id)} == {
+        "decision"
+    }
+
+
+async def test_a_report_is_given_at_most_what_is_left_of_its_half(db, agent):
+    await _calls_today(db, agent, "task_report", 1)
+    service, _decisions, reports = _shared(db, agent, cap=4)
+    task_id, _done = await _task(db, agent)
+    service.start()
+    service.submit_report(task_id, claimed_at=datetime.now(UTC))
+    await _drain(service)
+    await service.close()
+    assert [record.subject_id for record in reports.records] == [task_id] and reports.max_calls == [1]
+
+
+async def test_decisions_may_use_more_than_half_and_a_report_then_gets_what_is_left_of_the_whole(db, agent):
+    await _calls_today(db, agent, "decision", 3)
+    service, decisions, reports = _shared(db, agent, cap=4)
+    task_id, _done = await _task(db, agent)
+    decision_id = await _decision(db, agent)
+    service.start()
+    service.submit_decision(decision_id, grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC))
+    await _drain(service)
+    assert decisions.max_calls == [1]  # three of four used by decisions: one left
+    service.submit_report(task_id, claimed_at=datetime.now(UTC))
+    await _drain(service)
+    await service.close()
+    assert reports.records == []  # the whole limit is spent now
+
+
+@pytest.mark.parametrize("cap", [0, 1])
+async def test_with_a_limit_under_two_no_report_is_judged(db, agent, cap):
+    service, _decisions, reports = _shared(db, agent, cap=cap)
+    task_id, _done = await _task(db, agent)
+    service.start()
+    service.submit_report(task_id, claimed_at=datetime.now(UTC))
+    await _drain(service)
+    await service.close()
+    assert reports.records == [] and service.runtime()["over_cap"] == 1
 
 
 # ---- two judges -----------------------------------------------------------------------------------------------------

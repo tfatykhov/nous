@@ -29,7 +29,8 @@ claim, and neither one's failure, time or limit changes the other's.
 With ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` the first judge's service also has a report judge: ``submit_report`` (from
 the task executor, after a completed task's row is written) queues a finished task's report, which the worker judges
 as it stood at the task's completion, read from the task's row (a task not finished as completed is not judged). The
-report judge shares the judge's name, so the daily limit counts both. ``JudgeSet`` hands a report to the first judge
+report judge shares the judge's name, so the daily limit counts both; reports may use at most half of it, so
+decisions always keep the other half (a report past that half is not judged now). ``JudgeSet`` hands a report to the first judge
 only (``SECOND_JUDGE_GRADES_REPORTS``). That service also runs the sweep (``sweep_once``): soon after the start and
 then hourly, at most ``SWEEP_BATCH`` subjects without a final row, none past half the day's limit.
 """
@@ -367,7 +368,7 @@ class OutsideJudge:
                 skipped = JudgeOutput(status="skipped", verdict="cannot_tell", labels=(found.skip_label,))
                 await self._write(row, skipped)
                 return
-            left = await self._requests_left(name)
+            left = await self._requests_left(name, item.kind)
             if left is None:
                 return
             started = time.monotonic()
@@ -395,19 +396,34 @@ class OutsideJudge:
                     "F118: the error row for %s was not written (%s)", item.subject_id, type(write_exc).__name__
                 )
 
-    async def _requests_left(self, judge_name: str | None = None) -> int | None:
-        """How many requests the judge ``judge_name`` (this service's judge when None) may still send today (at least
-        one), or None when it may send none. The limit is per judge name: the report judge shares the judge's. Fails
-        closed: a count that cannot be read allows none."""
+    async def _requests_left(self, judge_name: str | None = None, kind: str = DECISION) -> int | None:
+        """How many requests the judge ``judge_name`` (this service's judge when None) may still send today on a
+        subject of ``kind`` (at least one), or None when it may send none. The limit is per judge name: the report
+        judge shares the judge's. Reports may use at most half of it (``daily_calls // 2``), so decisions always keep
+        the other half; a report past its half is not judged now (the sweep may queue it again on a later pass).
+        Fails closed: a count that cannot be read allows none."""
         now = datetime.now(UTC)
+        name = judge_name or self.judge.name
+        reports_used = 0
         try:
             async with self._database.session() as session:
-                used = await store.calls_today(session, self._agent_id, now, judge_name=judge_name or self.judge.name)
+                used = await store.calls_today(session, self._agent_id, now, judge_name=name)
+                if kind == TASK_REPORT:
+                    reports_used = await store.calls_today(
+                        session, self._agent_id, now, judge_name=name, subject_kind=TASK_REPORT
+                    )
         except Exception as exc:
             logger.warning("F118: today's judge calls could not be counted (%s); no call", type(exc).__name__)
             used = None
         if used is not None and used < self._daily_calls:
-            return self._daily_calls - used
+            left = self._daily_calls - used
+            if kind != TASK_REPORT:
+                return left
+            reports_left = self._daily_calls // 2 - reports_used
+            if reports_left > 0:
+                return min(left, reports_left)
+            self._over_cap += 1  # the reports' half is spent; the rest is the decisions'
+            return None
         self._over_cap += 1
         if used is not None and self._cap_logged_on != now.date():
             self._cap_logged_on = now.date()

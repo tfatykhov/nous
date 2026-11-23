@@ -59,6 +59,7 @@ _CALLS_TODAY = (
 )
 _CALLS_TODAY_ALL = text(_CALLS_TODAY)
 _CALLS_TODAY_OF_JUDGE = text(_CALLS_TODAY + " AND judge_name = :judge")
+_CALLS_TODAY_OF_JUDGE_KIND = text(_CALLS_TODAY + " AND judge_name = :judge AND subject_kind = :kind")
 
 
 async def insert_verdict(session: AsyncSession, row: dict[str, Any]) -> bool:
@@ -84,12 +85,22 @@ def start_of_utc_day(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def calls_today(session: AsyncSession, agent_id: str, now: datetime, judge_name: str | None = None) -> int:
+async def calls_today(
+    session: AsyncSession,
+    agent_id: str,
+    now: datetime,
+    judge_name: str | None = None,
+    subject_kind: str | None = None,
+) -> int:
     """The model requests of this agent's judge ``judge_name`` (every judge when None) since the start of ``now``'s
-    UTC day, at any version (a row written without a call counts none). The daily limit is per judge."""
+    UTC day, at any version (a row written without a call counts none), on subjects of ``subject_kind`` only when it
+    is given (with a judge name). The daily limit is per judge."""
     params = {"agent": agent_id, "since": start_of_utc_day(now)}
     if judge_name is None:
         return int(await session.scalar(_CALLS_TODAY_ALL, params) or 0)
+    if subject_kind is not None:
+        kind_params = {**params, "judge": judge_name, "kind": subject_kind}
+        return int(await session.scalar(_CALLS_TODAY_OF_JUDGE_KIND, kind_params) or 0)
     return int(await session.scalar(_CALLS_TODAY_OF_JUDGE, {**params, "judge": judge_name}) or 0)
 
 
