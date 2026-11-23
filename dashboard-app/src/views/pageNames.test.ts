@@ -11,6 +11,7 @@ const TITLES: [string, string][] = [
   ['views/Integrations.svelte', 'Integrations'],
   ['views/Goals.svelte', 'Goals'],
   ['views/Limits.svelte', 'Limits and tools'],
+  ['views/About.svelte', 'About'],
 ];
 
 describe('page titles match the menu', () => {

@@ -57,6 +57,7 @@ from starlette.routing import Mount, Route
 from starlette.types import Scope
 
 from nous import undo_journal
+from nous.api.about_dashboard import build_about
 from nous.api.autonomy_routes import build_autonomy_routes
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
@@ -2897,6 +2898,10 @@ def create_app(
             logger.exception("Dashboard subtasks error")
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_about(request: Request) -> JSONResponse:
+        """GET /dashboard/about - The About screen's answer (nous/api/about_dashboard.py), read-only."""
+        return JSONResponse(await build_about(settings, database))
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -4236,6 +4241,7 @@ def create_app(
         Route("/dashboard/consolidation/{cycle_id}", dashboard_consolidation_detail),
         Route("/dashboard/consolidation", dashboard_consolidation),
         Route("/dashboard/subtasks", dashboard_subtasks),
+        owner_guard.route("/dashboard/about", dashboard_about, methods=["GET"]),
         # NOTE: the bare /dashboard -> /dashboard/v2/ redirect is registered
         # below, gated on the v2 build existing (so a source/pip install without
         # `npm run build` does not redirect to a 404).

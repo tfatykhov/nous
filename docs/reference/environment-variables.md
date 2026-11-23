@@ -32,6 +32,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_IDENTITY_PROMPT` | Built-in default | **Agent identity.** First section of every system prompt. How Nous knows who it is, what tools it has, and how to behave. Override to customize. |
 | `NOUS_AGENT_ID` | `nous-default` | Agent identifier |
 | `NOUS_AGENT_NAME` | `Nous` | Agent display name |
+| `NOUS_BUILD_COMMIT` | `""` | Set by whoever deploys. Shown on the About screen. Unset, the Build line is not shown. A value that is not a hex commit hash (7 to 40 characters) is ignored. |
+| `NOUS_BUILD_TIME` | `""` | Set by whoever deploys. Shown on the About screen. Unset, the Build line is not shown. A value that is not a timestamp with a timezone is ignored. |
 | `NOUS_MODEL` | `claude-sonnet-4-6` | LLM model for chat |
 | `NOUS_MAX_TURNS` | `10` | Max tool loop iterations |
 | `NOUS_MCP_ENABLED` | `true` | Enable the inbound MCP server at `/mcp`. It requires the owner's secret or the MCP key under `NOUS_OWNER_ENTRY_MODE` (see `NOUS_MCP_SERVER_SECRET_SHA256`). `false`: the server is not mounted at all |

@@ -327,6 +327,7 @@ REST_ROUTE_SET = {
     ("POST", "/rubric/rollback"),
     ("POST", "/rubric/evolve"),
     ("POST", "/dashboard/memory-write-health/acknowledge"),
+    ("GET", "/dashboard/about"),
     ("GET", "/a2ui/push/installations"),
     ("GET", "/dashboard/work/sessions"),
     ("GET", "/dashboard/work/sessions/{session_id}"),
@@ -453,6 +454,8 @@ async def test_a_proxy_call_with_no_body_still_needs_the_json_media_type(tmp_pat
 # secret needs no media type.
 GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
     "/a2ui/push/installations": (503, {"error": "A2UI not available"}),
+    # The About screen: the stand-in database cannot be read, so its values are null
+    "/dashboard/about": (200, None),
     # The stored prompt, response, message and tool-result reads
     "/dashboard/work/sessions": (200, None),
     "/dashboard/work/sessions/abc": (200, {"enabled": False, "session": None, "turns": [], "next_after": None}),
