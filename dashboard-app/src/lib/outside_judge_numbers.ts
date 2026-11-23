@@ -74,22 +74,24 @@ export const PAIRS_SHOWN = 5;
 export const TITLE = 'The outside judge';
 export const INTRO = 'The outside judge only records its own verdicts beside the grades Nous already has, and changes no grade.';
 export const LOAD_FAILED = "The outside judge's numbers could not be read. Use Refresh at the top of the page to try again.";
-export const NOT_ENOUGH = 'Not enough graded yet';
-export const NOT_ENOUGH_COMPARED = 'Not enough compared yet';
+/** A rate with nothing to divide: no verdict was graded (or compared) apart from "could not tell". */
+export const NONE_GRADED = 'Nothing graded yet';
+export const NONE_COMPARED = 'Nothing compared yet';
 export const NOTHING_JUDGED = (days: number) => `No decision has been judged in the last ${days} days.`;
-export const NOTHING_GRADED = 'No verdict has been compared with a grade yet.';
+export const NOTHING_GRADED = (days: number) => `No verdict has been compared with a grade in the last ${days} days.`;
 export const NO_DISAGREEMENTS = (days: number) => `The judge has not disagreed with a grade in the last ${days} days.`;
 export const NO_REPORTS = (days: number) => `No task report has been judged in the last ${days} days.`;
 export const NO_NOT_SUPPORTED = 'The judge found every judged report supported or could not tell.';
-export const NOTHING_LEFT_OUT = 'Nothing was left unjudged.';
+export const NONE_SKIPPED_OR_FAILED = 'none skipped, no judgement failed or ran out of time';
 export const NO_SENTENCE = 'The judge gave no sentence.';
 export const GRADER_NOTE = 'Agreement leaves out the verdicts that said “could not tell”.';
-export const STRIP_HINT = 'Waiting is the queue now. Dropped and over the limit count since this server process started.';
+export const STRIP_HINT = 'Waiting is the queue when these numbers were read. Dropped and over the limit count since this server process started.';
 export const SWEEP_INTRO =
   "Once an hour the judge picks up decisions and reports that have no final verdict yet. A pass queues nothing once today's calls reach half the daily limit.";
 export const SWEEP_NO_NUMBERS = 'The hourly pass has no numbers in this server process.';
 export const SWEEP_NONE_YET = 'No hourly pass has run yet in this server process.';
 export const SHOW_FEWER = 'Show fewer';
+export const SKIPPED_HEADING = 'Skipped or failed';
 export const NOT_SUPPORTED_HEADING = 'Latest reports the judge did not find supported';
 export const AGAINST_FINISH = 'Agreement with the finish checks';
 export const AGAINST_AUDIT = 'Agreement with your spot checks';
@@ -129,7 +131,10 @@ export function outcomeTile(sweep: Sweep | undefined): Tile | null {
   const g = sweep.agreement.outcome_grades;
   const graded = g.n - g.cannot_tell;
   const label = 'Agreement with outcomes';
-  if (g.agree_rate == null) return { label, value: NOT_ENOUGH, sub: `${graded} graded so far`, words: true };
+  if (g.agree_rate == null) {
+    const sub = g.n === 0 ? 'none judged yet' : `${g.cannot_tell} of ${g.n} said “could not tell”`;
+    return { label, value: NONE_GRADED, sub, words: true };
+  }
   return {
     label, value: pct(g.agree_rate), words: false,
     sub: `${g.agree} of ${graded} graded verdicts match your taps and the reviewer's outcome signals`,
@@ -152,7 +157,7 @@ export function tiles(d: JudgeData): Tile[] {
     cannotTellTile(d.decisions),
     {
       label: 'Calls today', value: `${count(d.cost.today.calls)} of ${count(d.cost.today.cap)}`, words: false,
-      sub: 'today, every instructions version, decisions and reports',
+      sub: 'today (UTC), every instructions version, decisions and reports',
     },
   ];
 }
@@ -209,7 +214,7 @@ export function graderRows(by: Record<string, GraderGroup>): GraderRow[] {
     .sort(([a, x], [b, y]) => y.n - x.n || (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, g]) => ({
       key, label: graderWords(key).label, n: g.n, agree: g.agree, harsher: g.judge_harsher, kinder: g.judge_kinder,
-      cannotTell: g.cannot_tell, rate: rateOr(g.agree_rate, NOT_ENOUGH),
+      cannotTell: g.cannot_tell, rate: rateOr(g.agree_rate, NONE_GRADED),
     }));
 }
 
@@ -226,7 +231,9 @@ export function directionWord(verdict: string, grade: string | null): string {
 }
 
 export const disagreementLine = (d: Pick<Disagreement, 'against_grade' | 'against_grader' | 'verdict'>) =>
-  `Graded ${d.against_grade ?? 'with no grade'} by ${graderWords(d.against_grader).by}. The judge says ${d.verdict}, ${directionWord(d.verdict, d.against_grade)}.`;
+  d.against_grade === null
+    ? `No grade was recorded. The judge says ${d.verdict}.`
+    : `Graded ${d.against_grade} by ${graderWords(d.against_grader).by}. The judge says ${d.verdict}, ${directionWord(d.verdict, d.against_grade)}.`;
 
 /** A listed subject's title, or its noun and the first 8 characters of its id when it has none. */
 export const titleOrId = (title: string | null, id: string, noun: 'Decision' | 'Task') =>
@@ -261,7 +268,7 @@ export const labelWord = (label: string) => own(LABEL_WORDS, label) ?? label;
 
 export const reportsSub = (r: Pick<ReportNumbers, 'judge' | 'version'>) => `Judge ${r.judge}, instructions ${r.version}`;
 export const agreementLine = (label: string, a: Against) =>
-  a.agree_rate == null ? `${label}: ${NOT_ENOUGH_COMPARED}` : `${label}: ${pct(a.agree_rate)} (${a.agree} of ${a.compared} compared)`;
+  a.agree_rate == null ? `${label}: ${NONE_COMPARED}` : `${label}: ${pct(a.agree_rate)} (${a.agree} of ${a.compared} compared)`;
 export const reportCostText = (c: Cost) =>
   `Cost: ${count(c.calls)} calls, ${tokens(c.tokens_in)} tokens in, ${tokens(c.tokens_out)} tokens out.`;
 
@@ -271,21 +278,23 @@ const FINISH_WORDS: Record<string, string> = {
 export const finishWord = (value: string | null) =>
   value === null ? 'No finish check' : own(FINISH_WORDS, value) ?? `Finish check: ${value}`;
 const AUDIT_WORDS: Record<string, string> = { right: 'Your spot check: right', wrong: 'Your spot check: wrong' };
-export const auditWord = (value: string | null) => (value === null ? 'No spot check yet' : own(AUDIT_WORDS, value) ?? value);
+export const auditWord = (value: string | null) =>
+  value === null ? 'No spot check yet' : own(AUDIT_WORDS, value) ?? `Your spot check: ${value}`;
 
-// ── Not judged ──────────────────────────────────────────────────────────────
+// ── Skipped or failed ──────────────────────────────────────────────────────────────
 
 const SKIP_WORDS: Record<string, string> = { evidence_missing: 'no record of what happened was found' };
 const skipWord = (label: string) => own(SKIP_WORDS, label) ?? labelWord(label);
 
-/** What was skipped (by its label) and how many judgements failed or ran out of time. */
+/** What was skipped (by its label) and how many judgements failed or ran out of time: the verdict rows say only this,
+ * so a subject over the daily limit or dropped from the queue is not counted here (the strip counts those). */
 export function notJudgedText(skipped: Record<string, number>, errors: number): string {
   const entries = Object.entries(skipped).filter(([, n]) => n > 0);
   const total = entries.reduce((sum, [, n]) => sum + n, 0);
   const parts: string[] = [];
   if (total > 0) parts.push(`${total} skipped (${entries.map(([k, n]) => `${skipWord(k)}: ${n}`).join(', ')})`);
   if (errors > 0) parts.push(`${errors} judgement${errors === 1 ? '' : 's'} failed or ran out of time`);
-  return parts.length ? parts.join('; ') : NOTHING_LEFT_OUT;
+  return parts.length ? parts.join('; ') : NONE_SKIPPED_OR_FAILED;
 }
 
 /** One line for the decisions and, when task reports are judged, one for the reports. */
@@ -316,16 +325,26 @@ export function sweepText(rt: SweepRuntime | null): string {
 }
 
 export const statedConfidenceText = (sweep: Sweep) =>
-  `Agreement with Nous's stated confidence, which is not an outcome: ${rateOr(sweep.agreement.stated_confidence.agree_rate, NOT_ENOUGH)}`;
+  `Agreement with Nous's stated confidence, which is not an outcome: ${rateOr(sweep.agreement.stated_confidence.agree_rate, NONE_GRADED)}`;
 
 // ── The second judge ────────────────────────────────────────────────────────
 
 export const secondText = (s: SecondNumbers) =>
-  `Judge ${s.judge}, instructions ${s.version}, model ${s.model ?? 'not named'}. It judged ${s.decisions.judged} decisions; calls today ${s.cost.today.calls} of ${s.cost.today.cap}.`;
+  `Judge ${s.judge}, instructions ${s.version}, model ${s.model ?? 'not named'}. It judged ${plural(s.decisions.judged, 'decision', 'decisions')}; calls today (UTC) ${s.cost.today.calls} of ${s.cost.today.cap}.`;
+/** The pairs where the two judges gave different verdicts, neither "could not tell". */
+export const differed = (b: Between) => b.pairs - b.agree - b.either_cannot_tell;
 export const betweenText = (b: Between) =>
-  `On the same claim, both judges judged ${b.pairs} decisions: they agreed on ${b.agree}, one could not tell on ${b.either_cannot_tell}, and they differed on ${b.pairs - b.agree - b.either_cannot_tell}.`;
-export const betweenRate = (b: Between) => `Agreement: ${rateOr(b.agree_rate, NOT_ENOUGH_COMPARED)}`;
-export const otherClaimText = (n: number) => `${n} more were judged on different claims and are not compared.`;
+  `On the same claim, both judges judged ${plural(b.pairs, 'decision', 'decisions')}: they agreed on ${b.agree}, at least one could not tell on ${b.either_cannot_tell}, and they differed on ${differed(b)}.`;
+export const betweenRate = (b: Between) => `Agreement: ${rateOr(b.agree_rate, NONE_COMPARED)}`;
+export const otherClaimText = (n: number) =>
+  n === 1
+    ? '1 more decision was judged on different claims and is not compared.'
+    : `${n} more decisions were judged on different claims and are not compared.`;
+/** Above the pairs listed, when more differed than are shown: "The latest 5 of 12". */
+export const pairsShownText = (b: Between) => {
+  const shown = Math.min(b.disagreements.length, PAIRS_SHOWN);
+  return differed(b) > shown ? `The latest ${shown} of ${differed(b)}` : null;
+};
 export const pairLine = (p: Pick<PairDisagreement, 'first_verdict' | 'second_verdict'>) =>
   `The first judge says ${p.first_verdict}, the second says ${p.second_verdict}.`;
 

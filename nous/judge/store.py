@@ -574,14 +574,15 @@ def outcome_agreement(by_grader: dict[str, dict[str, Any]]) -> dict[str, Any]:
 # ---- the titles of the listed decisions and reports (GET /dashboard/outside-judge) ---------------------------------
 
 TITLE_MAX = 120
-# The subject's own text, its first 600 characters: enough for a title once its white space is folded.
+# The subject's own text without its leading white space, its first 600 characters: enough for a title once its
+# white space is folded.
 _TITLES = {
     "decision": text(
-        "SELECT id::text AS id, left(description, 600) AS body FROM brain.decisions "
+        r"SELECT id::text AS id, left(regexp_replace(description, '^\s+', ''), 600) AS body FROM brain.decisions "
         "WHERE agent_id = :agent AND id = ANY(CAST(:ids AS uuid[]))"
     ),
     "task": text(
-        "SELECT id::text AS id, left(task, 600) AS body FROM heart.subtasks "
+        r"SELECT id::text AS id, left(regexp_replace(task, '^\s+', ''), 600) AS body FROM heart.subtasks "
         "WHERE agent_id = :agent AND id = ANY(CAST(:ids AS uuid[]))"
     ),
 }
@@ -600,8 +601,8 @@ async def titles_of(
     session: AsyncSession, agent_id: str, kind: Literal["decision", "task"], ids: Iterable[str]
 ) -> dict[str, str | None]:
     """The title of each id asked: the description of this agent's decision (``decision``) or the text of its task
-    (``task``) with that id, as ``one_line`` gives it, None when there is no such row. One statement for the ids
-    without repeats, none when no id is asked. Read-only."""
+    (``task``) with that id, as ``one_line`` gives it, None when there is no such row or its text is blank. One
+    statement for the ids without repeats, none when no id is asked. Read-only."""
     asked = list(dict.fromkeys(ids))
     if not asked:
         return {}

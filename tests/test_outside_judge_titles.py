@@ -132,6 +132,18 @@ async def test_titles_of_asks_each_id_once_and_runs_nothing_for_no_ids(db, agent
     assert await store.titles_of(_Refusing(), agent, "task", []) == {}
 
 
+@pytest.mark.postgres_only
+async def test_a_text_that_starts_with_much_white_space_still_has_a_title_and_a_blank_one_has_none(db, agent):
+    padded = await _decision(db, agent, " \n\t" * 300 + "Rotate the\nkeys")
+    padded_task = await _task(db, agent, "\n" * 700 + "Write the summary")
+    blank = await _decision(db, agent, " \n\t ")
+    async with db.session() as session:
+        decisions = await store.titles_of(session, agent, "decision", [str(padded), str(blank)])
+        tasks = await store.titles_of(session, agent, "task", [str(padded_task)])
+    assert decisions == {str(padded): "Rotate the keys", str(blank): None}
+    assert tasks == {str(padded_task): "Write the summary"}
+
+
 # ---- the route ------------------------------------------------------------------------------------------------------
 
 
@@ -309,6 +321,47 @@ async def test_when_the_titles_cannot_be_read_they_are_null_and_the_numbers_are_
     assert [row["title"] for row in body["disagreements"]] == [None, None]
     [line] = [r.getMessage() for r in caplog.records if r.name == "nous.api.rest" and r.levelno >= logging.WARNING]
     assert "ConnectionError" in line and "never logged" not in line
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_read_of_the_decisions_leaves_the_reports_titles(tmp_path, db, agent, monkeypatch, caplog):
+    decision = await _decision(db, agent, "Retry the upload")
+    task_id = await _task(db, agent, "Deploy the new build")
+    report = {"subject_kind": "task_report", "judge_version": "stub-r9", "verdict": "not_supported"}
+    await _verdicts(db, agent, [{"subject_id": decision}, {**report, "subject_id": task_id}])
+    real_titles = store.titles_of
+
+    async def decisions_fail(session: Any, agent_id: str, kind: str, ids: Any) -> dict[str, str | None]:
+        if kind == "decision":
+            raise ConnectionError("the read failed")
+        return await real_titles(session, agent_id, kind, ids)
+
+    monkeypatch.setattr(store, "titles_of", decisions_fail)
+    service = _service(db, agent, report_judge=_Stub("stub", "stub-r9"))
+    judge_slot.set_current(service)
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.api.rest"):
+            app = _app(tmp_path, db, agent_id=agent, outside_judge_mode="shadow", outside_judge_reports_enabled=True)
+            body = (await _get(app)).json()
+    finally:
+        await service.close()
+    assert [(row["subject_id"], row["title"]) for row in body["disagreements"]] == [(str(decision), None)]
+    assert [row["title"] for row in body["reports"]["not_supported"]] == ["Deploy the new build"]
+    [line] = [r.getMessage() for r in caplog.records if r.name == "nous.api.rest" and r.levelno >= logging.WARNING]
+    assert "ConnectionError" in line
+
+
+@pytest.mark.postgres_only
+async def test_the_route_gives_no_title_from_another_agents_decision(tmp_path, db, agent):
+    theirs = await _decision(db, f"{agent}-other", "Another agent's decision")
+    await _verdicts(db, agent, [{"subject_id": theirs}])
+    service = _service(db, agent)
+    judge_slot.set_current(service)
+    try:
+        body = (await _get(_app(tmp_path, db, agent_id=agent, outside_judge_mode="shadow"))).json()
+    finally:
+        await service.close()
+    assert [(row["subject_id"], row["title"]) for row in body["disagreements"]] == [(str(theirs), None)]
 
 
 @pytest.mark.postgres_only

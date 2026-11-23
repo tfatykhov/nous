@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   AGAINST_AUDIT, AGAINST_FINISH, DISAGREEMENTS_MAX, GRADER_COLUMNS, GRADER_NOTE, INTRO, LABEL_WORDS, LOAD_FAILED,
-  NO_DISAGREEMENTS, NO_NOT_SUPPORTED, NO_REPORTS, NO_SENTENCE, NOT_ENOUGH, NOT_ENOUGH_COMPARED, NOT_SUPPORTED_HEADING,
-  NOTHING_GRADED, NOTHING_JUDGED, NOTHING_LEFT_OUT, SHOW_FEWER, SHOWN, STRIP_HINT, SWEEP_INTRO, SWEEP_NO_NUMBERS,
-  SWEEP_NONE_YET, TITLE,
+  NO_DISAGREEMENTS, NO_NOT_SUPPORTED, NO_REPORTS, NO_SENTENCE, NONE_COMPARED, NONE_GRADED, NONE_SKIPPED_OR_FAILED,
+  NOT_SUPPORTED_HEADING, NOTHING_GRADED, NOTHING_JUDGED, SHOW_FEWER, SHOWN, SKIPPED_HEADING, STRIP_HINT, SWEEP_INTRO,
+  SWEEP_NO_NUMBERS, SWEEP_NONE_YET, TITLE,
   agreementLine, auditWord, betweenRate, betweenText, cannotTellTile, confidenceText, costRows, directionWord,
   disagreementCount, disagreementLine, finishWord, graderRows, graderWords, labelWord, latencyText, legendText,
-  notJudgedLines, notJudgedText, otherClaimText, outcomeTile, pairLine, readJudge, reportCostText, reportSegments,
+  notJudgedLines, notJudgedText, otherClaimText, outcomeTile, pairLine, pairsShownText, readJudge, reportCostText, reportSegments,
   reportsSub, scopeText, secondText, showAllText, statedConfidenceText, statusTitle, stripRows, sweepText, tiles,
   titleOrId, verdictSegments, verdictSummary, workerText,
   type Between, type GraderGroup, type JudgeData, type SecondNumbers, type Sweep, type SweepRuntime,
@@ -53,17 +53,18 @@ describe('fixed sentences', () => {
     expect(TITLE).toBe('The outside judge');
     expect(INTRO).toBe('The outside judge only records its own verdicts beside the grades Nous already has, and changes no grade.');
     expect(LOAD_FAILED).toBe("The outside judge's numbers could not be read. Use Refresh at the top of the page to try again.");
-    expect(NOT_ENOUGH).toBe('Not enough graded yet');
-    expect(NOT_ENOUGH_COMPARED).toBe('Not enough compared yet');
+    expect(NONE_GRADED).toBe('Nothing graded yet');
+    expect(NONE_COMPARED).toBe('Nothing compared yet');
     expect(NOTHING_JUDGED(7)).toBe('No decision has been judged in the last 7 days.');
-    expect(NOTHING_GRADED).toBe('No verdict has been compared with a grade yet.');
+    expect(NOTHING_GRADED(7)).toBe('No verdict has been compared with a grade in the last 7 days.');
     expect(NO_DISAGREEMENTS(30)).toBe('The judge has not disagreed with a grade in the last 30 days.');
     expect(NO_REPORTS(90)).toBe('No task report has been judged in the last 90 days.');
     expect(NO_NOT_SUPPORTED).toBe('The judge found every judged report supported or could not tell.');
-    expect(NOTHING_LEFT_OUT).toBe('Nothing was left unjudged.');
+    expect(NONE_SKIPPED_OR_FAILED).toBe('none skipped, no judgement failed or ran out of time');
+    expect(SKIPPED_HEADING).toBe('Skipped or failed');
     expect(NO_SENTENCE).toBe('The judge gave no sentence.');
     expect(GRADER_NOTE).toBe('Agreement leaves out the verdicts that said “could not tell”.');
-    expect(STRIP_HINT).toBe('Waiting is the queue now. Dropped and over the limit count since this server process started.');
+    expect(STRIP_HINT).toBe('Waiting is the queue when these numbers were read. Dropped and over the limit count since this server process started.');
     expect(SWEEP_INTRO).toBe(
       "Once an hour the judge picks up decisions and reports that have no final verdict yet. A pass queues nothing once today's calls reach half the daily limit.");
     expect(SWEEP_NO_NUMBERS).toBe('The hourly pass has no numbers in this server process.');
@@ -98,13 +99,16 @@ describe('tiles', () => {
       { label: 'Decisions judged', value: '11', sub: 'in the last 7 days', words: false },
       { label: 'Agreement with outcomes', value: '50%', sub: "1 of 2 graded verdicts match your taps and the reviewer's outcome signals", words: false },
       { label: 'Could not tell', value: '82%', sub: '9 of 11 verdicts', words: false },
-      { label: 'Calls today', value: '16 of 100', sub: 'today, every instructions version, decisions and reports', words: false },
+      { label: 'Calls today', value: '16 of 100', sub: 'today (UTC), every instructions version, decisions and reports', words: false },
     ]);
   });
 
   it('a rate with nothing graded is words, never 0%; without the sweep the tile is not there', () => {
     expect(outcomeTile(SWEEP({ agreement: { outcome_grades: group({ agree: 0, judge_harsher: 0, cannot_tell: 11, agree_rate: null }), stated_confidence: group() } })))
-      .toEqual({ label: 'Agreement with outcomes', value: 'Not enough graded yet', sub: '0 graded so far', words: true });
+      .toEqual({ label: 'Agreement with outcomes', value: 'Nothing graded yet', sub: '11 of 11 said “could not tell”', words: true });
+    const nothing = group({ n: 0, agree: 0, judge_harsher: 0, cannot_tell: 0, agree_rate: null });
+    expect(outcomeTile(SWEEP({ agreement: { outcome_grades: nothing, stated_confidence: nothing } })))
+      .toEqual({ label: 'Agreement with outcomes', value: 'Nothing graded yet', sub: 'none judged yet', words: true });
     expect(outcomeTile(undefined)).toBeNull();
     expect(tiles(THIN({ sweep: undefined })).map((t) => t.label)).toEqual(['Decisions judged', 'Could not tell', 'Calls today']);
   });
@@ -159,7 +163,7 @@ describe('who graded', () => {
   it('a row: its counts, and its rate in words when nothing was graded (a real 0 is 0%)', () => {
     const [thin] = graderRows({ a2ui: group() });
     expect(thin).toEqual({ key: 'a2ui', label: 'Your tap on a card', n: 11, agree: 1, harsher: 1, kinder: 0, cannotTell: 9, rate: '50%' });
-    expect(graderRows({ a2ui: group({ agree_rate: null }) })[0].rate).toBe('Not enough graded yet');
+    expect(graderRows({ a2ui: group({ agree_rate: null }) })[0].rate).toBe('Nothing graded yet');
     expect(graderRows({ a2ui: group({ agree: 0, agree_rate: 0 }) })[0].rate).toBe('0%');
   });
 });
@@ -176,7 +180,9 @@ describe('where the judge disagreed', () => {
     expect(disagreementLine(THIN().disagreements[0])).toBe(
       'Graded success by your tap on a card. The judge says partial, harsher than that grade.');
     expect(disagreementLine({ against_grade: null, against_grader: null, verdict: 'failure' })).toBe(
-      'Graded with no grade by an unrecorded grader. The judge says failure, different from that grade.');
+      'No grade was recorded. The judge says failure.');
+    expect(disagreementLine({ against_grade: 'success', against_grader: null, verdict: 'failure' })).toBe(
+      'Graded success by an unrecorded grader. The judge says failure, harsher than that grade.');
   });
 
   it('a title, or the noun and the start of the id', () => {
@@ -206,7 +212,7 @@ describe('task reports', () => {
     const r = THIN().reports!;
     expect(reportsSub(r)).toBe('Judge background_model, instructions rj-1');
     expect(agreementLine(AGAINST_FINISH, r.vs_finish_check)).toBe('Agreement with the finish checks: 75% (3 of 4 compared)');
-    expect(agreementLine(AGAINST_AUDIT, r.vs_audit)).toBe('Agreement with your spot checks: Not enough compared yet');
+    expect(agreementLine(AGAINST_AUDIT, r.vs_audit)).toBe('Agreement with your spot checks: Nothing compared yet');
     expect(reportCostText(r.cost)).toBe('Cost: 4 calls, 10,734 tokens in, 826 tokens out.');
   });
 
@@ -215,14 +221,14 @@ describe('task reports', () => {
       'Finish check: clean', 'Finish check: flagged', 'Finish check: not checked', 'No finish check', 'Finish check: odd',
     ]);
     expect(['right', 'wrong', null, 'odd'].map((v) => auditWord(v))).toEqual([
-      'Your spot check: right', 'Your spot check: wrong', 'No spot check yet', 'odd',
+      'Your spot check: right', 'Your spot check: wrong', 'No spot check yet', 'Your spot check: odd',
     ]);
   });
 });
 
-describe('not judged', () => {
-  it('skipped by label and failed judgements, or nothing left out', () => {
-    expect(notJudgedText({}, 0)).toBe('Nothing was left unjudged.');
+describe('skipped or failed', () => {
+  it('skipped by label and failed judgements, or that there were none', () => {
+    expect(notJudgedText({}, 0)).toBe('none skipped, no judgement failed or ran out of time');
     expect(notJudgedText({ evidence_missing: 3 }, 0)).toBe('3 skipped (no record of what happened was found: 3)');
     expect(notJudgedText({}, 1)).toBe('1 judgement failed or ran out of time');
     expect(notJudgedText({ evidence_missing: 0 }, 2)).toBe('2 judgements failed or ran out of time');
@@ -254,7 +260,7 @@ describe('the hourly pass', () => {
   });
 
   it('the stated-confidence agreement, in words when nothing was graded', () => {
-    expect(statedConfidenceText(SWEEP())).toBe("Agreement with Nous's stated confidence, which is not an outcome: Not enough graded yet");
+    expect(statedConfidenceText(SWEEP())).toBe("Agreement with Nous's stated confidence, which is not an outcome: Nothing graded yet");
     expect(statedConfidenceText(SWEEP({ agreement: { outcome_grades: group(), stated_confidence: group({ agree_rate: 0.25 }) } })))
       .toBe("Agreement with Nous's stated confidence, which is not an outcome: 25%");
   });
@@ -272,13 +278,28 @@ describe('the second judge', () => {
   };
 
   it('its numbers and how the two compare', () => {
-    expect(secondText(second)).toBe('Judge jev, instructions jq-2:jev-1.14.0, model not named. It judged 6 decisions; calls today 2 of 50.');
+    expect(secondText(second)).toBe('Judge jev, instructions jq-2:jev-1.14.0, model not named. It judged 6 decisions; calls today (UTC) 2 of 50.');
+    expect(secondText({ ...second, decisions: { ...second.decisions, judged: 1 } })).toContain('It judged 1 decision;');
     expect(betweenText(between)).toBe(
-      'On the same claim, both judges judged 6 decisions: they agreed on 3, one could not tell on 2, and they differed on 1.');
+      'On the same claim, both judges judged 6 decisions: they agreed on 3, at least one could not tell on 2, and they differed on 1.');
+    expect(betweenText({ ...between, pairs: 1, agree: 0, either_cannot_tell: 1 })).toBe(
+      'On the same claim, both judges judged 1 decision: they agreed on 0, at least one could not tell on 1, and they differed on 0.');
     expect(betweenRate(between)).toBe('Agreement: 75%');
-    expect(betweenRate({ ...between, agree_rate: null })).toBe('Agreement: Not enough compared yet');
-    expect(otherClaimText(2)).toBe('2 more were judged on different claims and are not compared.');
+    expect(betweenRate({ ...between, agree_rate: null })).toBe('Agreement: Nothing compared yet');
+    expect(otherClaimText(2)).toBe('2 more decisions were judged on different claims and are not compared.');
+    expect(otherClaimText(1)).toBe('1 more decision was judged on different claims and is not compared.');
     expect(pairLine({ first_verdict: 'success', second_verdict: 'failure' })).toBe('The first judge says success, the second says failure.');
+  });
+
+  it('says how many differed when more than five are listed', () => {
+    const pair = {
+      subject_id: 'x', title: null, claim_at: '2026-11-20T10:00:00+00:00', against_grader: 'a2ui', against_grade: 'success',
+      first_verdict: 'success', second_verdict: 'failure', first_confidence: null, second_confidence: null, first_labels: [],
+      second_labels: [], evidence_differs: false,
+    };
+    const many = { ...between, pairs: 20, agree: 6, either_cannot_tell: 2, disagreements: Array.from({ length: 12 }, () => pair) };
+    expect(pairsShownText(many)).toBe('The latest 5 of 12');
+    expect(pairsShownText({ ...between, disagreements: [pair] })).toBeNull(); // 1 differed, 1 listed
   });
 });
 

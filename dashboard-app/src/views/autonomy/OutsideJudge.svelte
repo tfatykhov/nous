@@ -2,22 +2,24 @@
   import { onMount, untrack } from 'svelte';
   import { Button } from '../../lib/ui/button';
   import { count, pct } from '../../lib/autonomy';
+  import type { ApiAnswerError } from '../../lib/api';
   import { fmtUtc } from '../../lib/harness';
   import {
     AGAINST_AUDIT, AGAINST_FINISH, GRADER_COLUMNS, GRADER_NOTE, INTRO, LOAD_FAILED, NO_DISAGREEMENTS, NO_NOT_SUPPORTED,
     NO_REPORTS, NO_SENTENCE, NOT_SUPPORTED_HEADING, NOTHING_GRADED, NOTHING_JUDGED, PAIRS_SHOWN, SHOW_FEWER, SHOWN,
-    STRIP_HINT, SWEEP_INTRO, TITLE,
+    SKIPPED_HEADING, STRIP_HINT, SWEEP_INTRO, TITLE,
     agreementLine, auditWord, betweenRate, betweenText, confidenceText, costRows, disagreementCount, disagreementLine,
-    finishWord, graderRows, labelWord, legendText, notJudgedLines, otherClaimText, pairLine, readJudge, reportCostText,
+    finishWord, graderRows, labelWord, legendText, notJudgedLines, otherClaimText, pairLine, pairsShownText, readJudge, reportCostText,
     reportSegments, reportsSub, scopeText, secondText, showAllText, statedConfidenceText, statusTitle, stripRows,
     sweepText, tiles, titleOrId, verdictSegments, verdictSummary,
     type JudgeData, type Segment,
   } from '../../lib/outside_judge_numbers';
 
   // F118: the outside judge's numbers (GET /dashboard/outside-judge), read-only. It reads the page's window and asks
-  // again on the page's Refresh. With the judge off on the server (any answer whose `enabled` is not true) nothing is
-  // drawn and nothing more is asked. A first read that fails draws the title and one sentence; a later one keeps the
-  // numbers on screen and adds the sentence. Only the latest read is drawn. Server text is bound as text only.
+  // again on the page's Refresh. With the judge off on the server (any answer whose `enabled` is not true), or a first
+  // read the server refuses (403), nothing is drawn and nothing more is asked. Any other first read that fails draws the
+  // title and one sentence; a later one keeps the numbers on screen and adds the sentence. Only the latest read is
+  // drawn. Server text is bound as text only.
 
   let { days, refresh }: { days: string; refresh: number } = $props();
 
@@ -46,8 +48,13 @@
         return;
       }
       answer = next;
-    } catch {
+    } catch (err) {
       if (!mounted || mine !== seq) return;
+      if (answer === null && (err as ApiAnswerError)?.status === 403) {
+        off = true;
+        failed = false;
+        return;
+      }
       failed = true;
     } finally {
       if (mounted && mine === seq) loading = false;
@@ -110,7 +117,7 @@
 
       <h3 class="label">Agreement by who graded</h3>
       {#if graders.length === 0}
-        <p class="empty">{NOTHING_GRADED}</p>
+        <p class="empty">{NOTHING_GRADED(d.days)}</p>
       {:else}
         <div class="table-wrap table-scroll">
           <table class="stats nums">
@@ -187,7 +194,7 @@
         {/if}
       {/if}
 
-      <h3 class="label">Not judged</h3>
+      <h3 class="label">{SKIPPED_HEADING}</h3>
       {#each notJudgedLines(d) as line (line)}<p class="small line">{line}</p>{/each}
 
       {#if d.sweep}
@@ -206,6 +213,8 @@
           <p class="small line">{betweenRate(b)}</p>
           {#if b.other_claim > 0}<p class="small muted line">{otherClaimText(b.other_claim)}</p>{/if}
           {#if b.disagreements.length > 0}
+            {@const more = pairsShownText(b)}
+            {#if more}<p class="small muted line">{more}</p>{/if}
             <ul class="items" data-testid="oj-pairs">
               {#each b.disagreements.slice(0, PAIRS_SHOWN) as p, i (`${p.subject_id}-${i}`)}
                 <li class="item">

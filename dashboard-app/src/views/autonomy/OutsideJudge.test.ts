@@ -127,7 +127,7 @@ describe('the thin state', () => {
     expect(tile(section, 'Decisions judged')).toEqual(['11', 'in the last 7 days']);
     expect(tile(section, 'Agreement with outcomes')).toEqual(['50%', "1 of 2 graded verdicts match your taps and the reviewer's outcome signals"]);
     expect(tile(section, 'Could not tell')).toEqual(['82%', '9 of 11 verdicts']);
-    expect(tile(section, 'Calls today')).toEqual(['16 of 100', 'today, every instructions version, decisions and reports']);
+    expect(tile(section, 'Calls today')).toEqual(['16 of 100', 'today (UTC), every instructions version, decisions and reports']);
     expect(screen.getByRole('img', { name: 'Success 1, Partial 1, Could not tell 9' })).toBeTruthy();
     expect(Array.from(section.querySelectorAll('.legend li')).slice(0, 3).map((li) => li.textContent))
       .toEqual(['Success 1 (9%)', 'Partial 1 (9%)', 'Could not tell 9 (82%)']);
@@ -143,7 +143,7 @@ describe('the thin state', () => {
     expect(text).toContain('1 in the last 7 days, newest first');
     expect(text).toContain('Judge background_model, instructions rj-1');
     expect(text).toContain('Agreement with the finish checks: 100% (4 of 4 compared)');
-    expect(text).toContain('Agreement with your spot checks: Not enough compared yet');
+    expect(text).toContain('Agreement with your spot checks: Nothing compared yet');
     expect(text).toContain('The judge found every judged report supported or could not tell.');
     expect(text).toContain('Decisions: 3 skipped (no record of what happened was found: 3); 1 judgement failed or ran out of time');
     expect(text).toContain('Average tokens per verdict');
@@ -167,7 +167,7 @@ describe('the thin state', () => {
     expect(strip.textContent).toContain('Not running');
   });
 
-  it('a null agreement rate reads "Not enough graded yet", never 0%', async () => {
+  it('a null agreement rate reads "Nothing graded yet", never 0%', async () => {
     const none = group({ agree: 0, judge_harsher: 0, cannot_tell: 11, agree_rate: null });
     fallback = {
       status: 200,
@@ -177,9 +177,9 @@ describe('the thin state', () => {
       }),
     };
     const section = await panel();
-    expect(tile(section, 'Agreement with outcomes')).toEqual(['Not enough graded yet', '0 graded so far']);
+    expect(tile(section, 'Agreement with outcomes')).toEqual(['Nothing graded yet', '11 of 11 said “could not tell”']);
     const row = screen.getByText('Your tap on a card', { selector: 'th' }).closest('tr')!;
-    expect(row.lastElementChild?.textContent).toBe('Not enough graded yet');
+    expect(row.lastElementChild?.textContent).toBe('Nothing graded yet');
     expect(section.textContent).not.toMatch(/(?<!\d)0%/); // a share of 0%, not the reports' 100%
   });
 });
@@ -266,7 +266,7 @@ describe('blocks', () => {
     fallback = { status: 200, body: THIN({ reports }) };
     const section = await panel();
     expect(screen.getByRole('img', { name: 'Supported 2, Not supported 1' })).toBeTruthy();
-    expect(section.textContent).toContain('Agreement with the finish checks: Not enough compared yet');
+    expect(section.textContent).toContain('Agreement with the finish checks: Nothing compared yet');
     expect(section.textContent).toContain('Agreement with your spot checks: 100% (1 of 1 compared)');
     expect(section.textContent).toContain('Cost: 4 calls, 10,734 tokens in, 826 tokens out.');
     expect(screen.getByRole('heading', { name: 'Latest reports the judge did not find supported' })).toBeTruthy();
@@ -286,7 +286,7 @@ describe('blocks', () => {
     expect(section.textContent).toContain('Once an hour the judge picks up decisions and reports that have no final verdict yet.');
     expect(section.textContent).toContain(
       'Since this process started: 3 passes, the last at Nov 20 16:56 UTC. It queued 2 decisions (your tap on a card 2) and 1 report.');
-    expect(section.textContent).toContain("Agreement with Nous's stated confidence, which is not an outcome: Not enough graded yet");
+    expect(section.textContent).toContain("Agreement with Nous's stated confidence, which is not an outcome: Nothing graded yet");
   });
 
   it('the hourly pass with no pass yet, and with no numbers in this process (then without its sentence)', async () => {
@@ -323,14 +323,41 @@ describe('blocks', () => {
     };
     const section = await panel();
     expect(screen.getByRole('heading', { name: 'The second judge' })).toBeTruthy();
-    expect(section.textContent).toContain('Judge jev, instructions jq-2:jev-1.14.0, model jev-1.14.0. It judged 4 decisions; calls today 1 of 50.');
+    expect(section.textContent).toContain('Judge jev, instructions jq-2:jev-1.14.0, model jev-1.14.0. It judged 4 decisions; calls today (UTC) 1 of 50.');
     expect(section.textContent).toContain(
-      'On the same claim, both judges judged 4 decisions: they agreed on 2, one could not tell on 1, and they differed on 1.');
+      'On the same claim, both judges judged 4 decisions: they agreed on 2, at least one could not tell on 1, and they differed on 1.');
     expect(section.textContent).toContain('Agreement: 67%');
-    expect(section.textContent).toContain('1 more were judged on different claims and are not compared.');
+    expect(section.textContent).toContain('1 more decision was judged on different claims and is not compared.');
     const [pair] = Array.from(section.querySelectorAll('[data-testid="oj-pairs"] li'));
     expect(pair.textContent).toContain('Rotate the keys');
     expect(pair.textContent).toContain('The first judge says success, the second says failure.');
+    expect(section.textContent).not.toContain('The latest 1 of');
+  });
+
+  it('the second judge: when more pairs differed than are listed, the count says so', async () => {
+    const pair = (n: number) => ({
+      subject_id: ID(n), title: `Pair number ${n}`, claim_at: '2026-11-20T10:00:00+00:00', against_grader: 'agent',
+      against_grade: 'success', first_verdict: 'success', second_verdict: 'failure', first_confidence: 0.8,
+      second_confidence: 0.9, first_labels: [], second_labels: [], evidence_differs: false,
+    });
+    fallback = {
+      status: 200,
+      body: BARE({
+        second: {
+          judge: 'jev', version: 'jq-2:jev-1.14.0', model: 'jev-1.14.0',
+          decisions: { judged: 20, by_verdict: {}, skipped_by_label: {}, errors: 0, by_grader: {} },
+          cost: { calls: 20, tokens_in: 1, tokens_out: 1, tokens_per_verdict_avg: null, latency_ms_p50: null, today: { calls: 1, cap: 50 } },
+        },
+        between_judges: {
+          pairs: 20, agree: 6, either_cannot_tell: 2, agree_rate: 0.33, matrix: {}, evidence_differs: 0, other_claim: 0,
+          disagreements: Array.from({ length: 12 }, (_, i) => pair(i + 1)),
+        },
+      }),
+    };
+    const section = await panel();
+    expect(section.textContent).toContain('they differed on 12.');
+    expect(screen.getByText('The latest 5 of 12')).toBeTruthy();
+    expect(section.querySelectorAll('[data-testid="oj-pairs"] li')).toHaveLength(5);
   });
 });
 
@@ -349,10 +376,11 @@ describe('empty lists', () => {
     expect(tile(section, 'Decisions judged')).toEqual(['0', 'in the last 30 days']);
     expect(tile(section, 'Could not tell')).toEqual(['—', 'nothing judged yet']);
     expect(section.textContent).toContain('No decision has been judged in the last 30 days.');
-    expect(section.textContent).toContain('No verdict has been compared with a grade yet.');
+    expect(section.textContent).toContain('No verdict has been compared with a grade in the last 30 days.');
     expect(section.textContent).toContain('The judge has not disagreed with a grade in the last 30 days.');
     expect(section.textContent).toContain('No task report has been judged in the last 30 days.');
-    expect(section.textContent).toContain('Decisions: Nothing was left unjudged.');
+    expect(section.textContent).toContain('Decisions: none skipped, no judgement failed or ran out of time');
+    expect(screen.getByRole('heading', { name: 'Skipped or failed' })).toBeTruthy();
     expect(section.textContent).not.toContain('The judge found every judged report supported');
     expect(section.querySelector('table')).toBeNull();
     expect(section.querySelector('[role="img"]')).toBeNull();
@@ -361,6 +389,28 @@ describe('empty lists', () => {
 });
 
 describe('failures', () => {
+  it('a first read the server refuses (403) draws nothing and asks no more, as with the judge off', async () => {
+    replies = [{ status: 403, body: { error: 'forbidden' } }];
+    const { container, rerender } = render(OutsideJudge, props());
+    await waitFor(() => expect(urls).toHaveLength(1));
+    await settle();
+    expect(container.textContent?.trim()).toBe('');
+    await rerender(props({ days: '30' }));
+    await rerender(props({ days: '30', refresh: 1 }));
+    await settle();
+    expect(urls).toHaveLength(1);
+    expect(container.textContent?.trim()).toBe('');
+  });
+
+  it('a later read refused (403) keeps the numbers and adds the sentence', async () => {
+    replies = [{ status: 200, body: BARE() }, { status: 403, body: { error: 'forbidden' } }];
+    const { rerender } = render(OutsideJudge, props());
+    const section = await found();
+    await rerender(props({ refresh: 1 }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(LOAD_FAILED));
+    expect(section.textContent).toContain('Graded success by your tap on a card.');
+  });
+
   it.each([
     ['a 500', (): Reply => ({ status: 500, body: { error: 'the judge\'s numbers could not be read' } })],
     ['a network error', (): Reply => ({ kind: 'network' })],
@@ -443,6 +493,6 @@ describe('on a phone', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'OutsideJudge.svelte'), 'utf-8'));
     const at = css.indexOf('@media (max-width: 640px)');
     expect(at).toBeGreaterThan(-1);
-    expect(parseBlocks(css.slice(at)).get('.stats tbody th')).toMatchObject({ 'white-space': 'normal', width: '8rem' });
+    expect(parseBlocks(css.slice(at)).get('.stats tbody th')).toMatchObject({ 'white-space': 'normal', width: '8rem', 'min-width': '8rem' });
   });
 });

@@ -2346,10 +2346,10 @@ def create_app(
         """GET /dashboard/outside-judge — F118: the outside judge's verdicts beside the grades they were compared
         with, its cost and its queue, for the running judge's name and version. Read-only; ``days`` 1 to 90, default
         14. Owner-guarded: the disagreements carry the judge's one sentence. Each listed decision, pair and
-        not-supported report carries a short ``title`` (null when the subject no longer exists or the read failed).
-        With the judge off: 200 {"enabled": false} and no session. With a second judge running beside the first,
-        ``second`` holds its own numbers and ``between_judges`` how the two judges' verdicts on the same claims
-        compare."""
+        not-supported report carries a short ``title`` (null when the subject no longer exists, its text is blank, or
+        the read failed). With the judge off: 200 {"enabled": false} and no session. With a second judge running
+        beside the first, ``second`` holds its own numbers and ``between_judges`` how the two judges' verdicts on the
+        same claims compare."""
         if settings.outside_judge_mode == "off":
             return JSONResponse({"enabled": False})
         from nous import judge as judge_slot
@@ -2440,9 +2440,9 @@ def create_app(
     async def _outside_judge_titles(body: dict[str, Any]) -> None:
         """F118, for GET /dashboard/outside-judge: a short ``title`` on each listed decision (``disagreements`` and
         ``between_judges.disagreements``) and not-supported report (``reports.not_supported``), the subject's own text
-        as one line (``judge_store.titles_of``); null when the subject no longer exists. One read per kind with rows,
-        in a session of its own; when it fails every title of that kind is null, with one WARNING, and the numbers
-        are still answered."""
+        as one line (``judge_store.titles_of``); null when the subject no longer exists or its text is blank. One read
+        per kind with rows, in a session of its own; when it fails every title of that kind is null, with one WARNING,
+        and the numbers are still answered."""
         from nous.judge import store as judge_store
 
         listed: dict[Literal["decision", "task"], list[dict[str, Any]]] = {
