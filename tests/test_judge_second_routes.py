@@ -302,7 +302,7 @@ async def test_the_read_answers_each_value_and_where_it_comes_from(served):
 @pytest.mark.parametrize(
     ("method", "path", "body", "error"),
     [
-        ("PATCH", PATH, {"on": False, "extra": 1}, "Not accepted: extra."),
+        ("PATCH", PATH, {"on": False, "extra": 1}, "Not accepted: an unknown field."),
         ("PATCH", PATH, {"on": None}, "Not accepted: on."),
         ("PATCH", PATH, {"on": "true"}, "Not accepted: on."),
         ("PATCH", PATH, {"daily_calls": True}, "Not accepted: daily_calls."),
@@ -321,9 +321,11 @@ async def test_the_read_answers_each_value_and_where_it_comes_from(served):
         ("PUT", f"{PATH}/key", {"key": "line\nbreak-key-12345678"}, KEY_RULE),
         ("PUT", f"{PATH}/key", {"key": "k" * 15}, KEY_RULE),
         ("PUT", f"{PATH}/key", {"key": "k" * 201}, KEY_RULE),
-        ("PUT", f"{PATH}/key", {"key": KEY, "other": 1}, "Not accepted: other."),
-        ("DELETE", f"{PATH}/key", {"key": KEY}, "Not accepted: key."),
-        ("POST", f"{PATH}/check", {"key": KEY}, "Not accepted: key."),
+        ("PUT", f"{PATH}/key", {"key": KEY, "other": 1}, "Not accepted: an unknown field."),
+        ("DELETE", f"{PATH}/key", {"key": KEY}, "Not accepted: an unknown field."),
+        ("POST", f"{PATH}/check", {"key": KEY}, "Not accepted: an unknown field."),
+        # A field name is not repeated: it could be anything typed.
+        ("PATCH", PATH, {KEY: 1}, "Not accepted: an unknown field."),
         ("PATCH", PATH, [1], "The body must be a JSON object."),
         ("PATCH", PATH, b"{not json", "The body must be JSON."),
         ("PUT", f"{PATH}/key", b"x" * 5000, "The body must be at most 4096 bytes."),

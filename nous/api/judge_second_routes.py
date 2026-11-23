@@ -93,7 +93,14 @@ async def _parse(request: Request, model: type[_Body]) -> Any:
     try:
         return model.model_validate(data)
     except ValidationError as exc:
-        fields = sorted({str(error["loc"][0])[:ECHO_CHARS] for error in exc.errors() if error["loc"]})
+        # A field of the route is named; a field it does not have is not repeated (its name could be anything typed).
+        fields = sorted(
+            {
+                "an unknown field" if error["type"] == "extra_forbidden" else str(error["loc"][0])[:ECHO_CHARS]
+                for error in exc.errors()
+                if error["loc"]
+            }
+        )
         raise _BadRequest(f"Not accepted: {', '.join(fields) or 'body'}.") from None
 
 
