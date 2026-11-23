@@ -179,6 +179,15 @@ describe('what the panel says', () => {
     expect(phone.get('.calls > li > .tool')).toMatchObject({ order: '-1', 'flex-basis': '100%' });
   });
 
+  it('on a phone the Work links flow as words in their sentence: inline, with a tap area that does not change the line', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'GoalActivity.svelte'), 'utf-8'));
+    const phone = parseBlocks(css.slice(css.indexOf('@media (max-width: 768px)')));
+    const link = phone.get('.links a');
+    expect(link).toMatchObject({ display: 'inline', 'padding-block': '0.75rem' });
+    expect(link?.['min-height']).toBeUndefined();
+    expect(phone.get('.links')?.['line-height']).toBeUndefined();
+  });
+
   it('a failed read with an earlier answer keeps it and says so; with none it says it could not read', async () => {
     replies = [[500, { error: 'the request could not be processed' }]];
     render(GoalActivity, props());

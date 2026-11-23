@@ -182,6 +182,8 @@
     .calls { display: block; }
     .calls > li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.125rem 0.75rem; }
     .calls > li > .tool { order: -1; flex-basis: 100%; }
-    .links a { display: inline-flex; align-items: center; min-height: 2.75rem; }
+    /* The links stay words in their sentence and wrap like words; the padding widens the tap area without changing
+       the line's height. */
+    .links a { display: inline; padding-block: 0.75rem; }
   }
 </style>
