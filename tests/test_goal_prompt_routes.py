@@ -239,12 +239,12 @@ async def test_with_goals_off_the_read_says_so_and_the_changes_answer_goals_off(
 # ---- what the first task and the follow-up turn read ---------------------------------------------------------------
 
 
-async def _goal_world(runner_env, **settings):  # noqa: F811
+async def _goal_world(runner_env, goal: dict | None = None, **settings):  # noqa: F811
     w = await world(runner_env, **settings)
     await add_agent(w.db, w.agent)
     guard = OwnerGuard(w.env.settings)
     w.app = Starlette(routes=build_goal_routes(database=w.db, settings=w.env.settings, goals=w.store, guard=guard))
-    w.goal = await active(w)
+    w.goal = await active(w, **(goal or {}))
     return w
 
 
@@ -425,3 +425,138 @@ async def test_a_follow_up_turn_whose_goal_prompt_no_censor_refuses_keeps_it(run
     await _refuse(w, "duplicate notes")  # the goal's own text: the turn's own check refuses it, not the prompt
     block = (await w.chain.turn_context(root.id)).block
     assert f"### {HEADING}\n{SAVED}" in block
+
+
+# ---- every reader carries the highest goal prompt that fits and that no refusing pattern matches --------------------
+# Which text fits is set by the goal's own text and two long owner notes (the goal prompt gives way to the owner's
+# newest entries); which text is refused, by a refusing censor on a phrase only the saved text has, and one on a phrase
+# only the built-in text has. Each reader's expectation is computed from the builder itself, with the arguments the
+# reader passed it: whether each text fits is what the builder renders when asked for that text alone.
+
+OWNER_FULL = ("- Fold every folder twice before merging. " + "Work in small steps and say what each showed. " * 40)[
+    :MAX_CHARS
+]
+OWNER_WORDS, BUILT_IN_WORDS = "Fold every folder twice", "dag_create for a workflow"
+LONGEST = {"title": "t" * 200, "objective": "Merge the duplicate notes. " + "o" * 3970, "done_when": "d" * 2000}
+# (the goal's texts, the owner's note length, the saved text) -> which texts fit the task and the block (checked below)
+FITS = {
+    "every text fits": (None, 0, FOLD, ({FOLD, DEFAULT_GOAL_PROMPT}, {FOLD, DEFAULT_GOAL_PROMPT})),
+    "the block has room for the built-in text only": (
+        LONGEST,
+        1_150,
+        OWNER_FULL,
+        ({OWNER_FULL, DEFAULT_GOAL_PROMPT}, {DEFAULT_GOAL_PROMPT}),
+    ),
+    "the task has room for the built-in text only": (LONGEST, 1_338, OWNER_FULL, ({DEFAULT_GOAL_PROMPT}, set())),
+    "no text fits": (LONGEST, 1_450, OWNER_FULL, (set(), set())),
+}
+REFUSED = {
+    "nothing refused": (),
+    "the saved text refused": (OWNER_WORDS,),
+    "the built-in text refused": (BUILT_IN_WORDS,),
+    "both refused": (OWNER_WORDS, BUILT_IN_WORDS),
+}
+
+
+def _spy(monkeypatch, name: str) -> tuple[list, object]:
+    """The calls made to ``charter.<name>`` from now on, and the real function."""
+    from nous.goals import charter
+
+    calls: list = []
+    real = getattr(charter, name)
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(charter, name, spy)
+    return calls, real
+
+
+def _highest(real, call, saved: str, refused_texts: set[str]) -> tuple[str | None, set[str]]:
+    """The highest of the saved text, the built-in text and none that fits (the builder renders it when asked for it
+    alone, with the reader's arguments) and is not refused; and the set of texts that fit."""
+    args, kwargs = call
+    fits = {
+        body
+        for body in (saved, DEFAULT_GOAL_PROMPT)
+        if real(*args, **{**kwargs, "goal_prompt": body}).goal_prompt == body
+    }
+    for body in (saved, DEFAULT_GOAL_PROMPT):
+        if body in fits and body not in refused_texts:
+            return body, fits
+    return None, fits
+
+
+@pytest.mark.parametrize("refused_name", list(REFUSED))
+@pytest.mark.parametrize("fits_name", list(FITS))
+async def test_each_reader_carries_the_highest_text_that_fits_and_is_not_refused(
+    runner_env,  # noqa: F811
+    monkeypatch,
+    fits_name,
+    refused_name,
+):
+    goal, note_chars, saved, (task_fits, block_fits) = FITS[fits_name]
+    w = await _goal_world(runner_env, goal=goal)
+    for letter in "AB" if note_chars else "":
+        await w.store.add_note(w.goal.id, letter * note_chars, actor="owner")
+    await _owner(w, "PUT", json={"text": saved})
+    for pattern in REFUSED[refused_name]:
+        await _refuse(w, pattern)
+    refused_texts = {text for text in (saved, DEFAULT_GOAL_PROMPT) if any(p in text for p in REFUSED[refused_name])}
+    task_calls, real_task = _spy(monkeypatch, "session_task")
+    block_calls, real_block = _spy(monkeypatch, "goal_block")
+
+    root, _row = await started(w, w.goal)  # the goal's own text is refused by nothing: the session starts
+    expected, fits = _highest(real_task, task_calls[0], saved, refused_texts)
+    assert fits == task_fits, fits_name
+    args, kwargs = task_calls[0]
+    assert await _stored_task(w, root) == real_task(*args, **{**kwargs, "goal_prompt": expected}).text
+
+    block = (await w.chain.turn_context(root.id)).block
+    expected, fits = _highest(real_block, block_calls[0], saved, refused_texts)
+    assert fits == block_fits, fits_name
+    args, kwargs = block_calls[0]
+    assert block == real_block(*args, **{**kwargs, "goal_prompt": expected}).text
+
+
+async def test_a_task_whose_saved_text_gave_way_to_a_refused_built_in_text_starts_with_none(runner_env):  # noqa: F811
+    """The normal bound, the longest goal texts and two long owner notes: the saved text does not fit, the builder
+    falls back to the built-in text, and a censor refuses a phrase of the built-in text only. The session starts,
+    with no goal prompt."""
+    w = await _goal_world(runner_env, goal=LONGEST)
+    for letter in "AB":
+        await w.store.add_note(w.goal.id, letter * 1_338, actor="owner")
+    await _owner(w, "PUT", json={"text": OWNER_FULL})
+    await _refuse(w, "dag_create")
+    root, _row = await started(w, w.goal)
+    task = await _stored_task(w, root)
+    assert HEADING not in task and w.driver._failures == {}
+
+
+async def test_the_rebuild_under_a_steering_censors_guidance_takes_no_text_a_censor_refuses(runner_env, monkeypatch):  # noqa: F811
+    """A steering censor's guidance makes the first task be built again with less room: there the saved text no
+    longer fits and the builder falls back to the built-in text, which a refusing censor matches. The rebuild then
+    carries no goal prompt, and the guidance stays whole."""
+    w = await _goal_world(runner_env, goal=LONGEST)
+    for letter in "AB":
+        await w.store.add_note(w.goal.id, letter * 475, actor="owner")
+    await _owner(w, "PUT", json={"text": OWNER_FULL})
+    guidance = "Keep every merge reversible. " * 60
+    await w.env.heart.add_censor(
+        CensorInput(
+            trigger_pattern="duplicate notes", reason="Merges lose text.", action="steer", action_instruction=guidance
+        )
+    )
+    await _refuse(w, BUILT_IN_WORDS)
+    calls, real = _spy(monkeypatch, "session_task")
+    root, _row = await started(w, w.goal)
+    task = await _stored_task(w, root)
+    first, rebuild = calls[0], calls[-1]
+    assert first[1]["max_chars"] > rebuild[1]["max_chars"]  # the rebuild had less room
+    _expected, fits = _highest(real, rebuild, OWNER_FULL, {DEFAULT_GOAL_PROMPT})
+    assert fits == {DEFAULT_GOAL_PROMPT}  # with less room, only the built-in text fits
+    args, kwargs = rebuild
+    plain = real(*args, **{**kwargs, "goal_prompt": None}).text
+    assert task.startswith(plain)
+    assert HEADING not in task and task.endswith(f"- {guidance}") and BUILT_IN_WORDS not in task

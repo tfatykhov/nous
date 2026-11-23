@@ -35,10 +35,11 @@ let sent: { method: string; url: string; body: unknown }[];
 let asked: string[];
 let answer: boolean;
 let hold: Promise<void> | null;
+let holdRead: Promise<void> | null; // holds every GET after this is set
 
 beforeEach(() => {
   first = STATE(); failRead = false; readStatus = 200; replies = []; sent = []; asked = []; answer = true;
-  hold = null;
+  hold = null; holdRead = null;
   vi.stubGlobal('confirm', (q: string) => { asked.push(q); return answer; });
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
     const method = init.method ?? 'GET';
@@ -46,6 +47,7 @@ beforeEach(() => {
     sent.push({ method, url, body });
     if (method === 'GET' && failRead) throw new TypeError('network');
     if (method !== 'GET' && hold) await hold;
+    if (method === 'GET' && holdRead) await holdRead;
     let reply: Reply = { status: readStatus, body: readStatus < 400 ? first : { error: 'no goal prompt' } };
     if (method === 'PUT') reply = replies.shift() ?? { status: 200, body: SAVED_STATE(body.text.trim()) };
     if (method === 'DELETE') reply = replies.shift() ?? { status: 200, body: STATE() };
@@ -108,6 +110,19 @@ describe('loading', () => {
   });
 });
 
+describe('before the first read answers', () => {
+  it('there is no field or button to use', async () => {
+    let release = () => {};
+    holdRead = new Promise((r) => { release = r; });
+    const { container } = render(GoalPrompt);
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(container.querySelectorAll('textarea, button')).toHaveLength(0);
+    release();
+    await card();
+    expect(field().disabled).toBe(false);
+  });
+});
+
 describe('editing', () => {
   it('a change says it is unsaved and may be saved', async () => {
     render(GoalPrompt);
@@ -166,7 +181,7 @@ describe('saving', () => {
     expect(button('Reset to the default').disabled).toBe(false);
   });
 
-  it('while it is sent both buttons wait', async () => {
+  it('while it is sent the field and both buttons wait, so nothing typed meanwhile is replaced', async () => {
     let release = () => {};
     hold = new Promise((r) => { release = r; });
     first = SAVED_STATE();
@@ -175,10 +190,51 @@ describe('saving', () => {
     await fireEvent.input(field(), { target: { value: 'Work smaller.' } });
     await fireEvent.click(button('Save'));
     await waitFor(() => expect(screen.getByText('Saving…')).toBeTruthy());
+    expect(field().disabled).toBe(true);
     expect(button('Save').disabled).toBe(true);
     expect(button('Reset to the default').disabled).toBe(true);
     release();
     await screen.findByText(SAVED);
+    expect(field().disabled).toBe(false);
+    expect(field().value).toBe('Work smaller.');
+  });
+
+  it('while a reset is sent the field and both buttons wait', async () => {
+    let release = () => {};
+    hold = new Promise((r) => { release = r; });
+    first = SAVED_STATE();
+    render(GoalPrompt);
+    await card();
+    await fireEvent.click(button('Reset to the default'));
+    await waitFor(() => expect(screen.getByText('Saving…')).toBeTruthy());
+    expect(field().disabled).toBe(true);
+    expect(button('Save').disabled).toBe(true);
+    expect(button('Reset to the default').disabled).toBe(true);
+    release();
+    await screen.findByText(RESET_DONE);
+    expect(field().disabled).toBe(false);
+    expect(field().value).toBe(DEFAULT);
+  });
+
+  it('while the read after a 409 is out the field and both buttons wait, and the edit is kept', async () => {
+    const CHANGED = 'The prompt was changed a moment ago, so this text was not saved. Save it again to replace that.';
+    replies = [{ status: 409, body: { error: CHANGED } }];
+    render(GoalPrompt);
+    await card();
+    let release = () => {};
+    holdRead = new Promise((r) => { release = r; });
+    first = SAVED_STATE('Saved from another tab.');
+    await fireEvent.input(field(), { target: { value: MINE } });
+    await fireEvent.click(button('Save'));
+    await screen.findByText(CHANGED);
+    await waitFor(() => expect(sent.map((s) => s.method)).toEqual(['GET', 'PUT', 'GET']));
+    expect(field().disabled).toBe(true);
+    expect(button('Save').disabled).toBe(true);
+    expect(button('Reset to the default').disabled).toBe(true);
+    release();
+    await waitFor(() => expect(field().disabled).toBe(false));
+    expect(field().value).toBe(MINE);
+    expect(stateLine()).toBe(savedState());
   });
 
   it('a refusal shows the server\'s sentence in the error colour and keeps the edit', async () => {

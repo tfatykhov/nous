@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -125,40 +126,51 @@ class GoalChain:
         # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
         refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)
-        prompt = await self._goal_prompt(goal.id)
-        block = charter.render_goal_block(
-            goal,
-            plan=list(goal.plan or []),
-            journal_rows=journal,
-            spent=total,
-            day_spent=today,
-            session_n=ref.session_n,
-            session_ended=ended,
-            citeable=refs,
-            root_dir=scope.root_dir,
-            moved=moved,
-            tools=tools,
-            commands_until=goal_commands.charter_until(goal, now=now, settings=self._settings),
-            goal_prompt=prompt,
-        )
+        until = goal_commands.charter_until(goal, now=now, settings=self._settings)
+
+        def render(prompt: str | None) -> charter.Rendered:
+            return charter.goal_block(
+                goal,
+                plan=list(goal.plan or []),
+                journal_rows=journal,
+                spent=total,
+                day_spent=today,
+                session_n=ref.session_n,
+                session_ended=ended,
+                citeable=refs,
+                root_dir=scope.root_dir,
+                moved=moved,
+                tools=tools,
+                commands_until=until,
+                goal_prompt=prompt,
+            )
+
+        block = await self._goal_block(goal.id, render)
         tools_of_turn = make_goal_tools(self._db, self._settings, self._store, ref, tool_grants=self._tool_grants)
         return GoalTurn(block=block, tools=tools_of_turn)
 
-    async def _goal_prompt(self, goal_id: UUID) -> str | None:
-        """The goal prompt of this turn's goal block: the first of ``default_prompt.rungs`` (the loaded text, the
-        built-in text, none) that the pattern of no censor that refuses matches (``default_prompt.refused``, the
-        keyword match on the goal prompt alone), read without side effects. The turn's prompt then goes through the
-        censor check every turn does; a refusal there (the semantic match, or a pattern that spans other text) is the
-        turn's own. Neither read raises: a failed one gives the built-in text, or keeps the text."""
-        prompt = await default_prompt.load(self._db, self._agent_id)
-        if self._heart is None:
-            return prompt
+    async def _goal_block(self, goal_id: UUID, render: Callable[[str | None], charter.Rendered]) -> str:
+        """This turn's goal block, from ``render`` with the first of ``default_prompt.rungs`` (the loaded text, the
+        built-in text, none) whose block carries a goal prompt that the pattern of no censor that refuses matches
+        (``default_prompt.refused``, the keyword match on the goal prompt alone), read without side effects. The
+        choice is made from the goal prompt each block carries (``charter.Rendered``), never from the one it asked
+        for: a block falls back to the built-in text, or none, when the text it was given does not fit. The turn's
+        prompt then goes through the censor check every turn does; a refusal there (the semantic match, or a pattern
+        that spans other text) is the turn's own. Neither read raises: a failed one gives the built-in text, or keeps
+        the text."""
+        prompts = default_prompt.rungs(await default_prompt.load(self._db, self._agent_id))
+        built = render(prompts[0])
+        if self._heart is None or built.goal_prompt is None:
+            return built.text
         patterns = await default_prompt.refusing_patterns(self._heart)
-        chosen = next(rung for rung in default_prompt.rungs(prompt) if not default_prompt.refused(rung, patterns))
-        if chosen != prompt:
-            kind = "the built-in text" if chosen is not None else "no goal prompt"
+        set_aside = False
+        while built.goal_prompt is not None and default_prompt.refused(built.goal_prompt, patterns):
+            set_aside = True
+            built = render(prompts[prompts.index(built.goal_prompt) + 1])
+        if set_aside:
+            kind = "the built-in text" if built.goal_prompt is not None else "no goal prompt"
             logger.warning("Goal %s: a censor matches the goal prompt; the follow-up turn gets %s", goal_id, kind)
-        return chosen
+        return built.text
 
     async def _tool_lines(self, goal_id: UUID, root_id: UUID) -> list[Any]:
         """F115 per-goal tools: what the turn is told of the goal's grants, each available when the runner would

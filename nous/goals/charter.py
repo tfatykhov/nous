@@ -281,7 +281,21 @@ class _Fit:
             yield True
 
 
-def build_session_task(
+@dataclass(frozen=True)
+class Rendered:
+    """A built task or goal block, and the goal prompt it carries: the text the builder was given, the built-in text
+    it fell back to, or None (no section). A reader decides from this, never from the text it asked for."""
+
+    text: str
+    goal_prompt: str | None
+
+
+def build_session_task(*args: Any, **kwargs: Any) -> str:
+    """The text of ``session_task`` (the same arguments)."""
+    return session_task(*args, **kwargs).text
+
+
+def session_task(
     goal: Any,
     plan: Sequence[Any],
     journal_rows: Sequence[Any],
@@ -294,7 +308,7 @@ def build_session_task(
     commands_until: Any = None,
     pace_line: str | None = None,
     goal_prompt: str | None = None,
-) -> str:
+) -> Rendered:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today) and, for a goal that works once a day, ``pace_line``, the plan's steps and the journal's
     entries, newest first, both quoted as data, and what to do in this session. ``journal_rows`` need ``seq``,
@@ -303,7 +317,7 @@ def build_session_task(
     ``goal_prompt`` goes after the charter under ``## How a goal's work runs`` when it fits in the room the charter
     leaves beside an empty plan and journal and the task with it still shows what the task without it shows of the
     plan's first open step and the owner's two newest entries (``_gives_way``); else the built-in text on the same
-    terms; else the task is exactly the one without it.
+    terms; else the task is exactly the one without it. ``Rendered.goal_prompt`` says which it carries.
 
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
     Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
@@ -317,12 +331,12 @@ def build_session_task(
     )
     plain = _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
     if goal_prompt is None:
-        return plain.text
+        return Rendered(plain.text, None)
     room = max_chars - len(_Fit([], [], []).render(head, _TASK_LAYOUT)) - 2  # beside no plan and no journal
-    sections = [sec for sec in (section(body, "##") for body in bodies(goal_prompt)) if len(sec) <= room]
+    candidates = [(rung, section(body, "##")) for rung, body in bodies(goal_prompt)]
     return _gives_way(
         plain,
-        sections,
+        [(rung, sec) for rung, sec in candidates if len(sec) <= room],
         lambda sec: _fitted(f"{head}\n\n{sec}", plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved),
     )
 
@@ -337,18 +351,19 @@ class _Fitted:
     owner_newest: frozenset[int]
 
 
-def _gives_way(plain: _Fitted, sections: Sequence[str], build: Callable[[str], _Fitted]) -> str:
-    """The text ``build`` makes with the first of ``sections`` that shows the plan's first open step and the owner's
-    two newest entries wherever ``plain`` (the text without a section) shows them; else ``plain``'s text. A build the
-    cuts cannot fit (``ValueError``) is passed over."""
-    for sec in sections:
+def _gives_way(plain: _Fitted, candidates: Sequence[tuple[str, str]], build: Callable[[str], _Fitted]) -> Rendered:
+    """What ``build`` makes with the first of ``candidates`` (a goal prompt and its section) that shows the plan's
+    first open step and the owner's two newest entries wherever ``plain`` (the text without a section) shows them,
+    with that goal prompt; else ``plain``'s text with none. A build the cuts cannot fit (``ValueError``) is passed
+    over."""
+    for rung, sec in candidates:
         try:
             with_sec = build(sec)
         except ValueError:
             continue
         if with_sec.first_open == plain.first_open and plain.owner_newest <= with_sec.owner_newest:
-            return with_sec.text
-    return plain.text
+            return Rendered(with_sec.text, rung)
+    return Rendered(plain.text, None)
 
 
 def _fitted(
@@ -440,7 +455,12 @@ def _evidence_lines(citeable: Sequence[Any], root_dir: str | None, room: int) ->
     return "\n".join(lines + tail)
 
 
-def render_goal_block(
+def render_goal_block(goal: Any, **kwargs: Any) -> str:
+    """The text of ``goal_block`` (the same arguments)."""
+    return goal_block(goal, **kwargs).text
+
+
+def goal_block(
     goal: Any,
     *,
     plan: Sequence[Any],
@@ -456,7 +476,7 @@ def render_goal_block(
     tools: Sequence[ToolLine] | None = None,
     commands_until: Any = None,
     goal_prompt: str | None = None,
-) -> str:
+) -> Rendered:
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
     then how to record progress and the evidence the turn can cite (``citeable``: items with ``ref`` and ``label``,
@@ -466,7 +486,8 @@ def render_goal_block(
     files are evidence. ``goal_prompt`` goes after the charter under ``### How a goal's work runs`` when the evidence
     list keeps at least ``EVIDENCE_FLOOR`` characters beside it and the block with it still shows what the block
     without it shows of the plan's first open step and the owner's two newest entries (``_gives_way``); else the
-    built-in text on the same terms; else the block is exactly the one without it."""
+    built-in text on the same terms; else the block is exactly the one without it. ``Rendered.goal_prompt`` says
+    which it carries."""
     ended = "; that session has ended, so no plan step can be closed in this turn" if session_ended else ""
     head = (
         "## The goal this work belongs to\n"
@@ -488,7 +509,9 @@ def render_goal_block(
 
     plain = build(head)
     if goal_prompt is None:
-        return plain.text
+        return Rendered(plain.text, None)
     room = max_chars - len(head) - 2 - len(RECORDING) - BLOCK_RESERVE - EVIDENCE_FLOOR
-    sections = [sec for sec in (section(body, "###") for body in bodies(goal_prompt)) if len(sec) <= room]
-    return _gives_way(plain, sections, lambda sec: build(f"{head}\n\n{sec}"))
+    candidates = [(rung, section(body, "###")) for rung, body in bodies(goal_prompt)]
+    return _gives_way(
+        plain, [(rung, sec) for rung, sec in candidates if len(sec) <= room], lambda sec: build(f"{head}\n\n{sec}")
+    )

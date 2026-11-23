@@ -8,7 +8,8 @@ read at each session start and each follow-up turn, uncached, so a change applie
 Each sentence of the built-in text rests on a rule of the harness that ``tests/test_goal_prompt_rules.py`` pins.
 
 Every reader tries the same texts in the same order (``rungs``): the text loaded, the built-in text, none. A builder
-moves down when the text does not fit (``charter``); the first task's start moves down when the censor gate refuses
+moves down when the text does not fit (``charter``) and says which it carries (``charter.Rendered``); a reader decides
+from that, never from the text it asked for. The first task's start moves down when the censor gate refuses
 the task and the pattern of a censor that refuses matches the text (``GoalDriver._gated_task``); a follow-up turn
 moves down when such a pattern matches the text (``GoalChain.turn_context``, read only: ``refusing_patterns`` and
 ``refused``). This is the censor check's keyword match on the text alone: a refusal of the whole task or turn for
@@ -78,12 +79,16 @@ def rungs(text: str) -> list[str | None]:
     return [*dict.fromkeys([text, DEFAULT_GOAL_PROMPT]), None]
 
 
-def bodies(text: str) -> list[str]:
-    """What a builder puts under the heading, in the order it tries them: ``text`` as it is shown, then the built-in
-    text, each only when it shows something. ``neutralize`` is applied as it is to a goal's own title and objective:
-    it removes format and control characters other than newline and tab and escapes the data tags' names, so the
-    rendered text can differ slightly from the text the screen shows."""
-    return [body for body in dict.fromkeys([neutralize(text), DEFAULT_GOAL_PROMPT]) if goal_prompt_has_text(body)]
+def bodies(text: str) -> list[tuple[str, str]]:
+    """What a builder tries, in order, as ``(goal prompt, what goes under the heading)``: ``text`` as it is shown,
+    then the built-in text, each only when it shows something (and the built-in text once). ``neutralize`` is applied
+    as it is to a goal's own title and objective: it removes format and control characters other than newline and
+    tab and escapes the data tags' names, so the rendered text can differ slightly from the text the screen shows."""
+    tried: list[tuple[str, str]] = []
+    for rung, body in ((text, neutralize(text)), (DEFAULT_GOAL_PROMPT, DEFAULT_GOAL_PROMPT)):
+        if goal_prompt_has_text(body) and all(body != seen for _rung, seen in tried):
+            tried.append((rung, body))
+    return tried
 
 
 def section(body: str, level: str) -> str:

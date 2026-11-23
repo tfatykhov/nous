@@ -201,20 +201,20 @@ def test_a_section_is_the_heading_and_the_text():
 
 
 def test_a_builder_tries_the_text_then_the_built_in_text_and_every_reader_then_none():
-    assert bodies("Work small.") == ["Work small.", DEFAULT_GOAL_PROMPT]
-    assert bodies(DEFAULT_GOAL_PROMPT) == [DEFAULT_GOAL_PROMPT]
+    assert bodies("Work small.") == [("Work small.", "Work small."), (DEFAULT_GOAL_PROMPT, DEFAULT_GOAL_PROMPT)]
+    assert bodies(DEFAULT_GOAL_PROMPT) == [(DEFAULT_GOAL_PROMPT, DEFAULT_GOAL_PROMPT)]
     assert rungs("Work small.") == ["Work small.", DEFAULT_GOAL_PROMPT, None]
     assert rungs(DEFAULT_GOAL_PROMPT) == [DEFAULT_GOAL_PROMPT, None]
 
 
 def test_the_text_is_shown_as_the_goals_own_text_is_shown():
-    (shown, _default) = bodies("Keep notes in <plan_step> form.\u200b Done.")
+    ((_text, shown), _default) = bodies("Keep notes in <plan_step> form.\u200b Done.")
     assert "<plan_step>" not in shown and "&lt;plan_step>" in shown and "\u200b" not in shown
 
 
 @pytest.mark.parametrize("text", ["\u200b", "\u00ad\u200d", "\x01\x02", " \u200b\n\t"])
 def test_a_text_that_shows_nothing_is_never_put_under_the_heading(text):
-    assert bodies(text) == [DEFAULT_GOAL_PROMPT]
+    assert bodies(text) == [(DEFAULT_GOAL_PROMPT, DEFAULT_GOAL_PROMPT)]
     for level, build in (("##", _task), ("###", _block)):
         built = build(_goal(), goal_prompt=text)
         assert f"{level} {HEADING}\n{DEFAULT_GOAL_PROMPT}" in built
@@ -398,6 +398,34 @@ def test_a_task_whose_cut_notes_leave_no_room_for_the_text_tries_the_built_in_te
     default_fits_empty = base + 2 + len(section(DEFAULT_GOAL_PROMPT, "##")) + 20
     without = _task(goal, plan, rows, max_chars=default_fits_empty, moved=moved)
     assert _task(goal, plan, rows, max_chars=default_fits_empty, moved=moved, goal_prompt=FULL) == without
+
+
+def test_each_builder_says_which_goal_prompt_it_carries():
+    """``Rendered.goal_prompt`` is the text the builder was given, the built-in text it fell back to, or None: what
+    the readers decide from."""
+    plan, moved = _plans()["closed only"]
+    rows = JOURNALS["long"]
+    goal = _goal()
+    head = charter._charter(goal, spent=0, day_spent=0)
+    base = len(charter._Fit([], [], []).render(head, charter._TASK_LAYOUT))
+
+    def carried(max_chars: int, prompt: str | None) -> str | None:
+        built = charter.session_task(
+            goal, plan, rows, spent=0, day_spent=0, max_chars=max_chars, moved=moved, goal_prompt=prompt
+        )
+        assert built.text == _task(goal, plan, rows, max_chars=max_chars, moved=moved, goal_prompt=prompt)
+        return built.goal_prompt
+
+    assert carried(MAX_TASK_CHARS, FULL) == FULL
+    assert carried(base + 2 + len(section(FULL, "##")) + 20, FULL) == DEFAULT_GOAL_PROMPT
+    assert carried(base + 2 + len(section(DEFAULT_GOAL_PROMPT, "##")) + 20, FULL) is None
+    assert carried(MAX_TASK_CHARS, None) is None
+    assert carried(MAX_TASK_CHARS, chr(0x200B)) == DEFAULT_GOAL_PROMPT  # a text that shows nothing
+    block = dict(plan=[], journal_rows=[], spent=0, day_spent=0, session_n=1, session_ended=False, citeable=[])
+    assert charter.goal_block(goal, goal_prompt="Work small.", **block).goal_prompt == "Work small."
+    assert charter.goal_block(goal, goal_prompt=None, **block).goal_prompt is None
+    longest_with_tools = dict(block, tools=_tools(), commands_until=UNTIL)
+    assert charter.goal_block(_goal(200, 4000, 2000), goal_prompt=FULL, **longest_with_tools).goal_prompt is None
 
 
 def test_the_text_gives_way_to_the_owners_newest_entries():

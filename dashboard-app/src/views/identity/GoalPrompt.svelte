@@ -11,7 +11,9 @@
   // The default goal prompt, on the Identity screen. One GET when the screen opens: with goals off on the server
   // ({enabled: false}) or a server without the route (404), nothing is drawn; another failure says the card could not
   // be loaded. Save and Reset each ask first; a refusal shows the server's sentence with the draft kept, and after a
-  // save that another save beat (409) the card reads the prompt again so its line says what is saved now.
+  // save that another save beat (409) the card reads the prompt again so its line says what is saved now. While a
+  // save, a reset or that read is out, the field and both buttons wait: an answer replaces the draft with the text it
+  // carries, so nothing typed meanwhile could be kept.
 
   let prompt = $state<PromptState | null>(null);
   let failed = $state(false);
@@ -99,6 +101,7 @@
         rows={12}
         bind:value={draft}
         oninput={edited}
+        disabled={busy}
         aria-describedby="goal-prompt-count"
       ></textarea>
       <p class="count" class:count-over={over} id="goal-prompt-count">{countText(count, prompt.max_chars)}</p>
