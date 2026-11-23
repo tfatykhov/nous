@@ -683,6 +683,55 @@ def _build_goals(
     return goal_driver
 
 
+def _build_outside_judge(settings: Settings, *, database: Any, api_client: Any) -> Any | None:
+    """F118: with ``NOUS_OUTSIDE_JUDGE_MODE=shadow``, register the built-in judge (a closure over ``api_client``) and
+    build the one outside judge service; the caller starts it and installs it with ``nous.judge.set_current``. Off:
+    None, and nothing of the judge beyond its accessor is imported."""
+    if settings.outside_judge_mode != "shadow":
+        return None
+    from nous.judge.model_judge import NAME, register_background_model_judge
+    from nous.judge.service import OutsideJudge
+    from nous.judge.slot import PROVIDERS
+
+    register_background_model_judge(api_client)
+    judge = PROVIDERS[NAME](settings)
+    if judge is None:
+        return None
+    return OutsideJudge(database, settings, judge)
+
+
+async def _start_outside_judge(settings: Settings, *, database: Any, api_client: Any) -> Any | None:
+    """F118: build the outside judge (``_build_outside_judge``), start its worker, install it with
+    ``nous.judge.set_current`` and log its model; the running service, or None. Fails open: any error is one WARNING
+    with the exception's class name, a service already built is closed, nothing is installed, and start-up goes on."""
+    from nous import judge as judge_slot
+
+    service = None
+    try:
+        service = _build_outside_judge(settings, database=database, api_client=api_client)
+        if service is None:
+            return None
+        service.start()
+        judge_slot.set_current(service)
+        model = getattr(service.judge, "model", None)
+        logger.info(
+            "F118: the outside judge runs in shadow (model %s, at most %d calls a day)",
+            model if isinstance(model, str) else "not named",
+            settings.outside_judge_daily_calls,
+        )
+        return service
+    except Exception as exc:
+        logger.warning("F118: the outside judge did not start (%s); running without it", type(exc).__name__)
+        if judge_slot.current() is service:
+            judge_slot.set_current(None)
+        if service is not None:
+            try:
+                await service.close(timeout=0)
+            except Exception as close_exc:
+                logger.debug("F118: closing the judge that did not start failed (%s)", type(close_exc).__name__)
+        return None
+
+
 async def _load_autonomy(settings: Settings, database: Any) -> Any | None:
     """F115: with ``NOUS_AUTONOMY_SETTINGS_ENABLED`` on, the one autonomy store: built from ``settings`` (it keeps
     the host's values) and loaded (the owner's stored limits applied in place, the tool guard installed with
@@ -1429,6 +1478,10 @@ async def create_components(settings: Settings) -> dict:
         from nous.cognitive.promise_gate import PromiseGate
 
         runner.set_promise_gate(PromiseGate(commitment_store, settings, classifier=promise_classifier))
+    # F118: in shadow, the outside judge's queue and worker, through the client the other background calls use.
+    # resolve_decisions hands it each decision it resolved as success, partial or failure; nothing reads its verdicts
+    # but GET /dashboard/outside-judge. Off: nothing is built. A failure to start leaves the process without it.
+    outside_judge = await _start_outside_judge(settings, database=database, api_client=api_client)
     runner.set_api_client(api_client)
     await runner.start()
 
@@ -2238,6 +2291,7 @@ async def create_components(settings: Settings) -> dict:
         "check_audit_task": check_audit_task,
         "mcp_client": mcp_client,
         "autonomy": autonomy,
+        "outside_judge": outside_judge,
     }
 
 
@@ -2419,6 +2473,18 @@ async def shutdown_components(components: dict) -> None:
     runner = components.get("runner")
     if runner:
         await runner.close()
+
+    # F118: no turn submits any more: the outside judge takes no more work, waits briefly for a verdict in flight and
+    # cancels the rest, before the model client and the database close.
+    outside_judge = components.get("outside_judge")
+    if outside_judge is not None:
+        from nous import judge as judge_slot
+
+        judge_slot.set_current(None)
+        try:
+            await outside_judge.close()
+        except Exception as exc:
+            logger.warning("F118: the outside judge did not close cleanly (%s)", type(exc).__name__)
 
     # F112: no turn runs any more: close the MCP client's connections (bounded) and unregister its tools.
     mcp_client = components.get("mcp_client")

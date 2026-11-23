@@ -127,6 +127,10 @@ class UnusableToolReply(Exception):
     """A reply that is no whole call of the requested tool: cut off, refused, without the call or a required key."""
 
 
+class RequestBoundReached(Exception):
+    """The call would send more requests than its ``max_requests`` allows; that request is not sent."""
+
+
 def _tool_input(response: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """The input of the reply's call of ``payload``'s one tool, if the reply is a whole answer."""
     (tool,) = payload["tools"]
@@ -146,8 +150,42 @@ def _tool_input(response: Any, payload: dict[str, Any]) -> dict[str, Any]:
     raise UnusableToolReply(f"stop_reason={stop_reason}, blocks={blocks}, missing={missing}")
 
 
+# The token counts of a reply that ``usage_out`` sums: uncached input, output, cache reads and cache writes.
+USAGE_KEYS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+
+
+def _count_request(usage_out: dict[str, int] | None) -> None:
+    """Count one request in ``usage_out["requests"]``, before it is sent (one that fails is counted too)."""
+    if usage_out is not None:
+        usage_out["requests"] = usage_out.get("requests", 0) + 1
+
+
+def _add_usage(usage_out: dict[str, int] | None, response: Any) -> None:
+    """Add the response's token counts (``USAGE_KEYS``) into ``usage_out`` (nothing when it is None, or when the
+    response reports no usage or a count that is not a whole number)."""
+    if usage_out is None:
+        return
+    usage = getattr(response, "usage", None)
+    if not isinstance(usage, dict):
+        return
+    for key in USAGE_KEYS:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            usage_out[key] = usage_out.get(key, 0) + value
+
+
 async def call_with_tool_choice(
-    client: LLMClient, payload: dict[str, Any], *, purpose: str = "unlabelled"
+    client: LLMClient,
+    payload: dict[str, Any],
+    *,
+    purpose: str = "unlabelled",
+    usage_out: dict[str, int] | None = None,
+    max_requests: int | None = None,
 ) -> dict[str, Any]:
     """Send a request that forces its one tool, or asks for it where the model rejects forcing; return the call's input.
 
@@ -158,12 +196,21 @@ async def call_with_tool_choice(
     raises UnusableToolReply.
 
     Each request is labelled ``purpose``; the requests of one call share a ``group_id``,
-    and the one asking for the tool in the prompt is marked ``is_fallback``.
+    and the one asking for the tool in the prompt is marked ``is_fallback``. With a dict as
+    ``usage_out``, ``requests`` counts each request sent and each reply's token counts
+    (``USAGE_KEYS``) are added into it, before the reply is checked. With ``max_requests``,
+    a request past that many is not sent: RequestBoundReached is raised instead (None:
+    no bound, the request asking for the tool follows a rejected forced one).
     """
     model = payload["model"]
     forced = CallContext(purpose=purpose, group_id=uuid.uuid4())
+    sent = 0
     if model not in _REJECTS_FORCED_TOOL_CHOICE:
+        if max_requests is not None and sent >= max_requests:
+            raise RequestBoundReached(f"max_requests={max_requests}")
+        sent += 1
         try:
+            _count_request(usage_out)
             response = await client.call(payload, **context_kwargs(client, forced))
         except Exception as e:
             if not _rejects_forced_tool_choice(e):
@@ -171,9 +218,15 @@ async def call_with_tool_choice(
             _REJECTS_FORCED_TOOL_CHOICE.add(model)
             logger.info("Model %s rejects a forced tool_choice; asking for the tool in the prompt", model)
         else:
+            _add_usage(usage_out, response)
             return _tool_input(response, payload)
     asked = dataclasses.replace(forced, is_fallback=True)
-    return _tool_input(await client.call(_asking_for_the_tool(payload), **context_kwargs(client, asked)), payload)
+    if max_requests is not None and sent >= max_requests:
+        raise RequestBoundReached(f"max_requests={max_requests}")
+    _count_request(usage_out)
+    response = await client.call(_asking_for_the_tool(payload), **context_kwargs(client, asked))
+    _add_usage(usage_out, response)
+    return _tool_input(response, payload)
 
 
 async def call_background_llm_structured(
@@ -187,13 +240,18 @@ async def call_background_llm_structured(
     max_tokens: int = 1500,
     *,
     purpose: str = "unlabelled",
+    usage_out: dict[str, int] | None = None,
+    max_requests: int | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM using tool_use trick for structured JSON output.
 
     Defines a fake tool whose input_schema matches the desired output schema,
     then forces the model to "call" it via tool_choice; on a model that rejects
     a forced tool_choice, call_with_tool_choice asks for the tool in the system
-    prompt instead. ``purpose`` (one of ``PURPOSES``) labels the call.
+    prompt instead. ``purpose`` (one of ``PURPOSES``) labels the call. With a dict
+    as ``usage_out``, the requests sent and the token counts of every reply are added
+    into it, and ``max_requests`` bounds the requests sent (each passed on to
+    call_with_tool_choice only when given).
 
     Returns the structured dict, or None on failure: an error, or a reply cut off
     at max_tokens, refused, without a tool call or without a required key.
@@ -235,8 +293,11 @@ async def call_background_llm_structured(
         "tool_choice": {"type": "tool", "name": tool_name},
     }
 
+    passed_on: dict[str, Any] = {} if usage_out is None else {"usage_out": usage_out}
+    if max_requests is not None:
+        passed_on["max_requests"] = max_requests
     try:
-        return await call_with_tool_choice(client, payload, purpose=purpose)
+        return await call_with_tool_choice(client, payload, purpose=purpose, **passed_on)
     except UnusableToolReply as e:
         logger.warning("Structured LLM call %s (model=%s) not used: %s", tool_name, model, e)
         return None

@@ -110,6 +110,8 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("GET", "/dashboard/work/calls/{call_id}/result"): OWNER,
     ("GET", "/dashboard/model-calls/{call_id}/blocks/{part}/{ord}"): OWNER,
     ("GET", "/dashboard/execution/{entry_id}"): OWNER,
+    # F118: the outside judge's numbers, with the judge's sentence on each disagreement
+    ("GET", "/dashboard/outside-judge"): OWNER,
     ("GET", "/context/log/{id}/payload"): OWNER,
     ("GET", "/context/log/{id}/sections"): OWNER,
     # Intentions and commitments
