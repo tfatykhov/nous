@@ -190,7 +190,7 @@ async def test_the_payload_has_no_temperature_and_no_thinking_and_is_labelled_ou
     assert (out.tokens_in, out.tokens_out, out.calls) == (1250, 40, 1)
     [(payload, ctx)] = client.calls
     assert "temperature" not in payload and "thinking" not in payload
-    assert payload["max_tokens"] == model_judge.MAX_TOKENS == 400
+    assert payload["max_tokens"] == model_judge.MAX_TOKENS == 1500
     assert ctx.purpose == "outside_judge"
     assert payload["system"][-1]["text"] == instructions.DECISION_INSTRUCTIONS
 
