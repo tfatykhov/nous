@@ -41,6 +41,12 @@ function jsonResp(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response;
 }
 
+// The default goal prompt's card reads /goals/prompt: off on the server unless a test says otherwise.
+const PROMPT_OFF = { enabled: false };
+function promptResp(body: unknown = PROMPT_OFF): Response {
+  return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) } as Response;
+}
+
 let calls: Array<{ url: string; method: string; body: unknown }>;
 
 function installFetch() {
@@ -53,6 +59,7 @@ function installFetch() {
       return jsonResp({ status: 'updated', section: url.split('/').pop() });
     }
     if (url === '/identity') return jsonResp(IDENTITY);
+    if (url === '/goals/prompt') return promptResp();
     if (url.startsWith('/profile/facts')) return jsonResp(FACTS);
     if (url.startsWith('/facts/') && method === 'PUT') {
       return jsonResp({ status: 'superseded', new_fact_id: 'fact-2' });
@@ -105,6 +112,22 @@ describe('Identity view', () => {
       expect(put!.body).toMatchObject({ content: 'Curious, precise, and kind', updated_by: 'dashboard' });
     });
   });
+
+  it("the default goal prompt's card sits between the agent identity and the profile facts", async () => {
+    cleanup(); // the smoke tests above leave their render in the body
+    const prompt = { enabled: true, text: 'Work in small steps.', is_default: true, default: 'Work in small steps.',
+      max_chars: 1500, updated_at: null, updated_by: null };
+    const answer = vi.mocked(fetch).getMockImplementation()!;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) =>
+      url === '/goals/prompt' ? promptResp(prompt) : answer(url, opts)));
+    render(Identity);
+    const card = await screen.findByRole('heading', { name: 'Default goal prompt' });
+    const before = screen.getByRole('heading', { name: 'Agent identity' });
+    const after = screen.getByRole('heading', { name: 'User profile facts (Tier-1)' });
+    expect(before.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(card.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect((screen.getByLabelText('Prompt text') as HTMLTextAreaElement).value).toBe('Work in small steps.');
+  });
 });
 
 // ── Redesign PR 5: Identity on paper ────────────────────────────────────────────────────────────────────────────────
@@ -126,6 +149,7 @@ describe('Identity in the paper look', () => {
           : jsonResp({ status: 'updated' });
       }
       if (url === '/identity') return jsonResp(IDENTITY);
+      if (url === '/goals/prompt') return promptResp();
       if (url.startsWith('/profile/facts')) return jsonResp(TWO_FACTS);
       throw new Error(`unexpected ${method} ${url}`);
     }));
@@ -274,6 +298,7 @@ describe('Identity: the fact write paths (requests and the screen after them)', 
         if (fail) return { ok: false, status: 500, json: async () => ({}) } as Response;
       }
       if (url === '/identity') return jsonResp(IDENTITY);
+      if (url === '/goals/prompt') return promptResp();
       if (url.startsWith('/profile/facts')) { factGets++; return jsonResp(W_FACTS); }
       if (url.startsWith('/facts/') && method === 'PUT') return jsonResp(putReply);
       if (url.startsWith('/facts/')) return jsonResp({ status: 'ok' });

@@ -41,7 +41,7 @@ from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
-from nous.goals import charter, owner_message, pacing, roots, spend
+from nous.goals import charter, default_prompt, owner_message, pacing, roots, spend
 from nous.goals import commands as goal_commands
 from nous.goals.store import (
     OWNER_ACTORS,
@@ -842,7 +842,15 @@ class GoalDriver:
         """``(rejection, task)``: the session's first task (from the goal as read under its lock, its journal tail
         and its spend) through the censor gate that every spawned task goes through. A steering censor appends its
         guidance; the task is then built again with that guidance's length kept free, so the stored task stays
-        within ``charter.MAX_TASK_CHARS`` and the guidance stays whole."""
+        within ``charter.MAX_TASK_CHARS`` and the guidance stays whole. The task carries the goal prompt
+        (``default_prompt.load``), or the one the builder fell back to (``charter.Rendered``): every choice below is
+        made from the one it carries. When the gate refuses the task and the pattern of a censor that refuses matches
+        that goal prompt (``default_prompt.refused``, the keyword match on the goal prompt alone), the task is built
+        with the next of ``default_prompt.rungs`` below it (the built-in text, then none) and gated again, unless that
+        build is the same task; the rebuild under a steering censor's guidance keeps the goal prompt the gate passed,
+        or a lower one no such pattern matches. So a censor's keyword match on the goal prompt alone does not stop a
+        goal from starting; any other refusal (the semantic match, or a pattern that spans other text) is the task's
+        own and is gated once."""
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
@@ -852,10 +860,11 @@ class GoalDriver:
         until = goal_commands.charter_until(goal, now=now, settings=self._settings)
         tz = self._pace_zone(goal)
         pace = pacing.pace_line(now, tz, goal.daily_at_minute) if tz is not None else None
+        prompts = default_prompt.rungs(await default_prompt.load(self._db, self._agent_id))
 
-        def build(max_chars: int) -> str:
+        def build(max_chars: int, prompt: str | None) -> charter.Rendered:
             plan = list(goal.plan or [])
-            return charter.build_session_task(
+            return charter.session_task(
                 goal,
                 plan,
                 rows,
@@ -866,16 +875,49 @@ class GoalDriver:
                 tools=tools,
                 commands_until=until,
                 pace_line=pace,
+                goal_prompt=prompt,
             )
 
-        task = build(charter.MAX_TASK_CHARS)
-        rejection, gated = await gate_subtask_task(self._heart, task)
+        patterns: list[str] | None = None
+
+        async def refused(rendered: str | None) -> bool:
+            """Whether a censor's pattern refuses the goal prompt a build carries (None never is)."""
+            nonlocal patterns
+            if rendered is None:
+                return False
+            if patterns is None:
+                patterns = await default_prompt.refusing_patterns(self._heart)
+            return default_prompt.refused(rendered, patterns)
+
+        def below(rendered: str) -> str | None:
+            return prompts[prompts.index(rendered) + 1]
+
+        # Every choice is made from the goal prompt a build carries, never from the one it was asked for: a builder
+        # falls back to the built-in text, or none, when the text it was given does not fit.
+        built = build(charter.MAX_TASK_CHARS, prompts[0])
+        rejection, gated = await gate_subtask_task(self._heart, built.text)
+        set_aside = False
+        while rejection is not None and await refused(built.goal_prompt):
+            set_aside = True
+            retry = build(charter.MAX_TASK_CHARS, below(built.goal_prompt))
+            if retry.text != built.text:  # the same task would be refused the same way
+                rejection, gated = await gate_subtask_task(self._heart, retry.text)
+            built = retry
+        if set_aside and rejection is None:
+            kind = "the built-in text" if built.goal_prompt is not None else "no goal prompt"
+            logger.warning("Goal %s: a censor matches the goal prompt; the first task was built with %s", goal.id, kind)
         if rejection is not None or len(gated) <= charter.MAX_TASK_CHARS:
             return rejection, gated
-        if not gated.startswith(task):
+        if not gated.startswith(built.text):
             raise ValueError("the censor gate changed the task instead of adding to it")
-        guidance = gated[len(task) :]
-        return None, build(charter.MAX_TASK_CHARS - len(guidance)) + guidance
+        guidance = gated[len(built.text) :]
+        # The smaller bound can leave room for a lower text only: keep the one the gate passed, or take one no
+        # censor's pattern refuses.
+        passed = built.goal_prompt
+        rebuilt = build(charter.MAX_TASK_CHARS - len(guidance), passed)
+        while rebuilt.goal_prompt not in (None, passed) and await refused(rebuilt.goal_prompt):
+            rebuilt = build(charter.MAX_TASK_CHARS - len(guidance), below(rebuilt.goal_prompt))
+        return None, rebuilt.text + guidance
 
     async def _tool_lines(self, goal: Goal) -> list[Any]:
         """F115 per-goal tools: what a new session's first task is told of the goal's grants, each available when

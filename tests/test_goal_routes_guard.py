@@ -33,12 +33,16 @@ READS = {
     "/goals/G-0001/tools": {"enabled": False},
     "/goals/G-0001/activity": {"enabled": False},
     "/goals/commands": {"enabled": False, "allowed": False, "active": []},
+    "/goals/prompt": {"enabled": False},
 }
 GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("POST", "/goals"),
     ("GET", "/goals/options"),
     ("GET", "/goals/commands"),
+    ("GET", "/goals/prompt"),
+    ("PUT", "/goals/prompt"),
+    ("DELETE", "/goals/prompt"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
     ("GET", "/goals/{ref}/activity"),
@@ -166,3 +170,8 @@ def test_the_set_of_guarded_goal_routes_is_exact() -> None:
 def test_options_comes_before_the_goal_ref_route() -> None:
     paths = [route.path for route in make_env(NoDatabase(), enabled=False).app.routes]
     assert paths.index("/goals/options") < paths.index("/goals/{ref}")
+
+
+def test_the_default_goal_prompts_routes_come_before_the_goal_ref_route() -> None:
+    paths = [route.path for route in make_env(NoDatabase(), enabled=False).app.routes]
+    assert max(i for i, path in enumerate(paths) if path == "/goals/prompt") < paths.index("/goals/{ref}")

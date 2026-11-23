@@ -184,6 +184,11 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
         (method, "/goals/G-0001/tools/send_email"): (b"{}", 503, {"error": "goals are off", "goals_enabled": False})
         for method in ("PUT", "DELETE")
     },
+    # The default goal prompt: a change, with goals off (the default)
+    **{
+        (method, "/goals/prompt"): (b"{}", 503, {"error": "goals are off", "goals_enabled": False})
+        for method in ("PUT", "DELETE")
+    },
     # F115: the autonomy changes, with the autonomy settings off (the default)
     **{
         (method, path): (b"{}", 503, {"error": "Autonomy settings are off on this server.", "enabled": False})
@@ -246,6 +251,7 @@ GOAL_READS = {
     "/goals/G-0001/tools": {"enabled": False},
     "/goals/G-0001/activity": {"enabled": False},
     "/goals/commands": {"enabled": False, "allowed": False, "active": []},
+    "/goals/prompt": {"enabled": False},
 }
 # F115: the autonomy reads require a secret too.
 AUTONOMY_READS = {
@@ -274,6 +280,7 @@ GOAL_ROUTE_SET = {
     ("GET", "/goals"),
     ("GET", "/goals/options"),
     ("GET", "/goals/commands"),
+    ("GET", "/goals/prompt"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
     ("GET", "/goals/{ref}/activity"),
@@ -523,7 +530,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
     assert guarded == (
         REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET | JUDGE_SECOND_ROUTE_SET
     )
-    assert len(GOAL_ROUTE_SET) == 21
+    assert len(GOAL_ROUTE_SET) == 24
     assert len(AUTONOMY_ROUTE_SET) == 7
     assert len(JUDGE_SECOND_ROUTE_SET) == 5
 

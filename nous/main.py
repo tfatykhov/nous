@@ -664,7 +664,9 @@ def _build_goals(
             _bind_goal_commands(tool_grants, runner)
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
-    continuation_runner.set_goal_turns(GoalChain(database, settings, store, tool_grants=tool_grants).turn_context)
+    continuation_runner.set_goal_turns(
+        GoalChain(database, settings, store, tool_grants=tool_grants, heart=heart).turn_context
+    )
     goal_driver = GoalDriver(
         database,
         settings,
