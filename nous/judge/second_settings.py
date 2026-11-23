@@ -297,7 +297,7 @@ class SecondJudgeManager:
         self._loaded = False
         self._closed = False
         self._retry: asyncio.Task[None] | None = None
-        self._tasks: set[asyncio.Task[Answer]] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()  # the changes in flight and the old judges closing
         self._registered: set[str] = set()
         self._checking = False
         self._last_check: float | None = None
@@ -399,14 +399,15 @@ class SecondJudgeManager:
 
     async def close(self) -> None:
         """At shutdown, before the judges close: refuse further changes, stop reading again, and wait for the change
-        in flight."""
+        in flight and for every old second judge still closing (a read cancelled here leaves its old judge closing,
+        never half closed). Waiting cancels none of them, also when this call is cancelled."""
         self._closed = True
         retry, self._retry = self._retry, None
         if retry is not None and not retry.done():
             retry.cancel()
-            await asyncio.gather(retry, return_exceptions=True)
-        if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            await asyncio.wait({retry})
+        while waiting := {task for task in self._tasks if not task.done()}:
+            await asyncio.wait(waiting)
 
     # ---- applying (the lock held) ------------------------------------------------------------------------------------
 
@@ -437,7 +438,7 @@ class SecondJudgeManager:
         new = await self._start_service(config) if wanted else None
         old = self._judges.replace_second(new)
         self._running = config if new is not None else None
-        await _close_quietly(old)
+        await self._close_old(old)
         self._settle()
 
     async def _start_service(self, config: SecondConfig) -> Any | None:
@@ -449,8 +450,20 @@ class SecondJudgeManager:
             return service
         except Exception as exc:
             logger.warning("F118: the second judge did not start (%s); it is not running", type(exc).__name__)
-            await _close_quietly(service, timeout=0)
+            await self._close_old(service, timeout=0)
             return None
+
+    async def _close_old(self, service: Any | None, timeout: float | None = None) -> None:
+        """Close a second judge that is out of the set, as a task this manager holds: a cancelled caller (the
+        background read at shutdown) leaves it closing, and ``close`` waits for it."""
+        if service is None:
+            return
+        task = asyncio.get_running_loop().create_task(
+            _close_quietly(service, timeout), name="outside-judge-second-close"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        await asyncio.shield(task)
 
     def _make_service(self, config: SecondConfig) -> OutsideJudge:
         judge = JevJudge(config.key or "", config.model, transport=self._transport)
@@ -649,7 +662,7 @@ class SecondJudgeManager:
         self._live = resolve(self._settings, None, None, None)
         old = self._judges.replace_second(None) if self._judges is not None else None
         self._running = None
-        await _close_quietly(old)
+        await self._close_old(old)
         self._settle()
         self._start_retry()
 

@@ -696,6 +696,32 @@ async def test_saving_again_unchanged_starts_a_second_judge_that_failed_to_start
     assert len(env.built) == 1
 
 
+async def test_close_during_a_swap_in_the_background_read_leaves_the_old_judge_closed(make, monkeypatch):
+    release = asyncio.Event()
+
+    async def sleep(seconds: float) -> None:
+        await release.wait()
+
+    monkeypatch.setattr(second_settings, "_sleep", sleep)
+    env = await _keyed(make, enabled=True)
+    [old] = env.built
+    old.release.clear()  # the old judge's close waits
+    async with env.database.real.session() as session:
+        await second_settings.upsert_row(session, env.manager._agent_id, {"model": "jev-1.15.0"}, "owner")
+        await session.commit()
+    env.manager._start_retry()  # the background read, as after a read that failed
+    release.set()
+    await asyncio.wait_for(old.closing.wait(), 5)  # swapped: the old judge is closing
+    closing = asyncio.create_task(env.manager.close())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not closing.done() and not old.closed  # close waits for the old judge
+    old.release.set()
+    await asyncio.wait_for(closing, 5)
+    assert old.closed and env.manager._tasks == set()
+    assert env.second is not old and env.second.config.model == "jev-1.15.0"
+
+
 async def test_two_writes_run_one_after_the_other(make):
     env = await _keyed(make, enabled=True)
     [old] = env.built
