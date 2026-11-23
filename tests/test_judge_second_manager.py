@@ -398,6 +398,17 @@ async def test_removing_a_key_that_does_not_open_hands_over_to_the_servers_key_a
     assert env.manager.state()["key"]["source"] == "server"
 
 
+async def test_removing_a_saved_key_while_sending_hands_over_to_the_servers_key_with_no_confirmation(make):
+    env = await make(key=KEY, row={"enabled": True}, TYPESAFE_API_KEY=ENV_KEY)
+    [old] = env.built
+    assert old.config.key == KEY
+    answer = await env.manager.remove_key(confirm=False, actor="owner")
+    assert answer.status == 200 and answer.body["changed"] is True and answer.body["running"] is True
+    assert answer.body["key"] == {"source": "server", "set_at": None, "problem": None, "server_has_key": True}
+    assert old.closed and env.second.config.key == ENV_KEY
+    assert redact_output(KEY) == KEY  # the saved key is forgotten once the judge that used it has closed
+
+
 async def test_the_sentence_names_the_limit_after_the_change(make):
     env = await _keyed(make, enabled=False, daily_calls=4)
     refused = await env.manager.patch({"on": True, "daily_calls": 12}, confirm=False, actor="owner")
@@ -552,9 +563,10 @@ async def test_a_decision_submitted_during_a_swap_lands_on_exactly_one_second_ju
 
     change = asyncio.create_task(env.manager.patch({"model": "jev-1.15.0"}, confirm=False, actor="owner"))
     before = []
-    while not old.closing.is_set():  # until the swap is done and the old judge is closing
+    while not old.closing.is_set() and not change.done():  # until the swap is done and the old judge is closing
         before.append(submit())
         await asyncio.sleep(0.001)
+    assert old.closing.is_set() and not change.done()
     after = [submit() for _ in range(5)]
     new = env.second
     assert new is not old and new.config.model == "jev-1.15.0" and not old.closed

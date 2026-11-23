@@ -236,6 +236,22 @@ async def test_with_the_setting_on_and_no_manager_every_route_answers_503(tmp_pa
         assert response.status_code == 503, (method, path)
 
 
+async def test_the_routes_read_the_manager_through_the_apps_lazy_component(tmp_path):
+    """As main.build_app passes it: a proxy over the components, falsy until the lifespan has built the manager."""
+    from nous import main
+
+    components: dict[str, Any] = {}
+    app = _app(tmp_path, _settings(), RefusingDatabase(), main._lazy_component(components, "judge_second"))
+    assert (await _send(app, "GET", PATH, headers=OWNER)).status_code == 503
+    components["judge_second"] = SecondJudgeManager(
+        RefusingDatabase(), _settings(), JudgeSet(Primary(), None), key_file=FixedKeyFile(BOX)
+    )
+    read = await _send(app, "GET", PATH, headers=OWNER)
+    assert read.status_code == 200 and read.json()["loaded"] is False and read.json()["locked"] is None
+    write = await _send(app, "PATCH", PATH, json={"on": True}, headers=OWNER)
+    assert (write.status_code, write.json()) == (503, {"error": NOT_LOADED})
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_every_route_needs_the_owners_or_the_proxys_secret_before_the_body_is_read(tmp_path, enabled):
     app = _app(tmp_path, _settings(outside_judge_settings_enabled=enabled), RefusingDatabase())

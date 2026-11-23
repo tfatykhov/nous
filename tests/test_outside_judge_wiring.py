@@ -632,3 +632,103 @@ def test_create_components_starts_the_settings_after_the_judge_and_closes_them_b
     stop = inspect.getsource(main.shutdown_components)
     assert stop.index('components.get("judge_second")') < stop.index('components.get("outside_judge")')
     assert 'judge_second=_lazy_component(components, "judge_second")' in inspect.getsource(main.build_app)
+
+
+@pytest.mark.postgres_only
+def test_with_the_settings_on_the_boot_runs_the_settings_and_the_tools_are_those_of_the_judge_off(monkeypatch):
+    from nous.api.execution_context import ExecutionContext
+    from nous.judge.second_settings import SHUTTING_DOWN, SecondJudgeManager
+    from nous.judge.service import JudgeSet
+
+    agents = {mode: f"test-f118-boot3-{mode}-{uuid.uuid4().hex[:6]}" for mode in ("off", "settings")}
+
+    async def already_migrated(engine: Any) -> None:
+        async with engine.begin() as connection:
+            for agent_id in agents.values():
+                await connection.execute(
+                    text(
+                        "INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}') "
+                        "ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {"id": agent_id},
+                )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    seen: dict[str, Any] = {}
+    boots = {
+        "off": _boot_settings(agents["off"], "off"),
+        "settings": _boot_settings(
+            agents["settings"],
+            "shadow",
+            outside_judge_settings_enabled=True,
+            outside_judge_second="jev",
+            TYPESAFE_API_KEY=JEV_KEY,
+        ),
+    }
+
+    async def scenario() -> None:
+        for mode, settings in boots.items():
+            components = await main.create_components(settings)
+            try:
+                dispatcher, runner = components["dispatcher"], components["runner"]
+                ctx = ExecutionContext(kind="interactive", session_id=f"boot3-{mode}")
+                current = judge_slot.current()
+                manager = components.get("judge_second")
+                seen[mode] = {
+                    "definitions": dispatcher.tool_definitions(),
+                    "offered": runner._offered_tools(
+                        ctx, "task", is_subtask=False, tool_filter=None, refuse_active=False
+                    ),
+                    "current": current,
+                    "manager": manager,
+                    "loaded": manager.loaded if manager is not None else None,
+                    "runtime": current.runtime() if current is not None else None,
+                }
+            finally:
+                await main.shutdown_components(components)
+            manager = seen[mode]["manager"]
+            if manager is not None:
+                seen[mode]["after"] = await manager.patch({"on": False}, confirm=False, actor="owner")
+
+    try:
+        _run(scenario)
+    finally:
+
+        async def cleanup() -> None:
+            from nous.storage.database import Database
+
+            database = Database(boots["off"])
+            await database.connect()
+            try:
+                async with database.session() as session:
+                    for agent_id in agents.values():
+                        await session.execute(
+                            text("DELETE FROM heart.rubric_versions WHERE agent_id = :a"), {"a": agent_id}
+                        )
+                        await session.execute(
+                            text("DELETE FROM nous_system.judge_second_settings WHERE agent_id = :a"), {"a": agent_id}
+                        )
+                        await session.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+                    await session.commit()
+            finally:
+                await database.disconnect()
+
+        asyncio.run(cleanup())
+
+    off, on = seen["off"], seen["settings"]
+    assert off["manager"] is None and off["current"] is None
+    assert isinstance(on["manager"], SecondJudgeManager) and on["loaded"] is True
+    assert isinstance(on["current"], JudgeSet) and on["current"].second is not None
+    assert on["runtime"]["worker_alive"] is True and on["runtime"]["second"]["worker_alive"] is True
+    # No tool reads or changes the settings: the agent is offered exactly the tools of the judge off.
+    assert on["definitions"] == off["definitions"]
+    assert on["offered"] == off["offered"]
+    # After shutdown: no change is taken, and both judges are closed.
+    assert (on["after"].status, on["after"].body["error"]) == (503, SHUTTING_DOWN)
+    for service in (on["current"].primary, on["current"].second):
+        assert (
+            service.submit_decision(
+                uuid.uuid4(), grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC)
+            )
+            is False
+        )
