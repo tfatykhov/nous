@@ -48,6 +48,11 @@ def test_the_compose_file_passes_the_setting_with_its_default():
     assert compose.count(line) == 1
 
 
+def test_the_setting_has_a_row_in_the_environment_reference():
+    text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
+    assert text.count("| `NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED` | `false` |") == 1
+
+
 def test_with_reports_off_the_judge_is_built_as_before(monkeypatch):
     monkeypatch.setattr(slot, "PROVIDERS", {})
     built = main._build_outside_judge(
