@@ -124,6 +124,18 @@ def _no_outside_judge():
     judge.set_current(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_registered_secrets():
+    """F118: the values registered with the redaction are process-wide. End every test with none, so a value one test
+    registered never masks text in another."""
+    yield
+    from nous.cognitive import ledger_store
+
+    with ledger_store._registered_lock:
+        ledger_store._registered_counts.clear()
+        ledger_store._publish_registered()
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------

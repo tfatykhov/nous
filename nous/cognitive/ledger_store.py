@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -237,10 +238,61 @@ def _own_secrets() -> tuple[str, ...]:
     values: set[str] = set()
     for k, v in os.environ.items():
         if _SECRET_NAME.search(k) and len(v) >= _SECRET_MIN_CHARS:
-            # A tool input is stored as JSON, and run_python can print a repr:
-            # the escaped spellings of a value must be masked too.
-            values.update((v, json.dumps(v, ensure_ascii=False)[1:-1], json.dumps(v)[1:-1], repr(v)[1:-1]))
+            values.update(_spellings(v))
     return tuple(sorted(values, key=len, reverse=True))
+
+
+def _spellings(value: str) -> tuple[str, ...]:
+    """A secret value as text can carry it: a tool input is stored as JSON, and run_python can print a repr, so the
+    escaped spellings of a value must be masked too."""
+    return (value, json.dumps(value, ensure_ascii=False)[1:-1], json.dumps(value)[1:-1], repr(value)[1:-1])
+
+
+# Secret values this process holds that are not in its environment (an API key the owner saved on the dashboard),
+# masked like the environment's own. Each value is counted: registered twice, it stays masked until it is forgotten
+# twice. The spellings are an immutable tuple, replaced under the lock and read once per redaction call, so a call in
+# another thread sees every value registered before it began.
+_registered_lock = threading.Lock()
+_registered_counts: dict[str, int] = {}
+_registered_spellings: tuple[str, ...] = ()
+
+
+def _publish_registered() -> None:
+    """Rebuild the registered spellings, longest first (the caller holds the lock)."""
+    global _registered_spellings
+    values = {spelling for value in _registered_counts for spelling in _spellings(value)}
+    _registered_spellings = tuple(sorted(values, key=len, reverse=True))
+
+
+def register_own_secret(value: str) -> None:
+    """Mask ``value`` and its escaped spellings from now on, wherever this module redacts (ledger rows, tool input and
+    output, ``db_query`` results, the outside judge's record). Register a value before it is stored or used. Refuses
+    a value that is not a string of at least 8 characters (``ValueError``, without the value)."""
+    if not isinstance(value, str) or len(value) < _SECRET_MIN_CHARS:
+        raise ValueError("a registered secret must be a string of at least 8 characters")
+    with _registered_lock:
+        _registered_counts[value] = _registered_counts.get(value, 0) + 1
+        _publish_registered()
+
+
+def forget_own_secret(value: str) -> None:
+    """Undo one ``register_own_secret(value)``; the value is no longer masked once every registration is undone.
+    Forget a value only after nothing that used it runs any more. A value not registered is ignored."""
+    with _registered_lock:
+        count = _registered_counts.get(value, 0)
+        if count == 0:
+            return
+        if count == 1:
+            del _registered_counts[value]
+        else:
+            _registered_counts[value] = count - 1
+        _publish_registered()
+
+
+def _secrets_now() -> tuple[str, ...]:
+    """The environment's secret values and the registered ones, each read once."""
+    registered = _registered_spellings
+    return _own_secrets() + registered if registered else _own_secrets()
 
 
 @lru_cache(maxsize=1024)
@@ -273,7 +325,7 @@ def _own_secret_spans(text: str) -> list[tuple[int, int]]:
     overlapping occurrences is walked once, in strides as long as the secret allows, and the next search starts one
     past the last occurrence."""
     spans: list[tuple[int, int]] = []
-    for secret in _own_secrets():
+    for secret in _secrets_now():
         size = len(secret)
         at = text.find(secret)
         while at != -1:
@@ -344,7 +396,7 @@ def redaction_scan_pad() -> int:
     """How many characters at a cut edge redaction cannot vouch for: a secret
     split by the cut matches nothing (the longest own secret, at least the scan
     pad). A cut text's scans reach this far past what they keep (``_settled_side``)."""
-    return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+    return max([_DETAIL_SCAN_PAD, *map(len, _secrets_now())])
 
 
 def _settled_side(text: str, half: int, pad: int, tail: bool) -> str:
