@@ -150,9 +150,19 @@ let loopUrls: string[] = [];
 // F118 PR 3: the second judge's settings card asks once; off ({enabled: false}) unless a test says otherwise.
 let judgeBody: Record<string, unknown> = { enabled: false };
 let judgeUrls: string[] = [];
+// F118: the outside judge's panel asks with the page's window; off ({enabled: false}) unless a test says otherwise.
+// Reset here, so every describe block starts with it off.
+let outsideBody: unknown = { enabled: false };
+let outsideUrls: string[] = [];
 
 function install() {
+  outsideBody = { enabled: false };
+  outsideUrls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url.startsWith('/dashboard/outside-judge?')) {
+      outsideUrls.push(url);
+      return { ok: true, status: 200, text: async () => JSON.stringify(outsideBody) } as Response;
+    }
     if (url.startsWith('/dashboard/loop-numbers')) {
       loopUrls.push(url);
       return { ok: loopStatus < 400, status: loopStatus, json: async () => loopBody } as Response;
@@ -725,6 +735,9 @@ describe('Autonomy: a second opinion on decisions', () => {
       await waitFor(() => expect(urls).toContain('/dashboard/autonomy?days=30'));
       expect(judgeUrls).toEqual(['/dashboard/outside-judge/second']);
       expect(screen.queryByRole('heading', { name: 'A second opinion on decisions' })).toBeNull();
+      // F118: the outside judge's panel, off too, asked once and drew nothing.
+      expect(outsideUrls).toEqual(['/dashboard/outside-judge?days=7']);
+      expect(screen.queryByRole('heading', { name: 'The outside judge' })).toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -743,6 +756,7 @@ describe('Autonomy: a second opinion on decisions', () => {
   it('a card whose first read fails draws nothing and leaves the rest of the page', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.startsWith('/dashboard/outside-judge/second')) throw new TypeError('network');
+      if (url.startsWith('/dashboard/outside-judge?')) return { ok: true, status: 200, text: async () => JSON.stringify({ enabled: false }) } as Response;
       if (url.startsWith('/dashboard/loop-numbers')) return { ok: true, status: 200, json: async () => loopBody } as Response;
       return { ok: true, status: 200, json: async () => body } as Response;
     }));
@@ -752,6 +766,53 @@ describe('Autonomy: a second opinion on decisions', () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByRole('heading', { name: 'A second opinion on decisions' })).toBeNull();
     expect(screen.queryByText('These settings could not be read. Reload the page to try again.')).toBeNull();
+  });
+});
+
+// F118: the outside judge's numbers, above the second judge's settings card.
+describe('Autonomy: the outside judge', () => {
+  beforeEach(() => {
+    body = FULL(); status = 200; urls = []; loopBody = { enabled: false }; loopStatus = 200; loopUrls = [];
+    judgeBody = { enabled: false }; judgeUrls = [];
+    install();
+    outsideBody = OUTSIDE_ON();
+  });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); judgeBody = { enabled: false }; });
+
+  const OUTSIDE_ON = () => ({
+    enabled: true, mode: 'shadow', judge: 'background_model', version: 'dj-2', model: null, days: 7,
+    decisions: {
+      judged: 2, by_verdict: { success: 1, partial: 1 }, skipped_by_label: {}, errors: 0,
+      by_grader: { a2ui: { n: 2, agree: 1, judge_harsher: 1, judge_kinder: 0, cannot_tell: 0, agree_rate: 0.5 } },
+    },
+    cost: { calls: 2, tokens_in: 2_000, tokens_out: 100, tokens_per_verdict_avg: 1_050, latency_ms_p50: 900, today: { calls: 2, cap: 100 } },
+    disagreements: [], runtime: { queued: 0, dropped: 0, over_cap: 0, worker_alive: true },
+  });
+  const panel = async () => (await screen.findByRole('heading', { name: 'The outside judge' })).closest('section')!;
+
+  it("is drawn directly above the second judge's card", async () => {
+    judgeBody = { enabled: true, locked: null, loaded: true, running: false, on: { value: false, source: 'server' },
+      model: { value: 'jev-1.14.0', source: 'server' }, daily_calls: { value: 100, most: 100, source: 'server' },
+      key: { source: 'none', set_at: null, problem: null, server_has_key: false }, can_store_key: true,
+      sends_to: 'api.typesafe.ai', confirm_text: 'Send a copy?', updated_at: null, updated_by: null };
+    render(Autonomy);
+    const outside = await panel();
+    const card = (await screen.findByRole('heading', { name: 'A second opinion on decisions' })).closest('section')!;
+    expect(outside.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(outside.nextElementSibling).toBe(card);
+    expect(outside.textContent).toContain('Shadow mode: it records verdicts and changes nothing');
+    expect(outsideUrls).toEqual(['/dashboard/outside-judge?days=7']);
+  });
+
+  it("reads the page's window, and again on the page's Refresh", async () => {
+    render(Autonomy);
+    await panel();
+    await fireEvent.click(screen.getByRole('button', { name: '30 d' }));
+    await waitFor(() => expect(outsideUrls).toEqual(['/dashboard/outside-judge?days=7', '/dashboard/outside-judge?days=30']));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(outsideUrls).toHaveLength(3));
+    expect(outsideUrls[2]).toBe('/dashboard/outside-judge?days=30');
   });
 });
 

@@ -46,7 +46,7 @@ import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
@@ -2345,9 +2345,11 @@ def create_app(
     async def dashboard_outside_judge(request: Request) -> JSONResponse:
         """GET /dashboard/outside-judge — F118: the outside judge's verdicts beside the grades they were compared
         with, its cost and its queue, for the running judge's name and version. Read-only; ``days`` 1 to 90, default
-        14. Owner-guarded: the disagreements carry the judge's one sentence. With the judge off: 200
-        {"enabled": false} and no session. With a second judge running beside the first, ``second`` holds its own
-        numbers and ``between_judges`` how the two judges' verdicts on the same claims compare."""
+        14. Owner-guarded: the disagreements carry the judge's one sentence. Each listed decision, pair and
+        not-supported report carries a short ``title`` (null when the subject no longer exists, its text is blank, or
+        the read failed). With the judge off: 200 {"enabled": false} and no session. With a second judge running
+        beside the first, ``second`` holds its own numbers and ``between_judges`` how the two judges' verdicts on the
+        same claims compare."""
         if settings.outside_judge_mode == "off":
             return JSONResponse({"enabled": False})
         from nous import judge as judge_slot
@@ -2420,20 +2422,46 @@ def create_app(
             if service is not None
             else {"queued": 0, "dropped": 0, "over_cap": 0, "worker_alive": False}
         )
-        return JSONResponse(
-            {
-                "enabled": True,
-                "mode": settings.outside_judge_mode,
-                "judge": name,
-                "version": version,
-                "model": model if isinstance(model, str) else None,
-                "days": days,
-                **numbers,
-                "runtime": runtime,
-                **second_blocks,
-                **(await _outside_judge_report_blocks(service, days, numbers)),
-            }
-        )
+        body = {
+            "enabled": True,
+            "mode": settings.outside_judge_mode,
+            "judge": name,
+            "version": version,
+            "model": model if isinstance(model, str) else None,
+            "days": days,
+            **numbers,
+            "runtime": runtime,
+            **second_blocks,
+            **(await _outside_judge_report_blocks(service, days, numbers)),
+        }
+        await _outside_judge_titles(body)
+        return JSONResponse(body)
+
+    async def _outside_judge_titles(body: dict[str, Any]) -> None:
+        """F118, for GET /dashboard/outside-judge: a short ``title`` on each listed decision (``disagreements`` and
+        ``between_judges.disagreements``) and not-supported report (``reports.not_supported``), the subject's own text
+        as one line (``judge_store.titles_of``); null when the subject no longer exists or its text is blank. One read
+        per kind with rows, in a session of its own; when it fails every title of that kind is null, with one WARNING,
+        and the numbers are still answered."""
+        from nous.judge import store as judge_store
+
+        listed: dict[Literal["decision", "task"], list[dict[str, Any]]] = {
+            "decision": [*body["disagreements"], *body.get("between_judges", {}).get("disagreements", [])],
+            "task": body.get("reports", {}).get("not_supported", []),
+        }
+        for kind, rows in listed.items():
+            if not rows:
+                continue
+            try:
+                async with database.session() as session:
+                    titles = await judge_store.titles_of(
+                        session, settings.agent_id, kind, [row["subject_id"] for row in rows]
+                    )
+            except Exception as e:
+                titles = {}
+                logger.warning("Dashboard outside judge: the titles were not read (%s)", type(e).__name__)
+            for row in rows:
+                row["title"] = titles.get(row["subject_id"])
 
     async def _outside_judge_report_blocks(service: Any, days: int, numbers: dict[str, Any]) -> dict[str, Any]:
         """F118 task reports, for GET /dashboard/outside-judge: with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, ``reports``
