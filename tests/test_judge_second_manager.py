@@ -674,6 +674,28 @@ async def test_a_second_judge_that_fails_to_start_leaves_it_off_with_the_row_sav
     assert again.status == 200 and again.body["running"] is True
 
 
+async def test_saving_again_unchanged_starts_a_second_judge_that_failed_to_start(make, monkeypatch):
+    """The card's "On, but not running. Save again or restart Nous.": the same save writes nothing and starts it."""
+    env = await _keyed(make, enabled=False)
+    good = env.manager._make_service
+
+    def broken(config: Any) -> Any:
+        raise RuntimeError("cannot build")
+
+    monkeypatch.setattr(env.manager, "_make_service", broken)
+    first = await env.manager.patch({"on": True}, confirmed=YES, actor="owner")
+    assert first.status == 200 and first.body["running"] is False
+    stored = await env.row()
+    monkeypatch.setattr(env.manager, "_make_service", good)
+    again = await env.manager.patch({"on": True}, confirmed=None, actor="owner")
+    assert again.status == 200 and again.body["changed"] is False and again.body["running"] is True
+    assert env.second is not None and env.second.started
+    assert await env.row() == stored  # nothing written
+    # Running already: a third save starts nothing more.
+    assert (await env.manager.patch({"on": True}, confirmed=None, actor="owner")).body["running"] is True
+    assert len(env.built) == 1
+
+
 async def test_two_writes_run_one_after_the_other(make):
     env = await _keyed(make, enabled=True)
     [old] = env.built

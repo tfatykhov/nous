@@ -570,7 +570,9 @@ class SecondJudgeManager:
         self, values: dict[str, Any], *, key: str | None = None, confirmed: int | None, actor: str
     ) -> Answer:
         """One change, the lock held: the confirmation, a new key registered, the row written and committed, then
-        applied. ``key``: a new key to seal (its sealed columns become the values)."""
+        applied. ``key``: a new key to seal (its sealed columns become the values). An unchanged write writes
+        nothing, and starts the second judge again when the values in effect send and none runs (a start that
+        failed)."""
         row = self._row or StoredRow()
         if key is not None:
             proposed, opened, problem = replace(row, key_id="new"), key, None
@@ -583,6 +585,8 @@ class SecondJudgeManager:
             opened, problem = self._opened
             unchanged = all(getattr(row, name) == value for name, value in values.items())
         if unchanged:
+            if not self.locked_off and sends(self._live) and self._judges.second is None:
+                await self._switch(self._live)
             return Answer(200, {**self.state(), "changed": False})
         after = resolve(self._settings, proposed, opened, problem)
         if self._needs_confirmation(after, confirmed):
