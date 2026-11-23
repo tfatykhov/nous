@@ -32,7 +32,7 @@ export interface SecondState {
 export type SecondAnswer = { enabled: false } | SecondState;
 export type CheckResult = 'ok' | 'refused' | 'unreachable';
 export interface CheckAnswer { result: CheckResult }
-export interface SecondChange { on?: boolean; model?: string | null; daily_calls?: number | null; confirm_send?: true }
+export interface SecondChange { on?: boolean; model?: string | null; daily_calls?: number | null }
 
 // ── Requests ────────────────────────────────────────────────────────────────
 
@@ -40,17 +40,18 @@ const SECOND = '/dashboard/outside-judge/second';
 const SECOND_KEY = '/dashboard/outside-judge/second/key';
 const SECOND_CHECK = '/dashboard/outside-judge/second/check';
 
-/** With `confirm`, the request says the owner accepted the confirmation. */
-const confirmed = (confirm: boolean) => (confirm ? { confirm_send: true as const } : {});
+/** The owner's yes, sent back with the daily limit its sentence named (null: no yes). */
+const yes = (confirmed: number | null) =>
+  confirmed === null ? {} : { confirm_send: true as const, confirm_daily_calls: confirmed };
 
 export const readSecond = (signal?: AbortSignal) =>
   timed((sig) => apiRequest<SecondAnswer>(SECOND, 'GET', undefined, sig), signal);
-export const changeSecond = (change: SecondChange, confirm: boolean) =>
-  timed((signal) => apiRequest<SecondState>(SECOND, 'PATCH', { ...change, ...confirmed(confirm) }, signal));
-export const saveKey = (key: string, confirm: boolean) =>
-  timed((signal) => apiRequest<SecondState>(SECOND_KEY, 'PUT', { key, ...confirmed(confirm) }, signal));
-export const removeKey = (confirm: boolean) =>
-  timed((signal) => apiRequest<SecondState>(SECOND_KEY, 'DELETE', confirmed(confirm), signal));
+export const changeSecond = (change: SecondChange, confirmed: number | null) =>
+  timed((signal) => apiRequest<SecondState>(SECOND, 'PATCH', { ...change, ...yes(confirmed) }, signal));
+export const saveKey = (key: string, confirmed: number | null) =>
+  timed((signal) => apiRequest<SecondState>(SECOND_KEY, 'PUT', { key, ...yes(confirmed) }, signal));
+export const removeKey = (confirmed: number | null) =>
+  timed((signal) => apiRequest<SecondState>(SECOND_KEY, 'DELETE', yes(confirmed), signal));
 export const checkSecond = () => timed((signal) => apiRequest<CheckAnswer>(SECOND_CHECK, 'POST', {}, signal));
 
 // ── Words ───────────────────────────────────────────────────────────────────
@@ -130,11 +131,14 @@ export const CHECK_WORDS: Record<CheckResult, string> = {
   unreachable: 'Jev could not be reached',
 };
 
-/** The server's confirmation sentence when a refused change needs the owner's yes, else null. */
-export function confirmation(err: unknown): string | null {
+/** When a refused change needs the owner's yes: the server's sentence and the daily limit it names (the number a
+ * yes sends back), else null. */
+export function confirmation(err: unknown): { text: string; calls: number } | null {
   const e = err as ApiAnswerError;
-  const body = e?.body as { error?: unknown; needs_confirm?: unknown } | undefined;
-  return e?.status === 409 && body?.needs_confirm === true && typeof body.error === 'string' ? body.error : null;
+  const body = e?.body as { error?: unknown; needs_confirm?: unknown; confirm_daily_calls?: unknown } | undefined;
+  const calls = body?.confirm_daily_calls;
+  if (e?.status !== 409 || body?.needs_confirm !== true || typeof body.error !== 'string') return null;
+  return Number.isInteger(calls) ? { text: body.error, calls: calls as number } : null;
 }
 
 /** A refused change in words: the server's own sentence (it never repeats a value sent), else a fixed one. */

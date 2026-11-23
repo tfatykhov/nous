@@ -42,7 +42,8 @@ function install() {
     return { ok: reply.status < 400, status: reply.status, text: async () => JSON.stringify(reply.body) } as Response;
   }));
 }
-const needsConfirm = (): Reply => ({ status: 409, body: { error: SENTENCE, needs_confirm: true } });
+const needsConfirm = (calls = 100, text = SENTENCE): Reply =>
+  ({ status: 409, body: { error: text, needs_confirm: true, confirm_daily_calls: calls } });
 const changes = () => sent.filter((s) => s.method !== 'GET');
 /** Render the card and find its panel. */
 const card = async () => {
@@ -136,9 +137,32 @@ describe('a change that starts the sending', () => {
     expect(changes()).toEqual([{ method: 'PATCH', url: '/dashboard/outside-judge/second', body: { on: true } }]);
     await fireEvent.click(screen.getByRole('button', { name: 'Yes, send them' }));
     await waitFor(() => expect(screen.getByTestId('jev-status').textContent).toBe('On'));
-    expect(changes()[1]).toEqual({ method: 'PATCH', url: '/dashboard/outside-judge/second', body: { on: true, confirm_send: true } });
+    expect(changes()[1]).toEqual({
+      method: 'PATCH', url: '/dashboard/outside-judge/second', body: { on: true, confirm_send: true, confirm_daily_calls: 100 },
+    });
     expect(screen.queryByRole('group', { name: 'Confirm sending to api.typesafe.ai' })).toBeNull();
     expect((screen.getByLabelText('Ask Jev as well') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('a yes answered with a new sentence (the limit changed meanwhile) asks again, and the next yes sends the new number', async () => {
+    const NEWER = 'Send a copy of each decision Nous resolves to TypeSafe (api.typesafe.ai), an outside company? At most 400 copies a day.';
+    first = STATE({ key: SAVED_KEY });
+    replies = [
+      needsConfirm(100),
+      needsConfirm(400, NEWER),
+      { status: 200, body: STATE({ key: SAVED_KEY, on: { value: true, source: 'stored' }, running: true }) },
+    ];
+    await card();
+    await fireEvent.click(screen.getByLabelText('Ask Jev as well'));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Yes, send them' }));
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Confirm sending to api.typesafe.ai' }).textContent).toContain(NEWER));
+    await fireEvent.click(screen.getByRole('button', { name: 'Yes, send them' }));
+    await waitFor(() => expect(screen.getByTestId('jev-status').textContent).toBe('On'));
+    expect(changes().map((c) => c.body)).toEqual([
+      { on: true },
+      { on: true, confirm_send: true, confirm_daily_calls: 100 },
+      { on: true, confirm_send: true, confirm_daily_calls: 400 },
+    ]);
   });
 
   it('Cancel closes the box and sends nothing', async () => {
@@ -226,7 +250,7 @@ describe('the key', () => {
     await waitFor(() => expect(screen.getByTestId('jev-status').textContent).toBe('On'));
     expect(changes()).toEqual([
       { method: 'PUT', url: '/dashboard/outside-judge/second/key', body: { key: KEY } },
-      { method: 'PUT', url: '/dashboard/outside-judge/second/key', body: { key: KEY, confirm_send: true } },
+      { method: 'PUT', url: '/dashboard/outside-judge/second/key', body: { key: KEY, confirm_send: true, confirm_daily_calls: 100 } },
     ]);
     expect(keyInput()).toBeNull();
     expect(document.body.innerHTML).not.toContain(KEY);

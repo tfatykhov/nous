@@ -10,12 +10,15 @@
   } from '../../lib/outside_judge';
 
   // F118 PR 3: the second judge's settings. One GET when the screen opens: with the setting off on the server
-  // ({enabled: false}) nothing is drawn and nothing more is asked. Each change is sent at once; a change that would
-  // start the sending is refused with the server's sentence, shown in a box, and sent again only on "Yes".
+  // ({enabled: false}) nothing is drawn and nothing more is asked. Each change is sent at once; one that needs the
+  // owner's yes is refused with the server's sentence and the daily limit it names, shown in a box, and sent again with
+  // that number only on "Yes".
   // The API key is bound to `keyText` alone, cleared when its call returns, on Cancel, and when the box closes.
 
   type Kind = 'change' | 'key' | 'remove';
-  interface Pending { kind: Kind; text: string; send: (confirm: boolean) => Promise<SecondState> }
+  /** One change's request; `confirmed` is the daily limit of the sentence the owner said yes to, or null. */
+  type Send = (confirmed: number | null) => Promise<SecondState>;
+  interface Pending { kind: Kind; text: string; calls: number; send: Send }
 
   let card = $state<SecondState | null>(null);
   let off = $state(false);
@@ -56,20 +59,21 @@
     document.getElementById('jev-confirm')?.querySelector('button')?.focus();
   }
 
-  /** Send one change; on a refusal that asks for the owner's yes, open the box with the server's sentence. */
-  async function attempt(kind: Kind, send: (confirm: boolean) => Promise<SecondState>, confirm = false) {
+  /** Send one change. A refusal that asks for the owner's yes (also after a yes, when the limit changed meanwhile)
+   * opens the box with the server's sentence and the number it names. */
+  async function attempt(kind: Kind, send: Send, confirmed: number | null = null) {
     busy = true;
     note = null;
     checkText = null;
     try {
-      show(await send(confirm));
+      show(await send(confirmed));
       pending = null;
       note = { text: SAVED, ok: true };
       if (kind === 'key') editingKey = false;
     } catch (err) {
-      const sentence = confirm ? null : confirmation(err);
-      if (sentence) {
-        pending = { kind, text: sentence, send };
+      const asked = confirmation(err);
+      if (asked) {
+        pending = { kind, text: asked.text, calls: asked.calls, send };
         void focusConfirm();
         return;
       }
@@ -90,12 +94,12 @@
     const box = e.currentTarget as HTMLInputElement;
     const want = box.checked;
     box.checked = card?.on.value ?? false; // what is stored, until the server says otherwise
-    void attempt('change', (confirm) => changeSecond({ on: want }, confirm));
+    void attempt('change', (confirmed) => changeSecond({ on: want }, confirmed));
   }
 
   function saveModel() {
     const model = modelText.trim();
-    void attempt('change', (confirm) => changeSecond({ model }, confirm));
+    void attempt('change', (confirmed) => changeSecond({ model }, confirmed));
   }
 
   function saveLimit() {
@@ -105,11 +109,11 @@
       note = { text: limitRule(card.daily_calls.most), ok: false };
       return;
     }
-    void attempt('change', (confirm) => changeSecond({ daily_calls: value }, confirm));
+    void attempt('change', (confirmed) => changeSecond({ daily_calls: value }, confirmed));
   }
 
   function submitKey() {
-    void attempt('key', (confirm) => saveKey(keyText, confirm));
+    void attempt('key', (confirmed) => saveKey(keyText, confirmed));
   }
 
   function closeKey() {
@@ -119,7 +123,7 @@
 
   function confirmRemove() {
     askingRemove = false;
-    void attempt('remove', (confirm) => removeKey(confirm));
+    void attempt('remove', (confirmed) => removeKey(confirmed));
   }
 
   async function check() {
@@ -165,7 +169,7 @@
               onclick={saveModel}>Save</Button>
             {#if s.model.source === 'stored' && !locked}
               <Button variant="ghost" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={blocked}
-                onclick={() => void attempt('change', (confirm) => changeSecond({ model: null }, confirm))}>{SERVER_VALUE}</Button>
+                onclick={() => void attempt('change', (confirmed) => changeSecond({ model: null }, confirmed))}>{SERVER_VALUE}</Button>
             {/if}
           </div>
           <p class="hint" id="jev-model-hint">{MODEL_HINT} · {sourceText(s.model.source)}</p>
@@ -180,7 +184,7 @@
               onclick={saveLimit}>Save</Button>
             {#if s.daily_calls.source !== 'server' && !locked}
               <Button variant="ghost" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={blocked}
-                onclick={() => void attempt('change', (confirm) => changeSecond({ daily_calls: null }, confirm))}>{SERVER_VALUE}</Button>
+                onclick={() => void attempt('change', (confirmed) => changeSecond({ daily_calls: null }, confirmed))}>{SERVER_VALUE}</Button>
             {/if}
           </div>
           <p class="hint" id="jev-limit-hint">{mostText(s.daily_calls.most)} · {sourceText(s.daily_calls.source)}</p>
@@ -233,7 +237,7 @@
           <p>{pending.text}</p>
           <div class="actions">
             <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy}
-              onclick={() => pending && void attempt(pending.kind, pending.send, true)}>{YES_SEND}</Button>
+              onclick={() => pending && void attempt(pending.kind, pending.send, pending.calls)}>{YES_SEND}</Button>
             <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy} onclick={cancelPending}>Cancel</Button>
           </div>
         </div>

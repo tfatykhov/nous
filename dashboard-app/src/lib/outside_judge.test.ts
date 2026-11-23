@@ -96,10 +96,13 @@ describe('the other words', () => {
 
 describe('a refused change', () => {
   const refused = (status: number, body: unknown) => Object.assign(new Error(`HTTP ${status}`), { status, body });
-  it("asks for the owner's yes only for a 409 that says so, with the server's sentence", () => {
-    expect(confirmation(refused(409, { error: 'Send a copy?', needs_confirm: true }))).toBe('Send a copy?');
+  it("asks for the owner's yes only for a 409 that says so, with the server's sentence and the number it names", () => {
+    expect(confirmation(refused(409, { error: 'Send a copy?', needs_confirm: true, confirm_daily_calls: 40 })))
+      .toEqual({ text: 'Send a copy?', calls: 40 });
+    expect(confirmation(refused(409, { error: 'Send a copy?', needs_confirm: true }))).toBeNull();
+    expect(confirmation(refused(409, { error: 'Send a copy?', needs_confirm: true, confirm_daily_calls: '40' }))).toBeNull();
     expect(confirmation(refused(409, { error: 'The server has the outside judge switched off.' }))).toBeNull();
-    expect(confirmation(refused(400, { error: 'x', needs_confirm: true }))).toBeNull();
+    expect(confirmation(refused(400, { error: 'x', needs_confirm: true, confirm_daily_calls: 1 }))).toBeNull();
     expect(confirmation(new Error('network'))).toBeNull();
   });
   it("shows the server's sentence, else a fixed one", () => {
@@ -120,25 +123,25 @@ describe('the requests', () => {
   }));
   afterEach(() => { sent.length = 0; vi.unstubAllGlobals(); });
 
-  it('sends each change to its route, with the confirmation only when it was given', async () => {
+  it('sends each change to its route, with the yes and the number it was given for only when there is one', async () => {
     install();
     const KEY = 'ts-request-' + 'Q'.repeat(20);
     await readSecond();
-    await changeSecond({ on: true }, false);
-    await changeSecond({ daily_calls: null }, true);
-    await saveKey(KEY, false);
-    await saveKey(KEY, true);
-    await removeKey(false);
-    await removeKey(true);
+    await changeSecond({ on: true }, null);
+    await changeSecond({ daily_calls: null }, 100);
+    await saveKey(KEY, null);
+    await saveKey(KEY, 7);
+    await removeKey(null);
+    await removeKey(0);
     await checkSecond();
     expect(sent.map(({ url, method, body }) => [method, url, body])).toEqual([
       ['GET', '/dashboard/outside-judge/second', undefined],
       ['PATCH', '/dashboard/outside-judge/second', { on: true }],
-      ['PATCH', '/dashboard/outside-judge/second', { daily_calls: null, confirm_send: true }],
+      ['PATCH', '/dashboard/outside-judge/second', { daily_calls: null, confirm_send: true, confirm_daily_calls: 100 }],
       ['PUT', '/dashboard/outside-judge/second/key', { key: KEY }],
-      ['PUT', '/dashboard/outside-judge/second/key', { key: KEY, confirm_send: true }],
+      ['PUT', '/dashboard/outside-judge/second/key', { key: KEY, confirm_send: true, confirm_daily_calls: 7 }],
       ['DELETE', '/dashboard/outside-judge/second/key', {}],
-      ['DELETE', '/dashboard/outside-judge/second/key', { confirm_send: true }],
+      ['DELETE', '/dashboard/outside-judge/second/key', { confirm_send: true, confirm_daily_calls: 0 }],
       ['POST', '/dashboard/outside-judge/second/check', {}],
     ]);
     // The key is in a body only, never in an address; every change is sent as JSON.
