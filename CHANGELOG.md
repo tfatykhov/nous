@@ -2,6 +2,169 @@
 
 All notable changes to Nous. Release notes for each version also live on the [GitHub releases page](https://github.com/tfatykhov/nous/releases).
 
+# v1.4.0 — The Goal-Driven Agent
+
+**37 commits, 37 pull requests, 419 files changed since v1.3.0** (November 14 → November 23, 2026)
+
+v1.3.0 let Nous reach past its own tools. v1.4.0 lets Nous **work toward something over days**: the owner sets a goal, approves it, and Nous works on it in sessions of its own under limits the owner chose, while the owner watches from a Goals screen. Beside that, an outside judge grades Nous's decisions and finished task reports in shadow, the owner can set the limits of background work from the dashboard, and the routes that change things ask for proof that the owner is the caller.
+
+---
+
+## ✨ Highlights
+
+- **Goals (F114).** A goal has a charter, a plan, a journal and limits. Once the owner approves it, a goal driver starts background sessions toward it, one task after another, and records what each session did. Ships dark.
+- **The Goals screen.** A list of goals beside one pane: create a goal from a preset or custom limits, approve, pause, resume, stop, run a session now, add a note, change the budget or deadline. A panel says what the goal is doing now, and the sections fold.
+- **Goals the owner can shape.** One session a day at a set time of day, session settings changed on an existing goal, outward tools allowed for one goal, and one goal at a time that may run any command until an end time. Each is its own setting, all off.
+- **Limits and tools (F115).** The owner sets eleven limits of background work and switches a tool off for background work from the dashboard, with a record of each change. Ships dark.
+- **An outside judge (F118).** Decisions Nous resolves, and the reports of finished background tasks, are graded later by a separate judge with fixed instructions, in shadow: nothing Nous does changes. A second judge, TypeSafe's Jev model, can run beside it, and the Autonomy screen shows both judges' numbers and a card for the second judge's settings.
+- **What a finished job costs (F117).** Tokens per finished task, workflow step and goal session, and how many had an outside check; plus a status line that tells a background turn how many rounds and tool calls it has used.
+- **Owner proof on routes that change things.** Routes and companion actions that change state or start work require the owner's secret or the login proxy's secret; chat and the inbound MCP server check for it under one setting that starts in warn mode.
+- **Companion devices.** A phone pairs with a code the owner opens on the Integrations screen, and its device token counts as proof for the companion's actions.
+- **An About screen** with the version, the build and what Nous runs on.
+
+---
+
+## 🎯 F114 — Goals *(off by default)*
+
+### The store and the driver
+- **Goals as rows:** a goal, its sessions (at most one open at a time) and an append-only journal that names who made each change. Limits are columns: Small, Medium and Large presets or custom values (#930, migration 113)
+- **The goal driver** ticks every `NOUS_GOALS_TICK_SECONDS`: it journals each goal's channel, acts on the owner's stop and cancel, closes finished sessions, ends a chain whose task ran past its limit, pauses a goal on a stop condition (deadline, total budget, a stall of sessions with no plan step closed, errors in a row) and starts the sessions that are due (#932, #943)
+- **A start is held** by the day's token budget, the day's session count, quiet hours, the day's job launches, the open sessions across goals (`NOUS_GOALS_MAX_ACTIVE_SESSIONS`) and free places in the task queue (`NOUS_GOALS_QUEUE_HEADROOM`). The owner's run-now skips the wake, the day's count and quiet hours, and nothing else (#932, #943)
+- **Each session is a chain of tasks.** Its first task carries the charter, the plan and the journal, quoted as data and capped at 12,000 characters; the goal's own tools `goal_note` and `goal_plan` write the journal and the plan. A plan step closes only when a completed task or workflow of the session is cited (#946)
+- **The owner's chains keep their room:** `NOUS_GOALS_RESERVED_SLOTS` continuation slots are never taken by a goal's chain, and a goal session's reports go to the goal's journal instead of the owner's chat (#946)
+- **A host command,** `python -m nous.goals.seed`, creates, lists, shows and changes goals (#930)
+
+### The Goals screen and its routes
+- **Routes** under `/goals`: list, options, one goal, create, and one route per owner action (approve, pause, resume, confirm done, stop, cancel, run now, budget, deadline, note). A refusal by the store is a 409 with the store's sentence (#936)
+- **The screen:** state in words and colour, spend against budget, deadline, the charter, the plan with its evidence, sessions and the journal. Actions that spend or end something show one sentence and wait for Yes (#936)
+- **Follow-ups:** a goal that is gone is dropped and said once, the read-failure line says which read failed, and the bare address shows the goal last shown in the tab (#937)
+- **What the goal is doing now** *(`NOUS_GOAL_ACTIVITY_ENABLED`)*: `GET /goals/{ref}/activity` and a panel with the current task or workflow by name, what it waits for, when the last tool call ended, counts of calls and failures, coding jobs started, the newest calls and links to the Work screen. It carries tool names, times, counts and outcomes, never a call's input, result or error text. The goal's sections fold (#959)
+- **On a phone and a wide screen:** the activity panel, the goal forms and the costs panel were reworked to read and fit at both widths (#961)
+
+### Pacing and session settings *(`NOUS_GOALS_PACING_ENABLED`)*
+- **A goal that works once a day,** from a time of day in `NOUS_GOALS_TIMEZONE`: at most one timer session per local day, not before that time. A day a hold kept from starting before local midnight is owed and carried for one day at most (#957, migration 120)
+- **Change how it works:** `POST /goals/{ref}/sessions` changes sessions per day, the shortest gap, job launches per day, quiet hours, the stall limit and the once-a-day time on an existing goal, with one journal row. The change applies from the next start (#957)
+
+### Tools and commands for one goal
+- **Outward tools for one goal** *(`NOUS_GOAL_TOOL_GRANTS_ENABLED`)*: the owner allows one goal's background sessions to use `send_file`, `send_email`, `browser_task` or a tool of a connected MCP server without asking, when the goal is created or later. Never the shell or Python. A grant skips only the class rule for that goal's own chain; every other check still applies (#949, migration 117)
+- **A goal that may run any command** *(`NOUS_GOAL_COMMANDS_ENABLED`, up to `NOUS_GOAL_COMMANDS_MAX_HOURS`, 24 by default)*: chosen only on the create form, with a typed sentence and a number of hours, counted from approval. One goal at a time. It ends at the end time, on Stop, cancel, confirming done, or a pause the driver makes. It needs goals, the autonomy settings, the tool guard and per-goal tools on, and `NOUS_OWNER_ENTRY_MODE=enforce` with both owner digests set (#950, migration 118)
+
+### The default goal prompt
+- **How a goal's work runs:** a short built-in text, read in the first task of each goal session and in every follow-up turn, says how a goal session works: a task runs, then a follow-up turn reads its result and decides what runs next; only a follow-up turn starts tasks or workflows; a plan step is closed by citing a completed task or workflow of the session; the limits are shown to the follow-up turn (#967)
+- **The owner can change it:** a card "Default goal prompt" on the Identity screen shows the text in use, whether it is the built-in one, and offers Save and Reset to the default, each asking first. At most 1,500 characters; a change applies from the next first task and follow-up turn with no restart. Routes `GET`, `PUT` and `DELETE /goals/prompt`. No migration and no setting (#967)
+
+---
+
+## 🎚️ F115 — Limits and Tools *(off by default)*
+
+- **Eleven limits of background work** on a new Limits and tools screen: rounds of tool use per turn, tool calls per background task, a chain's decisions, follow-up tasks, levels, tokens and decisions in a row without progress, a chain's lifetime, the time to answer a question or proposal, and the time limits of a task. Each is a whole number inside a range. A change is checked, written with a record, and applied in place with no restart (`NOUS_AUTONOMY_SETTINGS_ENABLED`) (#947, migration 116)
+- **Host ceilings and locks:** `NOUS_AUTONOMY_CEILINGS` caps a limit, and a ceiling wins over the owner's value. `NOUS_AUTONOMY_LOCKED_TOOLS` keeps a tool off whatever the owner sets (#947)
+- **The tool guard** (`NOUS_TOOL_GUARD_ENABLED`, needs the settings flag): a tool the owner sets to Not allowed is not offered to background work, and a call to it is refused with the code `tool_guard`. The guard applies to background work only. If the saved settings cannot be read at start, background work is held from every tool until they can (#947)
+- **Routes** under `/autonomy`, behind the owner guard (#947)
+
+---
+
+## ⚖️ F118 — The Outside Judge *(shadow, off by default)*
+
+### The first judge
+- **Decisions:** when an interactive turn resolves a decision as success, partial or failure, a judge with fixed instructions reads the decision's own fields and the calls, ledger rows and tasks of the session that recorded it, redacted and bounded, and gives `success`, `partial`, `failure` or `cannot_tell` with a confidence. The verdict is stored beside the agent's own grade in `nous_system.judge_verdicts`; no grade, calibration, strategy card or reply changes (`NOUS_OUTSIDE_JUDGE_MODE=shadow`, `NOUS_OUTSIDE_JUDGE_MODEL`, `NOUS_OUTSIDE_JUDGE_DAILY_CALLS`, default 100) (#958, migration 121)
+- **Task reports** *(`NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`)*: the report of a background task that finished as completed is judged as `supported`, `not_supported` or `cannot_tell`, from what the task did up to its completion. Reports use at most half the daily limit. The finish checks' verdict is kept on the row for comparison and is not shown to the judge (#963)
+- **An hourly pass** queues what a restart lost, and decisions graded by the owner, the review route or an automatic check, which are judged without that grade. At most five a pass, and nothing past half the daily limit (#963)
+- **Reply limit:** the built-in judge's reply may be up to 1,500 tokens (#964)
+
+### The second judge, Jev
+- **Beside the first** *(`NOUS_OUTSIDE_JUDGE_SECOND=jev`, with `TYPESAFE_API_KEY` and `NOUS_OUTSIDE_JUDGE_JEV_MODEL`, default `jev-1.14.0`)*: the same redacted, bounded record is also sent to TypeSafe at `api.typesafe.ai`, which answers with a verdict and a confidence. Each judge has its own rows and its own daily limit, and a failure of the second leaves the first and the agent as they were (#960)
+- **Settings on the Autonomy screen** *(`NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED`)*: a card "A second opinion on decisions" switches the second judge on and off, sets its model and daily limit, and saves, replaces, removes and checks its API key, sealed with the MCP credentials' key file. Each change applies at once. A change that starts the sending, or raises the limit while it sends, needs the owner's yes, asked with a sentence that says what is sent to which company (#962, migration 122)
+- **The hourly pass for decisions:** with the reports setting on, the second judge also runs the hourly pass over graded decisions, at most five a pass, at its own name, version and daily limit. The confirmation sentence says so. A request the second judge has sent when it is replaced or Nous stops now ends with its row, and `docker-compose.yml` gives the `nous` service 30 seconds to stop. Jev's instruction version moves from `jq-2` to `jq-3`. No migration and no new setting (#968)
+
+### The panel
+- **"The outside judge"** on the Autonomy screen, read-only, above the second judge's card: decisions judged, agreement with outcomes, the share it could not tell, today's calls against the limit, a verdict bar, agreement by who graded, where the judge disagreed (each decision named by its own text), task reports and the hourly pass, the second judge and where the two judges differed, and the cost (#965)
+
+---
+
+## 📉 F117, F113 — Finish Checks, Loop Numbers and a Status Line *(off by default)*
+
+- **Two fixed finish checks** *(shadow, `NOUS_FINISH_CHECKS_MODE`)*: when a background task finishes with a validated report, one check looks for a file the report says was written and that does not exist, and one for a task whose every writing or sending call failed while the report names no failure. The verdict (`clean`, `flagged` or `not_checked`) is recorded as labels only in the task row's metadata. Nothing else changes (#954)
+- **What a finished job costs** *(`NOUS_LOOP_NUMBERS_ENABLED`)*: `GET /dashboard/loop-numbers` and a panel on the Autonomy screen count, for tasks, workflow steps and goal sessions, the finished units, the tokens of everything that ended over the finished ones (cached input is not counted), and the share with no outside confirmation (#956)
+- **A status line for background turns** *(`NOUS_STATUS_LINE_ENABLED`)*: each model call of a task, workflow step, scheduled run or continuation turn carries one line saying the round, the tool calls used of the limit, what happens after the last round and the task's changes so far. It exists in the outgoing request only, never in the saved conversation, and each line once sent is sent again unchanged on later calls (#956)
+
+---
+
+## 💓 F116 — Stale Pending-Action Findings *(off by default)*
+
+- **The record:** migration 119 adds `heart.pending_resolutions`, one row per fact or episode that a filter, the `learn_fact` tool or the owner closed, with the reason (#953)
+- **Three filters for the heartbeat's self-initiated check,** each `off`, `shadow` or `on`. Kind (`NOUS_HEARTBEAT_PENDING_KIND_MODE`) leaves out rule, preference and person facts and the heartbeat's own triage notes. Age (`NOUS_HEARTBEAT_PENDING_AGE_MODE`) hides old status lines, old facts and ongoing episodes and facts that read as a question, with `NOUS_HEARTBEAT_PENDING_SNAPSHOT_TTL_HOURS`, `..._FACT_MAX_AGE_HOURS` and `..._EPISODE_MAX_AGE_HOURS`. Supersession (`NOUS_HEARTBEAT_PENDING_SUPERSEDE_MODE`) hides superseded or inactive facts. In shadow the counts by reason are recorded and every finding still surfaces. An error keeps the item (#955)
+
+---
+
+## 🛡️ Owner Proof
+
+- **Owner decisions need the owner's proof:** intention decisions, heartbeat configuration, search weights, undo restores, and the companion's approve, reject, answer, cancel and approval-choice actions require the owner's secret or the login proxy's secret (which must come with a JSON content type). The API holds only the SHA-256 of each secret (#934)
+- **More routes:** decision review, fact, profile card, censor and identity writes, subtask cancel, schedule delete and run, heartbeat operations and the sleep trigger, rubric changes and the reads of stored prompt, response, message and tool-result text require the same proof. A test checks that every route of the app declares its check (#944)
+- **Chat and the inbound MCP server** *(`NOUS_OWNER_ENTRY_MODE`: `off`, `warn` or `enforce`, default `warn`)*: `warn` logs and counts a call with no proof, by the class of its session, with one Telegram line a day; `enforce` requires the owner's or the proxy's secret on the chat routes, and `/mcp` takes the owner's secret or its own key (`NOUS_MCP_SERVER_SECRET_SHA256`). `POST /schedules` and the companion verb `app.act` require proof in every mode. The Telegram bot sends the owner's secret; `python -m nous.ping SESSION_ID MESSAGE` posts one chat message from the bot's container (#935)
+- **Logs:** the HTTP client's request lines are redacted in the log record (#935)
+- **Fetches of a URL the model supplies** go through one checked path: they connect only to public internet addresses that were checked, check every redirect hop, bound the body and use one deadline. `web_fetch`, `learn_skill`, the browser egress proxy and the MCP client use the same rule (#938)
+
+---
+
+## 📱 Companion Devices
+
+- **Pairing:** the owner opens an 8-character code (valid five minutes), the device redeems it once and receives a token that the server keeps only as a SHA-256. A paired device's token counts as proof for the companion's card actions and for nothing else; revoking takes effect on the next call (#940, migration 115)
+- **The Android app** pairs from its Settings, seals the token with a Keystore key and sends it only to the server it paired with, only over https (#941)
+- **A Devices section** on the Integrations screen shows a code once with a countdown, lists devices with when each was paired and last seen, and revokes a device after asking (#945)
+- **First push registrations** of one installation made at the same moment no longer fail, and two new installations at the cap are counted correctly (#948)
+
+---
+
+## 🔌 MCP Client and Shell
+
+- **Sign-in to a server that answers without credentials** and publishes its resource metadata at the well-known address: the client discovers its authorization server as it does after a 401. A server with no credential says "No key stored and not signed in." where sign-in is offered (#951)
+- **The lineage shell names its rule:** a refused command says which rule refused it, and the policy-violation event gains a `reason_code`. More read-only forms are accepted: combined short git flags, bare `git remote`, `git branch` list forms, `git ls-tree`, `git ls-files`, `git -C` the repository top, and `cut` (#931)
+
+---
+
+## 🖥️ Dashboard
+
+- **About:** a new screen at the end of the System group with the version, the build (commit and build time, when the deployment sets `NOUS_BUILD_COMMIT` and `NOUS_BUILD_TIME`), how long Nous has been running, the agent's name and configured models, the Python, PostgreSQL and pgvector versions, the database schema (the highest migration applied), and links to the release notes and the source. Route `GET /dashboard/about` (#966)
+- Goals, Limits and tools, the Autonomy screen's judge and costs panels, and the Devices section are described above
+
+---
+
+## 🧪 Tests
+
+- The decode-slot tests wait until every slot is back, not until one is free (#942)
+- The classification time bound allows for a slow shared runner (#939)
+
+---
+
+## 📊 By the Numbers
+
+| | v1.3.0 | v1.4.0 |
+|---|---|---|
+| Migrations (highest number) | 112 | 122 |
+| Pull requests since the previous release | 17 | 37 |
+
+---
+
+## Upgrade Notes
+
+- **Migrations 113 and 115 to 122** run at startup (number 114 is not used).
+- **Dependencies:** `tzdata>=2024.1` is added, for the time zones of goal pacing. Rebuild the image, or reinstall.
+- **Behaviour that changes without a flag:**
+  - the routes listed under Owner Proof require the owner's or the proxy's secret. With neither `NOUS_OWNER_ROUTE_SECRET_SHA256` nor `NOUS_MCP_CLIENT_UI_SECRET_SHA256` set to a digest, they refuse every call (403) and the companion's owner actions answer `OWNER_PROOF_REQUIRED`. The login proxy adds its secret, so the dashboard sends nothing new; the README says what the dashboard needs without the proxy (#934, #944);
+  - `NOUS_OWNER_ENTRY_MODE` defaults to `warn`: calls to chat and `/mcp` with no proof are logged and counted, and one Telegram line a day reports the counts. Set `enforce` to refuse them; the Telegram bot already sends its secret (#935);
+  - `POST /schedules` and the companion verb `app.act` need the owner's or the proxy's secret in every mode (#935);
+  - from the Android companion, the five owner actions are refused until the phone is paired (#934, #941);
+  - a fetch of a URL the model supplies is refused unless the host resolves only to public addresses (#938);
+  - the HTTP client's request lines are redacted in the log (#935);
+  - the lineage shell's refusal text names a rule; the dashboard has About, Goals and Limits and tools entries and a Devices section on the Integrations screen; the Identity screen's goal prompt card appears only with goals on.
+- **To use goals:** set `NOUS_GOALS_ENABLED` (it also needs continuation, intentions, the result inbox and subtasks). Per-goal tools, commands, pacing and the activity panel each have their own setting; per-goal tools also need the autonomy settings and the tool guard; `NOUS_GOAL_COMMANDS_ENABLED` is forced off unless goals, the autonomy settings, the tool guard and per-goal tools are on and `NOUS_OWNER_ENTRY_MODE` is `enforce` with both owner digests set. Pacing needs `NOUS_GOALS_TIMEZONE`.
+- **To use the outside judge:** set `NOUS_OUTSIDE_JUDGE_MODE=shadow`. The second judge also needs `NOUS_OUTSIDE_JUDGE_SECOND=jev` and `TYPESAFE_API_KEY`, or `NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED` and the dashboard card; **turning it on sends a redacted copy of each decision to TypeSafe**.
+- **Everything marked off** stays off until its setting is changed. This release's `docker-compose.yml` lists the new settings with their defaults, so each can be set from `.env`; a deployment with its own compose file needs a line for each. It also gives the `nous` service a 30 second stop time (#968).
+- `pyproject.toml` and `nous.__version__` now read `1.4.0`.
+
+---
+
 # v1.3.0 — The Connected Agent
 
 **17 commits, 17 pull requests, 115 files changed since v1.2.0** (November 12 → November 14, 2026)
