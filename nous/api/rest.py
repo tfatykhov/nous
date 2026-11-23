@@ -2431,8 +2431,41 @@ def create_app(
                 **numbers,
                 "runtime": runtime,
                 **second_blocks,
+                **(await _outside_judge_report_blocks(service, days, numbers)),
             }
         )
+
+    async def _outside_judge_report_blocks(service: Any, days: int, numbers: dict[str, Any]) -> dict[str, Any]:
+        """F118 task reports, for GET /dashboard/outside-judge: with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, ``reports``
+        (the report judge's verdicts, beside the finish checks' and the owner's spot checks, and their cost) and
+        ``sweep`` (the first judge's agreement with grades from outcomes, the stated-confidence grade apart, and what
+        the sweep did in this process). With the setting off nothing, so the answer is the same as without reports;
+        when they cannot be read nothing either, with one WARNING."""
+        if not settings.outside_judge_reports_enabled:
+            return {}
+        from nous.judge import store as judge_store
+        from nous.judge.instructions import REPORT_INSTRUCTION_VERSION
+        from nous.judge.model_judge import NAME as BUILT_IN_JUDGE
+
+        report_judge = getattr(service, "report_judge", None)
+        name = getattr(report_judge, "name", BUILT_IN_JUDGE)
+        version = getattr(report_judge, "version", REPORT_INSTRUCTION_VERSION)
+        try:
+            async with database.session() as session:
+                reports = await judge_store.report_numbers(
+                    session, settings.agent_id, days=days, judge_name=name, judge_version=version
+                )
+            sweep_numbers = getattr(service, "sweep_numbers", None)
+            return {
+                "reports": {"judge": name, "version": version, **reports},
+                "sweep": {
+                    "agreement": judge_store.outcome_agreement(numbers["decisions"]["by_grader"]),
+                    "runtime": sweep_numbers() if callable(sweep_numbers) else None,
+                },
+            }
+        except Exception as e:
+            logger.warning("Dashboard outside judge: the report numbers were not read (%s)", type(e).__name__)
+            return {}
 
     async def dashboard_work_sessions(request: Request) -> JSONResponse:
         """GET /dashboard/work/sessions — F108: the Work list, the sessions of the last ``days`` days (default 7)

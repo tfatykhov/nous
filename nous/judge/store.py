@@ -407,3 +407,128 @@ async def sweep_reports(
     return [
         {"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)
     ]
+
+
+# ---- the report numbers (GET /dashboard/outside-judge, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED) ---------------------
+
+NOT_SUPPORTED_MAX = 20
+# Another verdict on the same report and the judge's verdict it reads as: the finish checks' (clean or flagged; a
+# not_checked one is compared with nothing) and the owner's spot check of a finished task (right or wrong).
+FINISH_CHECK_PAIRS = {"clean": "supported", "flagged": "not_supported"}
+AUDIT_PAIRS = {"right": "supported", "wrong": "not_supported"}
+
+_REPORT_ROWS = text(
+    "SELECT v.subject_id, v.status, v.verdict, v.confidence, v.labels, v.reason, v.tokens_in, v.tokens_out, "
+    "v.latency_ms, v.calls, v.judged_at, v.evidence ->> 'finish_check' AS finish_check, a.verdict AS audit "
+    "FROM nous_system.judge_verdicts v LEFT JOIN nous_system.check_audits a ON a.agent_id = v.agent_id "
+    "AND a.task_id = v.subject_id AND a.verdict IS NOT NULL "
+    "WHERE v.agent_id = :agent AND v.subject_kind = 'task_report' AND v.judge_name = :name "
+    "AND v.judge_version = :version AND v.judged_at >= :since"
+)
+
+
+def _against(rows: list[dict[str, Any]], key: str, pairs: dict[str, str]) -> dict[str, Any]:
+    """How the verdicts of ``ok`` rows compare with another verdict on the same report (``key``, None when there is
+    none): ``matrix`` counts them by the other verdict, then the judge's; ``compared`` counts the rows whose other
+    verdict is one of ``pairs`` and whose verdict is not ``cannot_tell``, ``agree`` those of them that read the same."""
+    matrix: dict[str, dict[str, int]] = {}
+    compared = agree = 0
+    for row in rows:
+        other = row[key]
+        if other is None:
+            continue
+        matrix.setdefault(other, {})
+        matrix[other][row["verdict"]] = matrix[other].get(row["verdict"], 0) + 1
+        if other in pairs and row["verdict"] != "cannot_tell":
+            compared += 1
+            agree += pairs[other] == row["verdict"]
+    return {
+        "n": sum(sum(counts.values()) for counts in matrix.values()),
+        "compared": compared,
+        "agree": agree,
+        "agree_rate": round(agree / compared, 4) if compared else None,
+        "matrix": matrix,
+    }
+
+
+def summarize_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The numbers of a set of report verdict rows (dicts with the columns of ``_REPORT_ROWS``): verdicts of ``ok``
+    rows, skipped rows by label, errors, the agreement with the finish checks (``vs_finish_check``) and with the
+    owner's spot checks (``vs_audit``), the cost as ``summarize`` counts it, and the latest 20 ``not_supported``
+    verdicts with ids, labels and the judge's sentence only."""
+    ok = [row for row in rows if row["status"] == "ok"]
+    called = [row for row in rows if (row["calls"] or 0) > 0]
+    by_verdict: dict[str, int] = {}
+    for row in ok:
+        by_verdict[row["verdict"]] = by_verdict.get(row["verdict"], 0) + 1
+    skipped_by_label: dict[str, int] = {}
+    for row in rows:
+        if row["status"] == "skipped":
+            for label in row["labels"] or []:
+                skipped_by_label[label] = skipped_by_label.get(label, 0) + 1
+    tokens_in = sum(row["tokens_in"] or 0 for row in called)
+    tokens_out = sum(row["tokens_out"] or 0 for row in called)
+    latest = sorted((row for row in ok if row["verdict"] == "not_supported"), key=lambda r: r["judged_at"], reverse=True)
+    return {
+        "judged": len(ok),
+        "by_verdict": by_verdict,
+        "skipped_by_label": skipped_by_label,
+        "errors": sum(1 for row in rows if row["status"] in ("error", "timeout")),
+        "vs_finish_check": _against(ok, "finish_check", FINISH_CHECK_PAIRS),
+        "vs_audit": _against(ok, "audit", AUDIT_PAIRS),
+        "cost": {
+            "calls": sum(row["calls"] or 0 for row in called),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_per_verdict_avg": round((tokens_in + tokens_out) / len(called), 1) if called else None,
+            "latency_ms_p50": _median([row["latency_ms"] for row in called if row["latency_ms"] is not None]),
+        },
+        "not_supported": [
+            {
+                "subject_id": str(row["subject_id"]),
+                "confidence": row["confidence"],
+                "labels": list(row["labels"] or []),
+                "reason": row["reason"],
+                "finish_check": row["finish_check"],
+                "audit": row["audit"],
+                "judged_at": row["judged_at"].isoformat(),
+            }
+            for row in latest[:NOT_SUPPORTED_MAX]
+        ],
+    }
+
+
+async def report_numbers(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    days: int,
+    judge_name: str,
+    judge_version: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """``summarize_reports`` over this agent's report verdicts of one judge name and version from the last ``days``
+    days, each with its finish check's verdict (kept on the row when it was judged) and the owner's answered spot
+    check of that task, if any."""
+    now = now or datetime.now(UTC)
+    params = {"agent": agent_id, "name": judge_name, "version": judge_version, "since": now - timedelta(days=days)}
+    return summarize_reports([dict(row._mapping) for row in await session.execute(_REPORT_ROWS, params)])
+
+
+def outcome_agreement(by_grader: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """From ``summarize``'s ``by_grader``: the judge's agreement with grades from outcomes (the owner's and the
+    reviewer's outcome signals, pooled), and apart from it the agreement with the grade from the agent's own stated
+    confidence, which is not an outcome. The agent's own grades are in neither."""
+
+    def pooled(graders: tuple[str, ...]) -> dict[str, Any]:
+        group = {"n": 0, "agree": 0, "judge_harsher": 0, "judge_kinder": 0, "cannot_tell": 0}
+        for grader in graders:
+            for key in group:
+                group[key] += (by_grader.get(grader) or {}).get(key, 0)
+        graded = group["n"] - group["cannot_tell"]
+        return {**group, "agree_rate": round(group["agree"] / graded, 4) if graded else None}
+
+    return {
+        "outcome_grades": pooled((*OWNER_GRADERS, SIGNAL_GRADER)),
+        "stated_confidence": pooled((STATED_CONFIDENCE_GRADER,)),
+    }
