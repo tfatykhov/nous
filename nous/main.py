@@ -683,6 +683,18 @@ def _build_goals(
     return goal_driver
 
 
+def _build_report_judge(settings: Settings, api_client: Any) -> Any | None:
+    """F118: with ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``, the built-in judge of finished task reports over
+    ``api_client`` (the first judge's name and model, the report instructions), for the first judge's service; None
+    otherwise. The second judge grades decisions only (``nous.judge.service.SECOND_JUDGE_GRADES_REPORTS``)."""
+    if not settings.outside_judge_reports_enabled:
+        return None
+    from nous.judge.model_judge import make_background_model_report_judge
+
+    logger.info("F118: finished task reports are judged too, by the first judge, with an hourly sweep")
+    return make_background_model_report_judge(settings, api_client)
+
+
 def _build_outside_judge(settings: Settings, *, database: Any, api_client: Any) -> Any | None:
     """F118: with ``NOUS_OUTSIDE_JUDGE_MODE=shadow``, register the built-in judge (a closure over ``api_client``) and
     build the one outside judge service; the caller starts it and installs it with ``nous.judge.set_current``. Off:
@@ -697,7 +709,7 @@ def _build_outside_judge(settings: Settings, *, database: Any, api_client: Any) 
     judge = PROVIDERS[NAME](settings)
     if judge is None:
         return None
-    return OutsideJudge(database, settings, judge)
+    return OutsideJudge(database, settings, judge, report_judge=_build_report_judge(settings, api_client))
 
 
 def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:

@@ -2,7 +2,8 @@
 
 The judge is never a tool: with the judge in shadow the dispatcher's tools, their schemas and the tools a turn is
 offered are the same as with it off. Only ``main.py`` (the build), ``nous.api.tools`` (the accessor, for the
-submit) and ``nous.api.rest`` (the read route) refer to the package.
+submit), ``nous.handlers.subtask_executor`` (the accessor, for a finished task's report) and ``nous.api.rest`` (the
+read route) refer to the package.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def test_only_main_tools_and_rest_refer_to_the_judge():
         for path in (ROOT / "nous").rglob("*.py")
         if "judge" not in path.parts and _imports_judge(path)
     }
-    assert users == {"nous/main.py", "nous/api/tools.py", "nous/api/rest.py"}
+    assert users == {"nous/main.py", "nous/api/tools.py", "nous/api/rest.py", "nous/handlers/subtask_executor.py"}
 
 
 def _modules_after(code: str) -> list[str]:

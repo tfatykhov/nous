@@ -5,6 +5,10 @@ subject is a no-op, except over an ``error`` or ``timeout`` row with fewer than 
 replaced by the new attempt, its calls and known token counts added and its attempts counted. Read by the worker
 (whether a subject is judged, today's call count) and by ``GET /dashboard/outside-judge``. Every statement is filtered
 on the agent.
+
+With finished task reports judged (``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``), the sweep reads from here which decisions
+and reports have no final row yet (it reads ``brain.decisions`` and ``heart.subtasks`` and writes neither), and the
+route reads the report numbers, beside the finish checks' verdicts and the owner's spot checks.
 """
 
 from __future__ import annotations
@@ -14,8 +18,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from nous.judge.evidence import BLANK_SQL, FINISH_CHECK_VERDICTS
 
 # The most attempts at one subject at one judge version: an error or timeout row is tried again until then.
 MAX_ATTEMPTS = 3
@@ -55,6 +61,7 @@ _CALLS_TODAY = (
 )
 _CALLS_TODAY_ALL = text(_CALLS_TODAY)
 _CALLS_TODAY_OF_JUDGE = text(_CALLS_TODAY + " AND judge_name = :judge")
+_CALLS_TODAY_OF_JUDGE_KIND = text(_CALLS_TODAY + " AND judge_name = :judge AND subject_kind = :kind")
 
 
 async def insert_verdict(session: AsyncSession, row: dict[str, Any]) -> bool:
@@ -80,12 +87,22 @@ def start_of_utc_day(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def calls_today(session: AsyncSession, agent_id: str, now: datetime, judge_name: str | None = None) -> int:
+async def calls_today(
+    session: AsyncSession,
+    agent_id: str,
+    now: datetime,
+    judge_name: str | None = None,
+    subject_kind: str | None = None,
+) -> int:
     """The model requests of this agent's judge ``judge_name`` (every judge when None) since the start of ``now``'s
-    UTC day, at any version (a row written without a call counts none). The daily limit is per judge."""
+    UTC day, at any version (a row written without a call counts none), on subjects of ``subject_kind`` only when it
+    is given (with a judge name). The daily limit is per judge."""
     params = {"agent": agent_id, "since": start_of_utc_day(now)}
     if judge_name is None:
         return int(await session.scalar(_CALLS_TODAY_ALL, params) or 0)
+    if subject_kind is not None:
+        kind_params = {**params, "judge": judge_name, "kind": subject_kind}
+        return int(await session.scalar(_CALLS_TODAY_OF_JUDGE_KIND, kind_params) or 0)
     return int(await session.scalar(_CALLS_TODAY_OF_JUDGE, {**params, "judge": judge_name}) or 0)
 
 
@@ -308,3 +325,243 @@ async def pair_numbers(
         "since": now - timedelta(days=days),
     }
     return summarize_pairs([dict(row._mapping) for row in await session.execute(_PAIR_ROWS, params)])
+
+
+# ---- the hourly sweep (NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED) -------------------------------------------------------
+
+# How far back the sweep looks: decisions graded by the owner or a fixed signal, decisions the agent resolved, reports.
+SWEEP_DECISION_DAYS = 30
+SWEEP_AGENT_DAYS = 7
+SWEEP_REPORT_DAYS = 2
+# The graders whose decisions the sweep takes (any other, such as a background turn's, is not taken).
+OWNER_GRADERS = ("a2ui",)  # the owner's tap on a companion card
+AGENT_GRADER = "agent"  # the agent in an interactive turn: what a restart lost
+EXTERNAL_GRADER = "external"  # the review route (the owner's or the proxy's secret): its own group, not the owner's
+SIGNAL_GRADER = "auto"  # the decision reviewer's fixed signals
+# The decision reviewer also grades failure from the low confidence the agent itself stated when it recorded the
+# decision (``ErrorSignal`` in nous/handlers/decision_reviewer.py, whose note starts with this text). That grade is not
+# an outcome: it is stored under its own grader name and kept out of the agreement with outcome grades.
+STATED_CONFIDENCE_GRADER = "auto:stated_confidence"
+STATED_CONFIDENCE_NOTE = "Low confidence ("
+
+# A verdict row the judge will not try again (the rule of ``_JUDGED``).
+_FINAL_ROW = f"(v.status NOT IN {RETRIED_STATUSES!r} OR v.attempts >= {MAX_ATTEMPTS})"
+# How long after a failed or timed-out attempt the sweep waits before it queues the subject again, so hourly passes
+# during an outage do not spend a subject's attempts.
+SWEEP_RETRY_AFTER = timedelta(hours=6)
+# A row that keeps the sweep from queueing its subject: final, or failed within ``SWEEP_RETRY_AFTER``.
+_SWEEP_HELD = f"({_FINAL_ROW} OR v.judged_at >= :retry_after)"
+_SWEEP_DECISIONS = text(
+    "SELECT d.id, d.reviewer, d.outcome, d.outcome_result, d.reviewed_at FROM brain.decisions d "
+    "WHERE d.agent_id = :agent AND d.outcome IN ('success', 'partial', 'failure') "
+    "AND (d.outcome <> 'failure' OR d.confidence IS DISTINCT FROM 0.0) AND d.reviewed_at >= :since "
+    "AND (d.reviewer IN :graders OR (d.reviewer = :agent_grader AND d.reviewed_at >= :agent_since)) "
+    "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = d.agent_id "
+    "AND v.subject_kind = 'decision' AND v.subject_id = d.id AND v.judge_name = :name "
+    f"AND v.judge_version = :version AND {_SWEEP_HELD}) "
+    "ORDER BY CASE WHEN d.reviewer IN :owners THEN 0 WHEN d.reviewer = :agent_grader THEN 1 "
+    "WHEN d.reviewer = :external_grader THEN 2 ELSE 3 END, "
+    "d.reviewed_at DESC, d.id LIMIT :limit"
+).bindparams(bindparam("graders", expanding=True), bindparam("owners", expanding=True))
+_SWEEP_REPORTS = text(
+    "SELECT s.id, s.completed_at FROM heart.subtasks s WHERE s.agent_id = :agent AND s.status = 'completed' "
+    "AND s.final_outcome = 'completed' AND s.completed_at >= :since "
+    f"AND COALESCE(btrim(s.report_jsonb ->> 'summary', {BLANK_SQL}), '') <> '' "
+    "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = s.agent_id "
+    "AND v.subject_kind = 'task_report' AND v.subject_id = s.id AND v.judge_name = :name "
+    f"AND v.judge_version = :version AND {_SWEEP_HELD}) "
+    "ORDER BY s.completed_at DESC, s.id LIMIT :limit"
+)
+
+
+def grader_of(reviewer: str, outcome: str, note: str | None) -> str:
+    """The grader a swept decision's claim is stored under: its reviewer, except a reviewer's grade from the agent's
+    own low stated confidence, which is ``STATED_CONFIDENCE_GRADER``."""
+    if reviewer == SIGNAL_GRADER and outcome == "failure" and (note or "").startswith(STATED_CONFIDENCE_NOTE):
+        return STATED_CONFIDENCE_GRADER
+    return reviewer
+
+
+async def sweep_decisions(
+    session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
+) -> list[dict[str, Any]]:
+    """Up to ``limit`` of this agent's decisions graded success, partial or failure (not the abandoned mark) without a
+    final row at this judge name and version (nor a failed one tried within ``SWEEP_RETRY_AFTER``), in the sweep's
+    order: graded by the owner in the last 30 days, by the agent in an interactive turn in the last 7, through the
+    review route in the last 30, by a fixed signal in the last 30; newest first in each. Each is a dict of ``id``,
+    ``grader`` (``grader_of``), ``grade``, ``note`` and ``graded_at``. Read-only."""
+    params = {
+        "agent": agent_id,
+        "since": now - timedelta(days=SWEEP_DECISION_DAYS),
+        "agent_since": now - timedelta(days=SWEEP_AGENT_DAYS),
+        "graders": [*OWNER_GRADERS, EXTERNAL_GRADER, SIGNAL_GRADER],
+        "owners": list(OWNER_GRADERS),
+        "agent_grader": AGENT_GRADER,
+        "external_grader": EXTERNAL_GRADER,
+        "name": judge_name,
+        "version": judge_version,
+        "retry_after": now - SWEEP_RETRY_AFTER,
+        "limit": limit,
+    }
+    return [
+        {
+            "id": row.id,
+            "grader": grader_of(row.reviewer, row.outcome, row.outcome_result),
+            "grade": row.outcome,
+            "note": row.outcome_result,
+            "graded_at": row.reviewed_at,
+        }
+        for row in await session.execute(_SWEEP_DECISIONS, params)
+    ]
+
+
+async def sweep_reports(
+    session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
+) -> list[dict[str, Any]]:
+    """Up to ``limit`` of this agent's tasks finished as completed with a report in the last 2 days, without a final
+    row at this judge name and version (nor a failed one tried within ``SWEEP_RETRY_AFTER``), newest first: dicts of
+    ``id`` and ``completed_at``. Read-only."""
+    params = {
+        "agent": agent_id,
+        "since": now - timedelta(days=SWEEP_REPORT_DAYS),
+        "name": judge_name,
+        "version": judge_version,
+        "retry_after": now - SWEEP_RETRY_AFTER,
+        "limit": limit,
+    }
+    return [{"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)]
+
+
+# ---- the report numbers (GET /dashboard/outside-judge, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED) ---------------------
+
+NOT_SUPPORTED_MAX = 20
+# Another verdict on the same report and the judge's verdict it reads as: the finish checks' (clean or flagged; a
+# not_checked one is compared with nothing) and the owner's spot check of a finished task (right or wrong).
+FINISH_CHECK_PAIRS = {"clean": "supported", "flagged": "not_supported"}
+AUDIT_PAIRS = {"right": "supported", "wrong": "not_supported"}
+
+_REPORT_ROWS = text(
+    "SELECT v.subject_id, v.status, v.verdict, v.confidence, v.labels, v.reason, v.tokens_in, v.tokens_out, "
+    "v.latency_ms, v.calls, v.judged_at, v.evidence ->> 'finish_check' AS finish_check, a.verdict AS audit "
+    "FROM nous_system.judge_verdicts v LEFT JOIN nous_system.check_audits a ON a.agent_id = v.agent_id "
+    "AND a.task_id = v.subject_id AND a.verdict IS NOT NULL "
+    "WHERE v.agent_id = :agent AND v.subject_kind = 'task_report' AND v.judge_name = :name "
+    "AND v.judge_version = :version AND v.judged_at >= :since"
+)
+
+
+def _against(rows: list[dict[str, Any]], key: str, pairs: dict[str, str]) -> dict[str, Any]:
+    """How the verdicts of ``ok`` rows compare with another verdict on the same report (``key``, None when there is
+    none): ``matrix`` counts them by the other verdict, then the judge's; ``compared`` counts the rows whose other
+    verdict is one of ``pairs`` and whose verdict is not ``cannot_tell``, ``agree`` those of them that read the same."""
+    matrix: dict[str, dict[str, int]] = {}
+    compared = agree = 0
+    for row in rows:
+        other = row[key]
+        if other is None:
+            continue
+        matrix.setdefault(other, {})
+        matrix[other][row["verdict"]] = matrix[other].get(row["verdict"], 0) + 1
+        if other in pairs and row["verdict"] != "cannot_tell":
+            compared += 1
+            agree += pairs[other] == row["verdict"]
+    return {
+        "n": sum(sum(counts.values()) for counts in matrix.values()),
+        "compared": compared,
+        "agree": agree,
+        "agree_rate": round(agree / compared, 4) if compared else None,
+        "matrix": matrix,
+    }
+
+
+def finish_check_verdict(value: Any) -> str | None:
+    """``value`` when it is a verdict a finish check gives, else None."""
+    return value if isinstance(value, str) and value in FINISH_CHECK_VERDICTS else None
+
+
+def summarize_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The numbers of a set of report verdict rows (dicts with the columns of ``_REPORT_ROWS``): verdicts of ``ok``
+    rows, skipped rows by label, errors, the agreement with the finish checks (``vs_finish_check``) and with the
+    owner's spot checks (``vs_audit``), the cost as ``summarize`` counts it, and the latest 20 ``not_supported``
+    verdicts with ids, labels and the judge's sentence only. A finish check verdict other than ``clean``, ``flagged``
+    or ``not_checked`` is read as none."""
+    rows = [{**row, "finish_check": finish_check_verdict(row["finish_check"])} for row in rows]
+    ok = [row for row in rows if row["status"] == "ok"]
+    called = [row for row in rows if (row["calls"] or 0) > 0]
+    by_verdict: dict[str, int] = {}
+    for row in ok:
+        by_verdict[row["verdict"]] = by_verdict.get(row["verdict"], 0) + 1
+    skipped_by_label: dict[str, int] = {}
+    for row in rows:
+        if row["status"] == "skipped":
+            for label in row["labels"] or []:
+                skipped_by_label[label] = skipped_by_label.get(label, 0) + 1
+    tokens_in = sum(row["tokens_in"] or 0 for row in called)
+    tokens_out = sum(row["tokens_out"] or 0 for row in called)
+    latest = sorted(
+        (row for row in ok if row["verdict"] == "not_supported"), key=lambda r: r["judged_at"], reverse=True
+    )
+    return {
+        "judged": len(ok),
+        "by_verdict": by_verdict,
+        "skipped_by_label": skipped_by_label,
+        "errors": sum(1 for row in rows if row["status"] in ("error", "timeout")),
+        "vs_finish_check": _against(ok, "finish_check", FINISH_CHECK_PAIRS),
+        "vs_audit": _against(ok, "audit", AUDIT_PAIRS),
+        "cost": {
+            "calls": sum(row["calls"] or 0 for row in called),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_per_verdict_avg": round((tokens_in + tokens_out) / len(called), 1) if called else None,
+            "latency_ms_p50": _median([row["latency_ms"] for row in called if row["latency_ms"] is not None]),
+        },
+        "not_supported": [
+            {
+                "subject_id": str(row["subject_id"]),
+                "confidence": row["confidence"],
+                "labels": list(row["labels"] or []),
+                "reason": row["reason"],
+                "finish_check": row["finish_check"],
+                "audit": row["audit"],
+                "judged_at": row["judged_at"].isoformat(),
+            }
+            for row in latest[:NOT_SUPPORTED_MAX]
+        ],
+    }
+
+
+async def report_numbers(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    days: int,
+    judge_name: str,
+    judge_version: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """``summarize_reports`` over this agent's report verdicts of one judge name and version from the last ``days``
+    days, each with its finish check's verdict (kept on the row when it was judged) and the owner's answered spot
+    check of that task, if any."""
+    now = now or datetime.now(UTC)
+    params = {"agent": agent_id, "name": judge_name, "version": judge_version, "since": now - timedelta(days=days)}
+    return summarize_reports([dict(row._mapping) for row in await session.execute(_REPORT_ROWS, params)])
+
+
+def outcome_agreement(by_grader: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """From ``summarize``'s ``by_grader``: the judge's agreement with grades from outcomes (the owner's and the
+    reviewer's outcome signals, pooled), and apart from it the agreement with the grade from the agent's own stated
+    confidence, which is not an outcome. The agent's own grades and those given through the review route
+    (``external``) are in neither: each is its own group in ``by_grader``."""
+
+    def pooled(graders: tuple[str, ...]) -> dict[str, Any]:
+        group = {"n": 0, "agree": 0, "judge_harsher": 0, "judge_kinder": 0, "cannot_tell": 0}
+        for grader in graders:
+            for key in group:
+                group[key] += (by_grader.get(grader) or {}).get(key, 0)
+        graded = group["n"] - group["cannot_tell"]
+        return {**group, "agree_rate": round(group["agree"] / graded, 4) if graded else None}
+
+    return {
+        "outcome_grades": pooled((*OWNER_GRADERS, SIGNAL_GRADER)),
+        "stated_confidence": pooled((STATED_CONFIDENCE_GRADER,)),
+    }
