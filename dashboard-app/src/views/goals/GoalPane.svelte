@@ -646,6 +646,8 @@
   .kind { font-weight: 600; color: var(--text); }
   .journal p { margin: 0.25rem 0 0; }
   form { display: flex; flex-direction: column; gap: 0.5rem; }
+  /* In this column the field's row basis (12rem) would be a height: the note box takes only what it holds. */
+  form .field { flex: none; }
   form .actions { margin-top: 0; }
   @media (max-width: 768px) {
     .facts { grid-template-columns: minmax(0, 1fr); gap: 0.125rem; }

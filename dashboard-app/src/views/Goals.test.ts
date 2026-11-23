@@ -721,6 +721,12 @@ describe('Goals: confirmations and focus', () => {
     const rule = css.get('.confirm p:focus');
     expect(rule?.outline).toMatch(/^2px solid var\(--focus-ring\)$/);
   });
+
+  it('the note box takes only the height of its label and text area (no row-sized basis in the column form)', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'goals/GoalPane.svelte'), 'utf-8')));
+    expect(css.get('form')).toMatchObject({ display: 'flex', 'flex-direction': 'column' });
+    expect(css.get('form .field')).toMatchObject({ flex: 'none' });
+  });
 });
 
 describe('Goals: the poll', () => {

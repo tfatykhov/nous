@@ -89,6 +89,8 @@ describe('a folding section', () => {
   it('the button shows a focus outline, and the panel has no display rule that would undo hidden', () => {
     const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'Fold.svelte'), 'utf-8')));
     expect(css.get('.toggle:focus-visible')?.outline).toMatch(/^2px solid var\(--focus-ring\)$/);
+    // The outline has room around the words: padding inside the button, the same taken back outside it.
+    expect(css.get('.toggle')).toMatchObject({ padding: '0.25rem 0.5rem', margin: '-0.25rem -0.5rem', width: 'calc(100% + 1rem)' });
     for (const [selector, rule] of css) {
       if (selector.includes('.panel')) expect(rule.display, selector).toBeUndefined();
     }
