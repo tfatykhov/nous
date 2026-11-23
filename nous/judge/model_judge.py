@@ -33,7 +33,7 @@ from nous.judge.slot import JudgeInput, JudgeOutput, failed, register_provider
 logger = logging.getLogger(__name__)
 
 NAME = "background_model"
-MAX_TOKENS = 400
+MAX_TOKENS = 1500  # room for the words a model writes before the tool call when it refuses a forced tool choice
 
 
 _INPUT_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
