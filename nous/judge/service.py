@@ -463,9 +463,10 @@ class OutsideJudge:
         final row at this service's judge names and versions (``store.sweep_decisions``, ``store.sweep_reports``, the
         latter only with a report judge): decisions graded by the owner, then what a restart lost (decisions the agent
         resolved in an interactive turn, finished reports), then decisions graded through the review route, then by a
-        fixed signal, newest first in each. A decision's claim is its grade as it stands now, at the time it was graded. Nothing is queued once
-        today's calls of the judge reach half its daily limit, so the day's own subjects keep the other half; nor when
-        that count cannot be read. A subject already queued is passed over. It reads ``brain.decisions`` and
+        fixed signal, newest first in each. A decision's claim is its grade as it stands now, at the time it was
+        graded. Nothing is queued once today's calls of the judge reach half its daily limit, so the day's own
+        subjects keep the other half; nor when that count cannot be read; a subject whose last attempt failed within
+        ``store.SWEEP_RETRY_AFTER`` waits. A subject already queued is passed over. It reads ``brain.decisions`` and
         ``heart.subtasks`` and writes neither. Never raises: a failure is one WARNING with the class name, counted."""
         now = now or datetime.now(UTC)
         counts = self._sweep_counts

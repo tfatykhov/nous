@@ -311,7 +311,7 @@ async def test_the_report_call_alone_is_not_evidence(db, agent):
 
 
 async def test_the_record_never_holds_the_tasks_finish_check(db, agent):
-    """The finish checks' verdict is what the judge's is compared with: it is kept in the counts, never in the record."""
+    """The finish checks' verdict is what the judge's is compared with: kept in the counts, never in the record."""
     task_id = await _task(db, agent)  # finish check: flagged, effects_all_failed
     writer, recorder = _recorder(db, agent)
     _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id)

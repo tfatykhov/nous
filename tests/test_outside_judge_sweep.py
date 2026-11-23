@@ -312,11 +312,17 @@ async def test_a_subject_with_a_final_row_is_not_taken_and_a_failed_one_is_until
     await _verdict(db, agent, other_version, version="d0")
     retried = await _decision(db, agent, "a2ui")
     # A failed row is taken again once its last attempt is 6 hours old.
-    await _verdict(db, agent, retried, status="error", verdict="cannot_tell", attempts=2, judged_at=NOW - timedelta(hours=7))
+    await _verdict(
+        db, agent, retried, status="error", verdict="cannot_tell", attempts=2, judged_at=NOW - timedelta(hours=7)
+    )
     waiting = await _decision(db, agent, "a2ui")
-    await _verdict(db, agent, waiting, status="timeout", verdict="cannot_tell", attempts=1, judged_at=NOW - timedelta(hours=5))
+    await _verdict(
+        db, agent, waiting, status="timeout", verdict="cannot_tell", attempts=1, judged_at=NOW - timedelta(hours=5)
+    )
     spent = await _decision(db, agent, "a2ui")
-    await _verdict(db, agent, spent, status="timeout", verdict="cannot_tell", attempts=3, judged_at=NOW - timedelta(days=1))
+    await _verdict(
+        db, agent, spent, status="timeout", verdict="cannot_tell", attempts=3, judged_at=NOW - timedelta(days=1)
+    )
     report_done = await _task(db, agent)
     await _verdict(db, agent, report_done, kind="task_report", version="r1")
     service, decisions, _r = _service(db, agent)
@@ -459,9 +465,7 @@ async def test_with_two_judges_only_the_first_sweeps(db, agent):
 
 
 @pytest.mark.parametrize("reviewer", ["a2ui", "external", "auto"])
-async def test_a_swept_decision_graded_by_another_is_judged_without_its_grade_and_compared_with_it(
-    db, agent, reviewer
-):
+async def test_a_swept_decision_graded_by_another_is_judged_without_its_grade_and_compared_with_it(db, agent, reviewer):
     reviewed = NOW - timedelta(hours=3)
     note = "NOTE-7c2e only half of the backup moved"
     decision_id = await _decision(db, agent, reviewer, outcome="partial", reviewed_at=reviewed, note=note)

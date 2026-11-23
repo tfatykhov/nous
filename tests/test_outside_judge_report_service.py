@@ -381,9 +381,7 @@ async def _decision(db, agent: str) -> uuid.UUID:
 def _shared(db, agent: str, cap: int) -> tuple[OutsideJudge, StubJudge, StubJudge]:
     decisions = StubJudge(name="shared", version="d", verdict="success")
     reports = StubJudge(name="shared", version="r")
-    service = OutsideJudge(
-        db, _settings(agent, outside_judge_daily_calls=cap), decisions, report_judge=reports, **FAST
-    )
+    service = OutsideJudge(db, _settings(agent, outside_judge_daily_calls=cap), decisions, report_judge=reports, **FAST)
     return service, decisions, reports
 
 
