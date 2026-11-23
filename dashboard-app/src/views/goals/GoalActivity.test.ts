@@ -168,7 +168,9 @@ describe('what the panel says', () => {
     expect(at).toBeGreaterThan(-1);
     const wide = parseBlocks(css.slice(0, at));
     // Desktop: the rows share the list's columns, so the outcome sits just after the widest tool name.
-    expect(wide.get('.calls')).toMatchObject({ display: 'grid' });
+    expect(wide.get('.calls')).toMatchObject({
+      display: 'grid', 'grid-template-columns': '8rem fit-content(14rem) max-content max-content minmax(0, 1fr)',
+    });
     expect(wide.get('.calls > li')).toMatchObject({ 'grid-template-columns': 'subgrid', 'grid-column': '1 / -1' });
     expect(wide.get('.tool')).toMatchObject({ 'overflow-wrap': 'anywhere', 'min-width': '0' });
     const phone = parseBlocks(css.slice(at));

@@ -164,10 +164,10 @@
   .line { font-size: 0.8125rem; margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
   .warn { color: var(--warn-text); }
-  /* The rows share the list's columns (subgrid): the tool column is as wide as the widest name that fits, so the outcome
-     and the kind sit just after it; a name too long for the row wraps in its column. */
+  /* The rows share the list's columns (subgrid): the tool column is as wide as the widest name, up to 14rem, so the
+     outcome and the kind sit just after it; a longer name wraps in its column. */
   .calls { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; column-gap: 0.75rem;
-    grid-template-columns: 8rem minmax(0, max-content) max-content max-content minmax(0, 1fr); }
+    grid-template-columns: 8rem fit-content(14rem) max-content max-content minmax(0, 1fr); }
   .calls > li { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: baseline;
     padding: 0.25rem 0; border-top: 1px solid var(--border); font-size: 0.8125rem; min-width: 0; }
   .calls > li:first-child { border-top: 0; }
