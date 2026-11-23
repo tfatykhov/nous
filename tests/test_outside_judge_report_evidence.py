@@ -320,6 +320,24 @@ async def test_the_record_never_holds_the_tasks_finish_check(db, agent):
     assert [item["source"] for item in json.loads(rendered)["evidence"]] == ["tool_call"]
 
 
+@pytest.mark.parametrize("verdict", ["made_up", "", 3, None])
+async def test_a_finish_check_verdict_a_finish_check_does_not_give_is_held_as_none(db, agent, verdict):
+    task_id = await _task(db, agent, metadata={"finish_check": {"verdict": verdict, "failed": []}})
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id)
+    await writer.drain(10)
+    assert (await _build(db, agent, task_id)).counts["finish_check"] is None
+
+
+@pytest.mark.parametrize("verdict", ["clean", "flagged", "not_checked"])
+async def test_each_verdict_a_finish_check_gives_is_held(db, agent, verdict):
+    task_id = await _task(db, agent, metadata={"finish_check": {"verdict": verdict, "failed": []}})
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id)
+    await writer.drain(10)
+    assert (await _build(db, agent, task_id)).counts["finish_check"] == verdict
+
+
 async def test_without_a_finish_check_the_counts_hold_none(db, agent):
     task_id = await _task(db, agent, metadata={})
     writer, recorder = _recorder(db, agent)

@@ -21,6 +21,8 @@ from uuid import UUID
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.judge.evidence import FINISH_CHECK_VERDICTS
+
 # The most attempts at one subject at one judge version: an error or timeout row is tried again until then.
 MAX_ATTEMPTS = 3
 # The statuses of a row that a later attempt replaces.
@@ -472,11 +474,18 @@ def _against(rows: list[dict[str, Any]], key: str, pairs: dict[str, str]) -> dic
     }
 
 
+def finish_check_verdict(value: Any) -> str | None:
+    """``value`` when it is a verdict a finish check gives, else None."""
+    return value if isinstance(value, str) and value in FINISH_CHECK_VERDICTS else None
+
+
 def summarize_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """The numbers of a set of report verdict rows (dicts with the columns of ``_REPORT_ROWS``): verdicts of ``ok``
     rows, skipped rows by label, errors, the agreement with the finish checks (``vs_finish_check``) and with the
     owner's spot checks (``vs_audit``), the cost as ``summarize`` counts it, and the latest 20 ``not_supported``
-    verdicts with ids, labels and the judge's sentence only."""
+    verdicts with ids, labels and the judge's sentence only. A finish check verdict other than ``clean``, ``flagged``
+    or ``not_checked`` is read as none."""
+    rows = [{**row, "finish_check": finish_check_verdict(row["finish_check"])} for row in rows]
     ok = [row for row in rows if row["status"] == "ok"]
     called = [row for row in rows if (row["calls"] or 0) > 0]
     by_verdict: dict[str, int] = {}

@@ -519,10 +519,15 @@ def _assemble_report(
     return record, len(render_record(record))
 
 
+# The verdicts a finish check gives (nous/cognitive/finish_checks.py).
+FINISH_CHECK_VERDICTS = frozenset({"clean", "flagged", "not_checked"})
+
+
 def _finish_check_verdict(value: Any) -> str | None:
-    """The verdict of the finish check record (``metadata.finish_check``), or None without one."""
+    """The verdict of the finish check record (``metadata.finish_check``) when it is one a finish check gives, else
+    None."""
     verdict = value.get("verdict") if isinstance(value, Mapping) else None
-    return verdict if isinstance(verdict, str) else None
+    return verdict if isinstance(verdict, str) and verdict in FINISH_CHECK_VERDICTS else None
 
 
 async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: UUID) -> ReportEvidence | None:

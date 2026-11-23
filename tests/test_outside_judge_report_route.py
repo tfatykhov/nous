@@ -109,6 +109,13 @@ def test_the_report_numbers_of_seeded_rows():
     assert set(latest[0]) == {"subject_id", "confidence", "labels", "reason", "finish_check", "audit", "judged_at"}
 
 
+def test_a_finish_check_verdict_a_finish_check_does_not_give_is_read_as_none():
+    rows = [_report(finish_check="made_up"), _report(finish_check=""), _report(verdict="not_supported", finish_check=7)]
+    numbers = store.summarize_reports(rows)
+    assert numbers["vs_finish_check"] == {"n": 0, "compared": 0, "agree": 0, "agree_rate": None, "matrix": {}}
+    assert [entry["finish_check"] for entry in numbers["not_supported"]] == [None]
+
+
 def test_no_report_rows_give_zeros_and_no_rates():
     numbers = store.summarize_reports([])
     assert numbers["judged"] == 0 and numbers["not_supported"] == []
