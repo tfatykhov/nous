@@ -9,13 +9,17 @@ on the agent.
 With finished task reports judged (``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``), the sweep reads from here which decisions
 and reports have no final row yet (it reads ``brain.decisions`` and ``heart.subtasks`` and writes neither), and the
 route reads the report numbers, beside the finish checks' verdicts and the owner's spot checks.
+
+For the decisions and reports the route lists, it also reads a short title here: the decision's description from
+``brain.decisions`` or the task's text from ``heart.subtasks``, as one line (``titles_of``). It writes neither table.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import bindparam, text
@@ -149,7 +153,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     tokens, the average per verdict and the median latency are over the rows that made a call, and input tokens are
     every kind (uncached, read from the cache, written to it). A disagreement is an ``ok`` verdict other than
     ``cannot_tell`` that differs from the grade; the latest 50 are listed with ids, labels and the judge's sentence
-    only."""
+    only (the route adds a short ``title``, ``titles_of``)."""
     ok = [row for row in rows if row["status"] == "ok"]
     called = [row for row in rows if (row["calls"] or 0) > 0]
     by_verdict: dict[str, int] = {}
@@ -260,7 +264,7 @@ def summarize_pairs(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ``agree_rate`` is ``agree`` over the pairs without ``cannot_tell``. ``matrix`` counts the pairs by the first judge's
     verdict, then the second's. ``evidence_differs`` counts pairs whose two evidence counts differ (each judge builds
     its record itself). The latest 20 pairs with different verdicts, neither ``cannot_tell``, are listed, latest claim
-    first, with ids, grades, both verdicts, confidences and labels."""
+    first, with ids, grades, both verdicts, confidences and labels (the route adds a short ``title``, ``titles_of``)."""
     pairs = [row for row in rows if row["same_claim"]]
     matrix: dict[str, dict[str, int]] = {}
     agree = either_cannot_tell = 0
@@ -483,8 +487,8 @@ def summarize_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """The numbers of a set of report verdict rows (dicts with the columns of ``_REPORT_ROWS``): verdicts of ``ok``
     rows, skipped rows by label, errors, the agreement with the finish checks (``vs_finish_check``) and with the
     owner's spot checks (``vs_audit``), the cost as ``summarize`` counts it, and the latest 20 ``not_supported``
-    verdicts with ids, labels and the judge's sentence only. A finish check verdict other than ``clean``, ``flagged``
-    or ``not_checked`` is read as none."""
+    verdicts with ids, labels and the judge's sentence only (the route adds a short ``title``, ``titles_of``). A finish
+    check verdict other than ``clean``, ``flagged`` or ``not_checked`` is read as none."""
     rows = [{**row, "finish_check": finish_check_verdict(row["finish_check"])} for row in rows]
     ok = [row for row in rows if row["status"] == "ok"]
     called = [row for row in rows if (row["calls"] or 0) > 0]
@@ -565,3 +569,42 @@ def outcome_agreement(by_grader: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "outcome_grades": pooled((*OWNER_GRADERS, SIGNAL_GRADER)),
         "stated_confidence": pooled((STATED_CONFIDENCE_GRADER,)),
     }
+
+
+# ---- the titles of the listed decisions and reports (GET /dashboard/outside-judge) ---------------------------------
+
+TITLE_MAX = 120
+# The subject's own text, its first 600 characters: enough for a title once its white space is folded.
+_TITLES = {
+    "decision": text(
+        "SELECT id::text AS id, left(description, 600) AS body FROM brain.decisions "
+        "WHERE agent_id = :agent AND id = ANY(CAST(:ids AS uuid[]))"
+    ),
+    "task": text(
+        "SELECT id::text AS id, left(task, 600) AS body FROM heart.subtasks "
+        "WHERE agent_id = :agent AND id = ANY(CAST(:ids AS uuid[]))"
+    ),
+}
+
+
+def one_line(raw: str | None, limit: int = TITLE_MAX) -> str | None:
+    """``raw`` as one line, each run of white space folded to one space, at most ``limit`` characters: a longer line is
+    cut and ends with ``…``. None for None, an empty or a blank text."""
+    line = " ".join((raw or "").split())
+    if not line:
+        return None
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+async def titles_of(
+    session: AsyncSession, agent_id: str, kind: Literal["decision", "task"], ids: Iterable[str]
+) -> dict[str, str | None]:
+    """The title of each id asked: the description of this agent's decision (``decision``) or the text of its task
+    (``task``) with that id, as ``one_line`` gives it, None when there is no such row. One statement for the ids
+    without repeats, none when no id is asked. Read-only."""
+    asked = list(dict.fromkeys(ids))
+    if not asked:
+        return {}
+    rows = await session.execute(_TITLES[kind], {"agent": agent_id, "ids": asked})
+    found = {row.id: one_line(row.body) for row in rows}
+    return {subject_id: found.get(subject_id) for subject_id in asked}

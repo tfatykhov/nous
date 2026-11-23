@@ -7,6 +7,7 @@
   import { usePoll } from '../lib/poll';
   import type { AutonomyData, GuardRecord, GuardReason, GuardSignal, InventoryTool, JobFixRow, LoopNumbersData, ScoreStats, VerifiedShare } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import OutsideJudge from './autonomy/OutsideJudge.svelte';
   import SecondJudge from './autonomy/SecondJudge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
@@ -38,8 +39,13 @@
   const loopOff = $derived($loopStore.data?.enabled === false);
   const loopShown = $derived($loopStore.data?.enabled === true);
   $effect(() => { if (loopOff) loopStore.stop(); });
+  // F118: the outside judge's panel reads the page's window and asks again when this number moves.
+  let judgeTick = $state(0);
   /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
-  const refreshPage = () => Promise.all([store.refresh(), ...(loopOff ? [] : [loopStore.refresh()])]);
+  const refreshPage = () => {
+    judgeTick += 1;
+    return Promise.all([store.refresh(), ...(loopOff ? [] : [loopStore.refresh()])]);
+  };
   /** One badge: the scores', and the job costs' too only while their panel is shown (oldest update, what failed). */
   const pagePoll = $derived(combinePolls({ scores: $store, ...(loopShown ? { 'job costs': $loopStore } : {}) }));
   let first = true;
@@ -281,6 +287,9 @@
       </div>
     </section>
   {/if}
+
+  <!-- F118: the outside judge's numbers, for the page's window; drawn only when the judge is on. -->
+  <OutsideJudge {days} refresh={judgeTick} />
 
   <!-- F118 PR 3: the second judge's settings; drawn only when the server has them on. -->
   <SecondJudge />
