@@ -548,6 +548,9 @@ describe('a lost change of session settings is confirmed only by the values aske
     expect(changeLanded(lostOf(goal, { stall_limit: 4 }), { ...goal, stall_limit: 4, journal: [row('chain'), ...goal.journal] })).toBe(false);
     expect(changeLanded(lostOf(goal, {}), after(goal, {}))).toBe(false);
     expect(changeLanded(lostOf(goal), after(goal, { stall_limit: 4 }))).toBe(false);
+  });
+});
+
 describe('what a goal is doing now, and the folding page', () => {
   const MIN = 60_000;
   const at = (minutesBefore: number) => new Date(NOW - minutesBefore * MIN).toISOString();

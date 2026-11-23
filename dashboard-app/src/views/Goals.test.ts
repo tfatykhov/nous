@@ -1096,6 +1096,9 @@ describe('Goals: a lost change of session settings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await vi.waitFor(() => expect(within(region).getByText('Changed. It applies from the next session.')).toBeTruthy());
     expect(within(region).queryByText('No answer came back. Check the goal before trying again.')).toBeNull();
+  });
+});
+
 describe('Goals: the page with the activity panel off', () => {
   // Recorded from the page before the folding sections were built: with the server's options as they are (no
   // `activity`), the goal's page renders exactly these headings, cards and ids, and asks for no activity.
