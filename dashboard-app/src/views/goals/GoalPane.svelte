@@ -14,6 +14,7 @@
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
     ONCE_A_DAY_SESSIONS_NOTE, dailyHint, howOftenText, sessionsBody, sessionsForm, sessionsNote, sessionsPerDayText,
     sessionsProblem, type SessionsBody, type SessionsForm,
+    BUDGET_UNCHANGED_TEXT, SESSIONS_UNCHANGED_TEXT, STALL_HINT, zoneWords,
   } from '../../lib/goals';
 
   // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
@@ -24,7 +25,8 @@
   // With the server's goal pacing on, Change how it works opens the goal's session settings here, as the budget form
   // does, and sends only what changed.
   // With the server's goal activity panel on (`options.activity`), what the goal is doing now comes under the header
-  // (and the run-any-command card), then the journal and the note box, then the plan, spend, sessions, charter,
+  // (and the run-any-command card, for a goal in that mode; any other goal says it in one line after the panel), then
+  // the journal and the note box, then the plan, spend, sessions, charter,
   // limits and tools, each a folding section; the header card, which holds every confirmation, never folds. `tick`
   // is the page poll's last good read: the panel reads on it while a session is open.
   // Every text a session wrote is a text node. Ids of this goal's controls are
@@ -72,6 +74,11 @@
   let buttons = $derived(goal.actions.filter((a) => a !== 'note' && a !== 'contained'));
   let modeWords = $derived(options.commands?.words ?? null);
   let modeShown = $derived(modeWords !== null || goal.commands.state !== 'off');
+  /** With the folding page, a goal in the mode (on, or set on a draft) or that can return to contained keeps the full
+   * card under the header; any other goal says what the card would say in one line after what it is doing. */
+  let modeCard = $derived(
+    !folding || goal.commands.state === 'on' || goal.commands.state === 'set' || goal.actions.includes('contained'),
+  );
   // The note's last sentence names Stop now: only where Stop now is offered (not on a draft, nor on a paused goal
   // with no open session).
   let stopNamed = $derived(goal.actions.includes('stop'));
@@ -414,7 +421,7 @@
               <input id="goal-d.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={day} disabled={busy !== null} />
             </div>
           </div>
-          <p id={sentenceId()} tabindex="-1" class:wrong={!budgetReady}>{budgetReady ? confirmText('budget', goal, { driverRunning, total: newTotal, day: newDay }) : budgetWrong}</p>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!budgetReady && budgetWrong !== BUDGET_UNCHANGED_TEXT}>{budgetReady ? confirmText('budget', goal, { driverRunning, total: newTotal, day: newDay }) : budgetWrong}</p>
         {:else if action === 'deadline'}
           <div class="field">
             <label for="goal-e.{goal.ref}">More days</label>
@@ -422,15 +429,10 @@
           </div>
           <p id={sentenceId()} tabindex="-1" class:wrong={!deadlineReady}>{deadlineReady ? confirmText('deadline', goal, { driverRunning, days: newDays, now }) : deadlineWrong}</p>
         {:else if action === 'sessions'}
-          <div class="fields">
-            {#if !sessions.daily}
-              <div class="field">
-                <label for="goal-p.{goal.ref}">Sessions per day</label>
-                <input id="goal-p.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.sessions_per_day} disabled={busy !== null} />
-              </div>
-            {/if}
+          <!-- Fixed-width columns, inputs in line; sessions per day last, so hiding it for once a day moves no other field. -->
+          <div class="numbers">
             <div class="field">
-              <label for="goal-g.{goal.ref}">Shortest gap between sessions (minutes)</label>
+              <label for="goal-g.{goal.ref}">Shortest gap (minutes)</label>
               <input id="goal-g.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.gap_minutes} disabled={busy !== null} />
             </div>
             <div class="field">
@@ -438,10 +440,18 @@
               <input id="goal-j.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.jobs_per_day} disabled={busy !== null} />
             </div>
             <div class="field">
-              <label for="goal-k.{goal.ref}">Pause after this many sessions in a row that finish nothing</label>
-              <input id="goal-k.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.stall_limit} disabled={busy !== null} />
+              <label for="goal-k.{goal.ref}">Stall limit</label>
+              <input id="goal-k.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.stall_limit} disabled={busy !== null}
+                aria-describedby="goal-y.{goal.ref}" />
             </div>
+            {#if !sessions.daily}
+              <div class="field">
+                <label for="goal-p.{goal.ref}">Sessions per day</label>
+                <input id="goal-p.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={sessions.sessions_per_day} disabled={busy !== null} />
+              </div>
+            {/if}
           </div>
+          <p class="hint" id="goal-y.{goal.ref}">{STALL_HINT}</p>
           <label class="check">
             <input id="goal-q.{goal.ref}" type="checkbox" bind:checked={sessions.quiet_hours_ok} disabled={busy !== null} />
             Sessions may start in quiet hours
@@ -457,15 +467,20 @@
               Once a day
             </label>
             {#if sessions.daily}
-              <div class="field narrow">
+              <div class="field">
                 <label for="goal-w.{goal.ref}">Time of day</label>
-                <input id="goal-w.{goal.ref}" type="time" bind:value={sessions.daily_at} aria-describedby="goal-x.{goal.ref}" />
-                {#if zone}<span class="hint" id="goal-x.{goal.ref}">{dailyHint(zone, 'change')}</span>{/if}
+                <div class="time-row">
+                  <input id="goal-w.{goal.ref}" type="time" bind:value={sessions.daily_at}
+                    aria-describedby="{zone ? `goal-z.${goal.ref} ` : ''}goal-x.{goal.ref}" />
+                  {#if zone}<span class="zone" id="goal-z.{goal.ref}">{zoneWords(zone)}</span>{/if}
+                </div>
               </div>
+              <p class="hint" id="goal-x.{goal.ref}">{dailyHint('change')}</p>
               <p class="hint">{ONCE_A_DAY_SESSIONS_NOTE}</p>
             {/if}
           </fieldset>
-          <p id={sentenceId()} tabindex="-1" class:wrong={!sessionsReady}>{sessionsReady ? sessionsNote(sessions, sessionsStart) : sessionsWrong}</p>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!sessionsReady && sessionsWrong !== SESSIONS_UNCHANGED_TEXT}>
+            {sessionsReady ? sessionsNote(sessions, sessionsStart, goal.actions.includes('run-now')) : sessionsWrong}</p>
         {:else}
           <p id={sentenceId()} tabindex="-1">{confirmText(action, goal, { driverRunning })}</p>
         {/if}
@@ -480,7 +495,7 @@
     {#if resultOf !== 'contained'}{@render line(result)}{/if}
   </div>
 
-  {#if modeShown}
+  {#if modeShown && modeCard}
     <div class="card" aria-labelledby="goal-m.{goal.ref}">
       <h3 id="goal-m.{goal.ref}">{modeWords?.heading ?? MODE_WORDS.commands}</h3>
       <p class="mode-says" class:mode-on={goal.commands.state === 'on'}>{goal.commands.says}</p>
@@ -504,6 +519,12 @@
 
   {#if folding}
     <GoalActivity {goal} {now} tick={pollTick} />
+    {#if modeShown && !modeCard}
+      <div class="mode-line">
+        <p class="mode-text">{modeWords?.heading ?? MODE_WORDS.commands}: {goal.commands.says}</p>
+        {#if resultOf === 'contained'}{@render line(result)}{/if}
+      </div>
+    {/if}
     <Fold id="journal" refOf={goal.ref} title="Journal" defaultOpen={FOLD_DEFAULTS.journal}>{@render journalPart()}</Fold>
   {:else}
     <div class="card">
@@ -582,6 +603,8 @@
   .reason { font-size: 0.8125rem; color: var(--muted); margin: 0.5rem 0 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
   .mode-says { font-size: 0.875rem; margin: 0.375rem 0 0; }
+  .mode-line { margin: -0.5rem 0 1.25rem; padding: 0 1.25rem; font-size: 0.8125rem; color: var(--muted); }
+  .mode-text { margin: 0; overflow-wrap: anywhere; }
   .mode-says.mode-on { font-weight: 600; color: var(--warn-text); }
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .confirm { margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
@@ -596,8 +619,12 @@
     padding: 0; min-width: 0; }
   .often legend { font-size: 0.75rem; font-weight: 600; color: var(--muted); padding: 0; }
   .often .check { margin-top: 0.25rem; }
-  .often .field { margin-top: 0.375rem; }
-  .field.narrow { max-width: 12rem; flex: 0 1 auto; }
+  .often .field { margin-top: 0.375rem; flex: none; }
+  /* Change how it works: number fields in fixed-width columns, each input on the grid's bottom line. */
+  .numbers { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 11rem)); gap: 0.5rem 0.75rem; align-items: end; }
+  .time-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
+  .time-row input { width: 9rem; }
+  .zone { font-size: 0.875rem; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; max-width: 36rem; flex: 1 1 12rem; }
   .field label { font-size: 0.75rem; font-weight: 600; color: var(--muted); }
   .field input, .field textarea { padding: 0.5rem 0.625rem; background: var(--surface); border: 1px solid var(--field-border);
@@ -632,6 +659,8 @@
   .kind { font-weight: 600; color: var(--text); }
   .journal p { margin: 0.25rem 0 0; }
   form { display: flex; flex-direction: column; gap: 0.5rem; }
+  /* In this column the field's row basis (12rem) would be a height: the note box takes only what it holds. */
+  form .field { flex: none; }
   form .actions { margin-top: 0; }
   @media (max-width: 768px) {
     .facts { grid-template-columns: minmax(0, 1fr); gap: 0.125rem; }

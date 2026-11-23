@@ -596,10 +596,33 @@ describe('Autonomy: what a finished job costs', () => {
     expect(text).not.toContain('The scorer has not run');
   });
 
-  it('says when the scorer has not run', async () => {
+  it('says when the scorer has not run, first among the notes: it is why the last column is dashes', async () => {
     loopBody = { ...LOOP_ON(), scorer_ran: false };
     const section = await panel();
-    expect(section.textContent).toContain('The scorer has not run, so nothing can be counted as checked yet.');
+    const notes = Array.from(section.querySelectorAll('.loop-notes p')).map((p) => p.textContent);
+    expect(notes[0]).toBe('The scorer has not run, so nothing can be counted as checked yet.');
+    expect(notes[1]).toMatch(/^A dash means/);
+  });
+
+  it('names the unit of every column, and each number cell carries its column\'s name for the stacked phone layout', async () => {
+    const section = await panel();
+    const heads = Array.from(section.querySelectorAll('thead th')).map((th) => th.textContent?.trim());
+    expect(heads).toEqual(['', 'Finished', 'Tokens for each finished one', 'Tokens spent on work that did not finish', 'Finished with no outside check']);
+    for (const tr of Array.from(section.querySelectorAll('tbody tr'))) {
+      expect(cells(tr as HTMLElement).map((td) => td.dataset.label)).toEqual(heads.slice(1));
+    }
+  });
+
+  it('under 640px each row is a small stacked block: the row name, then each number with its name, nothing to scroll', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Autonomy.svelte'), 'utf-8'));
+    const at = css.indexOf('@media (max-width: 640px)');
+    expect(at).toBeGreaterThan(-1);
+    const phone = parseBlocks(css.slice(at));
+    expect(phone.get('.loop thead')).toMatchObject({ display: 'none' });
+    expect(phone.get('.loop tbody tr')).toMatchObject({ display: 'block' });
+    expect(phone.get('.loop tbody th')).toMatchObject({ display: 'block', position: 'static' });
+    expect(phone.get('.loop tbody td')).toMatchObject({ display: 'grid', 'white-space': 'normal' });
+    expect(phone.get('.loop tbody td::before')).toMatchObject({ content: 'attr(data-label)', 'grid-column': '1' });
   });
 
   it('with the numbers off it asks once on load, then never again: not on the timer, Refresh or a new window', async () => {

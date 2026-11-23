@@ -89,6 +89,11 @@ export const LOOP_UNITS = [
   ['goal_sessions', 'Goal sessions'],
 ] as const;
 
+/** The panel's number columns, in order: each heading names its unit, and on a phone each number carries its name. */
+export const LOOP_COLUMNS = [
+  'Finished', 'Tokens for each finished one', 'Tokens spent on work that did not finish', 'Finished with no outside check',
+] as const;
+
 /**
  * A unit's row. Tasks and workflow steps: finished units, tokens of every unit that ended over the finished ones,
  * the output part of it, tokens spent on units that did not finish, and the share no one outside checked. A goal

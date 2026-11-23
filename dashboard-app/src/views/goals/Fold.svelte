@@ -49,8 +49,10 @@
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.125rem 1.25rem; margin-bottom: 1.25rem; min-width: 0; }
   h3 { font-size: 0.9375rem; font-weight: 650; margin: 0; }
-  /* The whole heading row is the button: the title, the summary beside it, and the word at the right. */
-  .toggle { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.25rem 0.75rem; width: 100%; padding: 0; border: 0;
+  /* The whole heading row is the button: the title, the summary beside it, and the word at the right. Its padding gives
+     the focus outline room around the words; the negative margin keeps the words where they were. */
+  .toggle { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.25rem 0.75rem; width: calc(100% + 1rem);
+    padding: 0.25rem 0.5rem; margin: -0.25rem -0.5rem; border: 0;
     background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-sm); }
   .summary { font-size: 0.8125rem; font-weight: 400; color: var(--muted); }
   .act { margin-left: auto; font-size: 0.8125rem; font-weight: 500; color: var(--muted); transition: color var(--transition); }

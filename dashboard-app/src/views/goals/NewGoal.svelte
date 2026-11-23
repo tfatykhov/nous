@@ -5,7 +5,8 @@
   import {
     CHANNEL_HINT, DRAFT_NOTE, LIMIT_LABEL, PRESET_LABEL, PRESET_NAMES, createBody, createGoal, createProblems, formatNumber, limitFields,
     commandsMostHours, commandsProblem, commandsSentence, createRefusalText, newGoalTools, presetLine, typedNumber,
-    HOW_OFTEN_TEXT, ONCE_A_DAY_SESSIONS_NOTE, dailyHint, type CreateBody, type CreateForm, type GoalOptions, type NumberLimit,
+    HOW_OFTEN_TEXT, ONCE_A_DAY_SESSIONS_NOTE, dailyHint, formRange, zoneWords, type CreateBody, type CreateForm, type GoalOptions,
+    type NumberLimit,
   } from '../../lib/goals';
 
   // The form that makes a draft (POST /goals). A preset's numbers come from GET /goals/options, never from here;
@@ -40,7 +41,11 @@
   let refused = $state<string | null>(null);
   let problems = $derived(tried ? createProblems(form, options) : []);
   const FIELDS: NumberLimit[] = ['total_budget', 'day_budget', 'deadline_days', 'sessions_per_day', 'min_interval_seconds', 'jobs_per_day'];
-  const rangeOf = (field: NumberLimit) => options.ranges?.find((r) => r.field === field);
+  /** A field's range in the form's units (the gap between sessions in minutes). */
+  const rangeOf = (field: NumberLimit) => {
+    const sent = options.ranges?.find((r) => r.field === field);
+    return sent ? formRange(sent) : undefined;
+  };
 
   /** Choosing a size, or opening "Customise", starts the limits from that preset. */
   function usePreset(name: string) {
@@ -182,11 +187,14 @@
           {HOW_OFTEN_TEXT.daily}
         </label>
         {#if form.daily}
-          <div class="field narrow">
+          <div class="field">
             <label for="goal-new-daily-at">Time of day</label>
-            <input id="goal-new-daily-at" type="time" bind:value={form.daily_at} aria-describedby="goal-new-daily-hint" />
-            <span class="hint" id="goal-new-daily-hint">{dailyHint(pacing.zone, 'create')}</span>
+            <div class="time-row">
+              <input id="goal-new-daily-at" type="time" bind:value={form.daily_at} aria-describedby="goal-new-daily-zone goal-new-daily-hint" />
+              <span class="zone" id="goal-new-daily-zone">{zoneWords(pacing.zone)}</span>
+            </div>
           </div>
+          <p class="hint" id="goal-new-daily-hint">{dailyHint('create')}</p>
         {/if}
       </fieldset>
     {/if}
@@ -265,6 +273,8 @@
   .field input, .field textarea { padding: 0.5rem 0.625rem; background: var(--surface); border: 1px solid var(--field-border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.875rem; min-width: 0; }
   .field input { height: 2.75rem; }
+  /* A field that does not apply (sessions per day for a once-a-day goal) looks it, as disabled fields do elsewhere. */
+  .field input:disabled { opacity: 0.6; cursor: not-allowed; }
   .field textarea { resize: vertical; }
   .field input:focus-visible, .field textarea:focus-visible, .size:focus-within {
     outline: 2px solid var(--focus-ring); outline-offset: 2px; }
@@ -304,6 +314,10 @@
     min-width: 0; }
   .often .check { grid-column: auto; }
   .often .field { margin-top: 0.25rem; }
+  .often .hint { margin: 0; }
+  .time-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.75rem; }
+  .time-row input { width: 9rem; }
+  .zone { font-size: 0.875rem; }
   .sentence { margin: 0; font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
   @media (max-width: 768px) {
     .cards, .limits { grid-template-columns: minmax(0, 1fr); }

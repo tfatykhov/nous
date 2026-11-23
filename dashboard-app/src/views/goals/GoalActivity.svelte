@@ -5,8 +5,8 @@
   import type { ApiAnswerError } from '../../lib/api';
   import {
     ACTIVITY_ENDED_TITLE, ACTIVITY_FAILED_TEXT, ACTIVITY_LOADING_TEXT, ACTIVITY_LOG_OFF_TEXT, ACTIVITY_STALE_TEXT, ACTIVITY_TITLE,
-    WORK_LINKS_TEXT, activityOn, callsText, endedText, getGoalActivity, jobsText, lastCallText, noCallYetText, outcomeWord,
-    phaseText, quietText, startedText, timed, workKindWord, workLinkLabel, type GoalActivity,
+    WORK_LINKS_TEXT, activityOn, callsText, endedText, getGoalActivity, jobsText, lastCallText, linkSeparator, noCallYetText,
+    outcomeWord, phaseText, quietText, startedText, timed, workKindWord, workLinks, type GoalActivity,
   } from '../../lib/goals';
 
   // What a goal's session is doing now (GET /goals/{ref}/activity): the current task or workflow, the last tool call,
@@ -103,8 +103,11 @@
 
   let session = $derived(answer?.session ?? null);
   let ended = $derived(session !== null && !session.open);
-  let quiet = $derived(answer?.last_call_at && !ended ? quietText(answer.last_call_at, now) : '');
+  let lastTool = $derived(answer?.recent[0]?.tool ?? null);
+  /** After a long quiet, this says when the last call was, in place of the last-call line. */
+  let quiet = $derived(answer?.last_call_at && !ended ? quietText(answer.last_call_at, lastTool, now) : '');
   let jobsLine = $derived(answer?.jobs && !ended ? jobsText(answer.jobs, now) : '');
+  let links = $derived(workLinks(answer?.work_sessions ?? []));
 </script>
 
 {#if !off}
@@ -118,15 +121,14 @@
       {:else}
         <p class="lead">{phaseText(answer)}</p>
         {#if answer.current?.status === 'running' && answer.current.started_at}
-          <p class="line">{startedText(answer.current.started_at, now)}</p>
+          <p class="line">{startedText(answer.current.kind, answer.current.started_at, now)}</p>
         {/if}
         {#if session !== null && answer.log_enabled}
           {#if answer.last_call_at}
-            <p class="line">{lastCallText(answer.last_call_at, answer.recent[0]?.tool ?? null, now)}</p>
+            <p class="line">{quiet || lastCallText(answer.last_call_at, lastTool, now)}</p>
           {:else}
             <p class="line">{noCallYetText(session.started_at, now)}</p>
           {/if}
-          {#if quiet}<p class="line">{quiet}</p>{/if}
           {#if answer.calls && answer.calls.total > 0}<p class="line">{callsText(answer.calls)}</p>{/if}
           {#if jobsLine}<p class="line">{jobsLine}</p>{/if}
           {#if answer.recent.length}
@@ -145,13 +147,9 @@
           <p class="hint">{ACTIVITY_LOG_OFF_TEXT}</p>
         {/if}
       {/if}
-      {#if answer.work_sessions.length}
-        <p class="line links">
-          {WORK_LINKS_TEXT}
-          {#each answer.work_sessions as ws (ws.id)}
-            {' '}<a href={routeHref('work', ['s', ws.id])}>{workLinkLabel(ws.kind)}</a>
-          {/each}
-        </p>
+      {#if links.length}
+        <p class="line links">{WORK_LINKS_TEXT}{' '}{#each links as link, i (link.id)}{linkSeparator(i, links.length)}<a
+            href={routeHref('work', ['s', link.id])}>{link.label}</a>{/each}.</p>
       {/if}
       {#if failed}<p class="line warn" role="alert">{ACTIVITY_STALE_TEXT}</p>{/if}
     {/if}
@@ -166,8 +164,11 @@
   .line { font-size: 0.8125rem; margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
   .warn { color: var(--warn-text); }
-  .calls { list-style: none; margin: 0.5rem 0 0; padding: 0; }
-  .calls > li { display: grid; grid-template-columns: 8rem minmax(0, 1fr) auto auto; gap: 0.25rem 0.75rem; align-items: baseline;
+  /* The rows share the list's columns (subgrid): the tool column is as wide as the widest name, up to 14rem, so the
+     outcome and the kind sit just after it; a longer name wraps in its column. */
+  .calls { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; column-gap: 0.75rem;
+    grid-template-columns: 8rem fit-content(14rem) max-content max-content minmax(0, 1fr); }
+  .calls > li { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: baseline;
     padding: 0.25rem 0; border-top: 1px solid var(--border); font-size: 0.8125rem; min-width: 0; }
   .calls > li:first-child { border-top: 0; }
   .when, .in { font-size: 0.75rem; color: var(--muted); }
@@ -177,7 +178,12 @@
   .links a:hover { text-decoration: underline; }
   .links a:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   @media (max-width: 768px) {
-    .calls > li { grid-template-columns: minmax(0, 1fr) auto; }
-    .links a { display: inline-flex; align-items: center; min-height: 2.75rem; }
+    /* A row is the tool's name on a line of its own, then the time, the outcome and the kind, wrapping as they need. */
+    .calls { display: block; }
+    .calls > li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.125rem 0.75rem; }
+    .calls > li > .tool { order: -1; flex-basis: 100%; }
+    /* The links stay words in their sentence and wrap like words; the padding widens the tap area without changing
+       the line's height. */
+    .links a { display: inline; padding-block: 0.75rem; }
   }
 </style>

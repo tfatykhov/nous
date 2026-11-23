@@ -13,7 +13,7 @@
   import {
     bars, count, coverageFrom, pct, score, scorerHealth, settledSpan, OUTCOMES, OUTCOME_LABEL, ROLLUP_LABEL, CONTEXT_LABEL, LEVEL_LABEL,
     fixBaseline, fixLatest, fixOutcome, fixState, FIX_TEXTS, FIX_TRIGGER_LABEL, FIX_VERDICT_LABEL,
-    loopRow, tokens, LOOP_UNITS,
+    loopRow, tokens, LOOP_COLUMNS, LOOP_UNITS,
   } from '../lib/autonomy';
 
   // GET /dashboard/autonomy: how tasks score, where the owner's attention goes,
@@ -241,8 +241,7 @@
         <table class="stats loop">
           <thead>
             <tr>
-              <th scope="col"></th><th scope="col">Finished</th><th scope="col">Tokens for each finished one</th>
-              <th scope="col">Spent on work that did not finish</th><th scope="col">Finished with no outside check</th>
+              <th scope="col"></th>{#each LOOP_COLUMNS as name (name)}<th scope="col">{name}</th>{/each}
             </tr>
           </thead>
           <tbody>
@@ -251,14 +250,14 @@
               {@const was = loopRow(key, ln.previous)}
               <tr>
                 <th scope="row">{now.label}{#if !now.measured}<div class="small muted">counted by closed steps</div>{/if}</th>
-                <td>{count(now.finished)}<div class="small muted">before: {count(was.finished)}</div></td>
-                <td>
+                <td data-label={LOOP_COLUMNS[0]}>{count(now.finished)}<div class="small muted">before: {count(was.finished)}</div></td>
+                <td data-label={LOOP_COLUMNS[1]}>
                   {tokens(now.cost)}
                   {#if now.measured}<div class="small muted">output only: {tokens(now.output)}</div>{/if}
                   <div class="small muted">before: {tokens(was.cost)}</div>
                 </td>
-                <td>{count(now.unfinished)}<div class="small muted">before: {count(was.unfinished)}</div></td>
-                <td>
+                <td data-label={LOOP_COLUMNS[2]}>{count(now.unfinished)}<div class="small muted">before: {count(was.unfinished)}</div></td>
+                <td data-label={LOOP_COLUMNS[3]}>
                   {#if now.measured}
                     {pct(now.share)}<div class="small muted">before: {pct(was.share)}</div>
                   {:else}
@@ -271,11 +270,12 @@
         </table>
       </div>
       <div class="loop-notes small muted">
+        <!-- Without a scorer run the last column is all dashes: say why first. -->
+        {#if !ln.scorer_ran}<p>The scorer has not run, so nothing can be counted as checked yet.</p>{/if}
         <p>A dash means there was nothing to count that number from: no finished job, or none with a score yet.</p>
         <p>Tokens leave out input that was read from or saved to the cache, the same way budgets count.</p>
         <p>A job counts as checked only when you graded it, a pull request it opened was merged by someone else, or your spot checks trust its kind of check. No outside check does not mean the job was wrong.</p>
         <p>A goal session's tokens include its tasks and workflows, so the rows overlap. Do not add them.</p>
-        {#if !ln.scorer_ran}<p>The scorer has not run, so nothing can be counted as checked yet.</p>{/if}
         {#if ln.current.truncated || ln.previous.truncated}<p>A window held more rows than are read at once, so only its newest are counted.</p>{/if}
       </div>
     </section>
@@ -740,5 +740,17 @@
   @media (max-width: 520px) {
     .triple { grid-template-columns: 1fr 1fr; }
     .bar-row { grid-template-columns: minmax(0, 7rem) minmax(0, 1fr) 2.5rem; }
+  }
+  /* What a finished job costs, on a phone: each row a small stacked block, its name, then each number beside its
+     column's name (data-label), so nothing scrolls sideways. The numbers of a cell stack at the right. */
+  @media (max-width: 640px) {
+    .loop thead { display: none; }
+    .loop tbody { display: block; }
+    .loop tbody tr { display: block; padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
+    .loop tbody th { display: block; position: static; padding: 0 0 0.25rem; border: 0; white-space: normal; }
+    .loop tbody td { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 0.75rem; position: static;
+      padding: 0.125rem 0; border: 0; white-space: normal; }
+    .loop tbody td::before { content: attr(data-label); grid-column: 1; grid-row: 1 / span 3; text-align: left; color: var(--muted); }
+    .loop tbody td > * { grid-column: 2; }
   }
 </style>
