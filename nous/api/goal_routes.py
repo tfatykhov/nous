@@ -48,6 +48,13 @@ its name, redacted and cut), and with the tool-call log on the session's call co
 name, time, outcome) and the session ids the Work screen opens; never a call's input, result, reason or error text.
 ``GET /goals/options`` carries ``activity: true`` with the flag on. With it off the route answers ``activity_enabled:
 false`` and reads no table, and the options have no ``activity`` key.
+
+The default goal prompt (``nous.goals.default_prompt``), which the first task of each goal session and every
+follow-up turn read: ``GET /goals/prompt`` (the text in use, whether it is the built-in one, the built-in one, the
+limit, and when and by which proof the owner's text was saved), ``PUT /goals/prompt`` (body ``{"text": ...}``: at most
+``default_prompt.MAX_CHARS`` characters once ``\\r\\n`` is turned into ``\\n`` and the text is stripped, never blank;
+the proof the guard accepted is stored with it) and ``DELETE /goals/prompt`` (back to the built-in text). With the
+goals flag off the read answers ``enabled: false`` and the changes 503 ``GOALS_OFF``.
 """
 
 from __future__ import annotations
@@ -85,7 +92,7 @@ from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals import activity as goal_activity
 from nous.goals import commands as goal_commands
-from nous.goals import pacing
+from nous.goals import default_prompt, pacing
 from nous.goals.envelope import _RANGES, PRESETS, STALL_RANGE
 from nous.goals.grants import CREATE_CONFIRM, identity_token, lead_sentence, never_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
@@ -105,6 +112,7 @@ from nous.goals.store import (
     format_short_id,
     grant_identity,
 )
+from nous.identity.manager import GoalPromptChanged, IdentityManager, normalize_goal_prompt
 from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
 logger = logging.getLogger(__name__)
@@ -160,6 +168,11 @@ DONE_WHEN_MAX_CHARS = 2000
 CHANNEL_MAX_CHARS = 200
 REF_ECHO_CHARS = 40
 FAILED = "the request could not be processed"
+# The default goal prompt's body: a longer text is refused by the body model; up to it, the route counts it.
+PROMPT_BODY_MAX_CHARS = 20_000
+PROMPT_EMPTY = "The text is empty. To go back to the default, use reset."
+PROMPT_TOO_LONG = "The text is {n} characters; at most {max} are allowed."
+PROMPT_CHANGED = "The prompt was changed a moment ago. Look again."
 
 Handler = Callable[[Request], Awaitable[Response]]
 
@@ -301,6 +314,12 @@ class GrantBody(_Body):
 
     confirm: StrictBool | None = None
     identity: Text | None = Field(default=None, max_length=64)
+
+
+class PromptBody(_Body):
+    """``PUT /goals/prompt``: the owner's goal prompt."""
+
+    text: Text = Field(max_length=PROMPT_BODY_MAX_CHARS)
 
 
 class _BadRequest(Exception):
@@ -953,6 +972,73 @@ def build_goal_routes(
             active.append({"ref": ref, "title": goal.title, "until": _iso(goal.mode_until), "says": says})
         return JSONResponse({"enabled": True, "allowed": True, "active": active})
 
+    # ---- the default goal prompt ---------------------------------------------------------------------------------
+
+    async def prompt_answer() -> dict[str, Any]:
+        """The goal prompt in use (``default_prompt.effective``, as the builders read it), the built-in text and the
+        limit; when the owner's text is in use, when and by which proof it was saved."""
+        row = await IdentityManager(database, agent_id).get_goal_prompt()
+        text, is_default = default_prompt.effective(row.text if row is not None else None)
+        saved = row if row is not None and not is_default else None
+        return {
+            "enabled": True,
+            "text": text,
+            "is_default": is_default,
+            "default": default_prompt.DEFAULT_GOAL_PROMPT,
+            "max_chars": default_prompt.MAX_CHARS,
+            "updated_at": _iso(saved.updated_at) if saved is not None else None,
+            "updated_by": saved.updated_by if saved is not None else None,
+        }
+
+    async def read_prompt(request: Request) -> Response:
+        """GET /goals/prompt"""
+        if not goals:
+            return JSONResponse({"enabled": False})
+        try:
+            return JSONResponse(await prompt_answer())
+        except Exception as exc:
+            return failed("reading the default goal prompt", exc)
+
+    async def save_prompt(request: Request) -> Response:
+        """PUT /goals/prompt"""
+        if not goals:
+            return JSONResponse(GOALS_OFF, status_code=503)
+        try:
+            body: PromptBody = await _parse(request, PromptBody)
+        except _BadRequest as exc:
+            return _error(400, str(exc))
+        text = normalize_goal_prompt(body.text)
+        if not text:
+            return _error(400, PROMPT_EMPTY)
+        if len(text) > default_prompt.MAX_CHARS:
+            return _error(400, PROMPT_TOO_LONG.format(n=len(text), max=default_prompt.MAX_CHARS))
+        proof = guard.proof(request)
+        assert proof is not None  # the guard let the call in on one
+        try:
+            await IdentityManager(database, agent_id).set_goal_prompt(text, proof)
+        except GoalPromptChanged:
+            return _error(409, PROMPT_CHANGED)
+        except Exception as exc:
+            return failed("saving the default goal prompt", exc)
+        try:
+            return JSONResponse(await prompt_answer())
+        except Exception as exc:
+            return failed("reading the default goal prompt", exc)
+
+    async def reset_prompt(request: Request) -> Response:
+        """DELETE /goals/prompt: back to the built-in text (nothing saved is not an error)."""
+        if not goals:
+            return JSONResponse(GOALS_OFF, status_code=503)
+        try:
+            await _parse(request, NoBody)
+        except _BadRequest as exc:
+            return _error(400, str(exc))
+        try:
+            await IdentityManager(database, agent_id).clear_goal_prompt()
+            return JSONResponse(await prompt_answer())
+        except Exception as exc:
+            return failed("resetting the default goal prompt", exc)
+
     async def get_goal(request: Request) -> Response:
         """GET /goals/{ref}?journal=50"""
         if not goals:
@@ -1274,6 +1360,9 @@ def build_goal_routes(
         guard.route("/goals", create, methods=["POST"]),
         guard.route("/goals/options", options, methods=["GET"]),
         guard.route("/goals/commands", commands_now, methods=["GET"]),
+        guard.route("/goals/prompt", read_prompt, methods=["GET"]),
+        guard.route("/goals/prompt", save_prompt, methods=["PUT"]),
+        guard.route("/goals/prompt", reset_prompt, methods=["DELETE"]),
         guard.route("/goals/{ref}", get_goal, methods=["GET"]),
         guard.route("/goals/{ref}/tools", tools_of, methods=["GET"]),
         guard.route("/goals/{ref}/activity", activity_of, methods=["GET"]),

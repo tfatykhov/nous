@@ -22,7 +22,7 @@ from sqlalchemy import Text, and_, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain import intentions
-from nous.goals import charter, evidence, spend
+from nous.goals import charter, default_prompt, evidence, spend
 from nous.goals import commands as goal_commands
 from nous.goals.store import GoalStore, moved_steps
 from nous.goals.tools import Executor, GoalSessionRef, make_goal_tools
@@ -114,6 +114,7 @@ class GoalChain:
         # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
         refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)
+        prompt = await default_prompt.load(self._db, self._agent_id)  # never raises: the built-in text on a failure
         block = charter.render_goal_block(
             goal,
             plan=list(goal.plan or []),
@@ -127,6 +128,7 @@ class GoalChain:
             moved=moved,
             tools=tools,
             commands_until=goal_commands.charter_until(goal, now=now, settings=self._settings),
+            goal_prompt=prompt,
         )
         tools_of_turn = make_goal_tools(self._db, self._settings, self._store, ref, tool_grants=self._tool_grants)
         return GoalTurn(block=block, tools=tools_of_turn)

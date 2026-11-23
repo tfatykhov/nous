@@ -21,6 +21,12 @@ goal's tasks may run any command until then (``commands_line``). Given none, bot
 
 Goal pacing: given ``pace_line`` (``nous.goals.pacing.pace_line``, for a goal that works once a day), the session's
 first task says it on the line after the budget. Given none, it is as before.
+
+The default goal prompt: given ``goal_prompt`` (``nous.goals.default_prompt.load``), both put it after the charter and
+its tools, under the heading ``How a goal's work runs``, in the room the rest leaves: the task only when it does not
+hide the plan's first open step that the task shows without it, the block only when the evidence list keeps at least
+``EVIDENCE_FLOOR`` characters. When the given text does not fit the built-in one is tried, then none
+(``default_prompt.section``). Given none, both are as before.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from nous.goals.default_prompt import section
 from nous.goals.quote import neutralize, quote_entry, quote_ref, quote_step
 from nous.goals.store import TAIL_CHARS, TAIL_ENTRY_CHARS, clip, format_short_id
 
@@ -37,10 +44,15 @@ MAX_TASK_CHARS = 12_000
 MAX_BLOCK_CHARS = 12_000  # the goal block of a decision turn (render_goal_block)
 REFS_SHOWN = 30  # the evidence refs the goal block lists at most
 REF_LABEL_CHARS = 120
-# What the goal block keeps free beside its charter, recording words and evidence list: the framing, the headings,
-# the cut notes and the plan's first open step (300 characters and its tags). The charter's text is at most 6,200
-# characters and quoting lengthens it by under a third, so the room left for the evidence list is never negative.
+# What the goal block keeps free beside its charter, the goal prompt, the recording words and the evidence list: the
+# framing, the headings, the cut notes and the plan's first open step (300 characters and its tags). The charter's
+# text is at most 6,200 characters and quoting lengthens it by under a third, so the room left for the evidence list
+# is never negative.
 BLOCK_RESERVE = 1_000
+# The evidence room the goal prompt never takes the block's evidence list below: just above the room the longest
+# charter (the longest text, tools and commands line) leaves it without the prompt, so no goal's list gets shorter than
+# the shortest one today.
+EVIDENCE_FLOOR = 1_400
 HIDDEN_LINE_CHARS = 60  # "(N more not listed: ...)"
 # A listed ref keeps only these characters: a ref whose text has others (a file name with spaces or symbols) is
 # counted, not listed, so nothing the chain named reads as the harness's words.
@@ -280,11 +292,16 @@ def build_session_task(
     tools: Sequence[ToolLine] | None = None,
     commands_until: Any = None,
     pace_line: str | None = None,
+    goal_prompt: str | None = None,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today) and, for a goal that works once a day, ``pace_line``, the plan's steps and the journal's
     entries, newest first, both quoted as data, and what to do in this session. ``journal_rows`` need ``seq``,
     ``kind``, ``actor``, ``session_n`` and ``text``.
+
+    ``goal_prompt`` goes after the charter under ``## How a goal's work runs`` when it fits in the room the charter
+    leaves beside an empty plan and journal, else the built-in text when that fits, else nothing; and never when it
+    would hide the plan's first open step that the task shows without it (the task is then exactly the one without).
 
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
     Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
@@ -296,7 +313,20 @@ def build_session_task(
     head = _charter(
         goal, spent=spent, day_spent=day_spent, tools=tools, commands_until=commands_until, pace_line=pace_line
     )
-    return _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
+    text = _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
+    if goal_prompt is None:
+        return text
+    base = len(_Fit([], [], []).render(head, _TASK_LAYOUT))  # the text with no plan and no journal
+    sec = section(goal_prompt, "##", max_chars - base - 2)
+    if not sec:
+        return text
+    try:
+        with_sec = _fitted(f"{head}\n\n{sec}", plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
+    except ValueError:  # what the cuts cannot remove (the cut notes) leaves no room for it
+        return text
+    if with_sec.endswith(CLOSING_WITHOUT_PLAN) and not text.endswith(CLOSING_WITHOUT_PLAN):
+        return text
+    return with_sec
 
 
 def _fitted(
@@ -401,6 +431,7 @@ def render_goal_block(
     moved: int = 0,
     tools: Sequence[ToolLine] | None = None,
     commands_until: Any = None,
+    goal_prompt: str | None = None,
 ) -> str:
     """The goal a decision turn of a goal session's root works for, for ``build_arrival_prompt``: the charter, the
     budget left, the plan and the journal quoted as data under ``FRAMING`` (cut as ``build_session_task`` cuts them),
@@ -408,7 +439,9 @@ def render_goal_block(
     ``nous.goals.evidence.citeable``). The charter and the recording words are never cut; the evidence list takes
     the room they leave less ``BLOCK_RESERVE`` (the plan's first open step and the headings), and counts the refs it
     cannot list. The whole block is at most ``max_chars``. ``root_dir`` is the workspace-relative directory whose
-    files are evidence."""
+    files are evidence. ``goal_prompt`` goes after the charter under ``### How a goal's work runs`` when the evidence
+    list keeps at least ``EVIDENCE_FLOOR`` characters beside it, else the built-in text when that fits, else
+    nothing."""
     ended = "; that session has ended, so no plan step can be closed in this turn" if session_ended else ""
     head = (
         "## The goal this work belongs to\n"
@@ -421,6 +454,10 @@ def render_goal_block(
         head = f"{head}\n{commands_line(commands_until)}"
     if tools is not None:
         head = f"{head}\n{tools_section(tools)}"
+    if goal_prompt is not None:
+        sec = section(goal_prompt, "###", max_chars - len(head) - 2 - len(RECORDING) - BLOCK_RESERVE - EVIDENCE_FLOOR)
+        if sec:
+            head = f"{head}\n\n{sec}"
     room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
     closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
     layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)

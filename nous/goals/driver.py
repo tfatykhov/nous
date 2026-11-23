@@ -41,7 +41,7 @@ from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
-from nous.goals import charter, owner_message, pacing, roots, spend
+from nous.goals import charter, default_prompt, owner_message, pacing, roots, spend
 from nous.goals import commands as goal_commands
 from nous.goals.store import (
     OWNER_ACTORS,
@@ -842,7 +842,9 @@ class GoalDriver:
         """``(rejection, task)``: the session's first task (from the goal as read under its lock, its journal tail
         and its spend) through the censor gate that every spawned task goes through. A steering censor appends its
         guidance; the task is then built again with that guidance's length kept free, so the stored task stays
-        within ``charter.MAX_TASK_CHARS`` and the guidance stays whole."""
+        within ``charter.MAX_TASK_CHARS`` and the guidance stays whole. The task carries the goal prompt
+        (``default_prompt.load``); when the gate refuses a task with the owner's saved prompt, the task is built and
+        gated again with the built-in one, so a saved sentence never stops a goal from starting."""
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
@@ -852,6 +854,7 @@ class GoalDriver:
         until = goal_commands.charter_until(goal, now=now, settings=self._settings)
         tz = self._pace_zone(goal)
         pace = pacing.pace_line(now, tz, goal.daily_at_minute) if tz is not None else None
+        prompt = await default_prompt.load(self._db, self._agent_id)
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
@@ -866,10 +869,16 @@ class GoalDriver:
                 tools=tools,
                 commands_until=until,
                 pace_line=pace,
+                goal_prompt=prompt,
             )
 
         task = build(charter.MAX_TASK_CHARS)
         rejection, gated = await gate_subtask_task(self._heart, task)
+        if rejection is not None and prompt != default_prompt.DEFAULT_GOAL_PROMPT:
+            logger.warning("Goal %s: the censor gate refused the task; the saved goal prompt was set aside", goal.id)
+            prompt = default_prompt.DEFAULT_GOAL_PROMPT
+            task = build(charter.MAX_TASK_CHARS)
+            rejection, gated = await gate_subtask_task(self._heart, task)
         if rejection is not None or len(gated) <= charter.MAX_TASK_CHARS:
             return rejection, gated
         if not gated.startswith(task):

@@ -3,6 +3,7 @@
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
   import { Button } from '../lib/ui/button';
+  import GoalPrompt from './identity/GoalPrompt.svelte';
   import type {
     IdentityResponse,
     ProfileFactsResponse,
@@ -239,6 +240,8 @@
     also changes which User Profile facts below are shown to the agent (overlap dedup).
   </p>
 </section>
+
+<GoalPrompt />
 
 <!-- ═══════════════════════ USER PROFILE FACTS ═══════════════════════ -->
 <section class="panel">

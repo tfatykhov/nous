@@ -124,6 +124,9 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     # Goals (always mounted; with NOUS_GOALS_ENABLED off they answer that goals are off)
     ("GET", "/goals"): OWNER,
     ("GET", "/goals/options"): OWNER,
+    ("GET", "/goals/prompt"): OWNER,
+    ("PUT", "/goals/prompt"): OWNER,
+    ("DELETE", "/goals/prompt"): OWNER,
     ("GET", "/goals/{ref}"): OWNER,
     ("POST", "/goals"): OWNER,
     ("POST", "/goals/{ref}/approve"): OWNER,

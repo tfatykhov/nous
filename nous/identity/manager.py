@@ -9,15 +9,23 @@ ContextEngine receives the assembled identity string, never touches
 the DB directly.
 
 Review fix P3-2: 60s TTL cache to avoid per-turn DB hits.
+
+The default goal prompt (``nous.goals.default_prompt``) is kept in the same versioned table under
+``GOAL_PROMPT_SECTION``, a name in neither ``SECTIONS`` nor ``VALID_SECTIONS``: ``update_section`` refuses it, and
+``get_current`` and ``reset_identity`` leave it out, so it is never part of the identity. Only ``set_goal_prompt``
+and ``clear_goal_prompt`` write it (the owner's ``PUT`` and ``DELETE /goals/prompt``); its reads are not cached.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.storage.database import Database
@@ -28,8 +36,41 @@ logger = logging.getLogger(__name__)
 SECTIONS = ["character", "values", "protocols", "preferences", "boundaries", "environment"]
 VALID_SECTIONS = set(SECTIONS) | {"status"}  # status is internal control field
 
+# The default goal prompt's row: a section outside SECTIONS and VALID_SECTIONS, at most this many characters.
+GOAL_PROMPT_SECTION = "goal_prompt"
+GOAL_PROMPT_MAX_CHARS = 1_500
+GOAL_PROMPT_WRITERS = frozenset({"owner", "proxy"})  # the proofs the owner guard accepts
+_CURRENT_INDEX = "idx_identity_agent_section_current"
+
 # Cache TTL in seconds
 _CACHE_TTL = 60.0
+
+
+def normalize_goal_prompt(text: str) -> str:
+    """The goal prompt as it is stored and counted: ``\\r\\n`` turned into ``\\n``, then stripped."""
+    return text.replace("\r\n", "\n").strip()
+
+
+@dataclass(frozen=True)
+class GoalPromptRow:
+    """The owner's saved goal prompt: its text, when it was saved and by which proof (``owner`` or ``proxy``)."""
+
+    text: str
+    updated_at: datetime | None
+    updated_by: str | None
+
+
+class GoalPromptChanged(Exception):
+    """Another save of the goal prompt committed while this one was being written; nothing was written."""
+
+
+def _constraint_of(exc: IntegrityError) -> str | None:
+    """The name of the constraint or index a write violated, as the driver (asyncpg) reports it, else None."""
+    for error in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        name = getattr(error, "constraint_name", None)
+        if name:
+            return str(name)
+    return None
 
 
 class IdentityManager:
@@ -62,6 +103,7 @@ class IdentityManager:
                 .where(
                     AgentIdentity.agent_id == self.agent_id,
                     AgentIdentity.is_current == True,  # noqa: E712
+                    AgentIdentity.section != GOAL_PROMPT_SECTION,
                 )
             )
             rows = result.scalars().all()
@@ -90,38 +132,7 @@ class IdentityManager:
             raise ValueError(f"Invalid section '{section}'. Valid: {sorted(VALID_SECTIONS)}")
 
         async def _update(s: AsyncSession) -> None:
-            # Get current version number
-            result = await s.execute(
-                select(AgentIdentity)
-                .where(
-                    AgentIdentity.agent_id == self.agent_id,
-                    AgentIdentity.section == section,
-                    AgentIdentity.is_current == True,  # noqa: E712
-                )
-            )
-            current = result.scalar_one_or_none()
-
-            if current is not None:
-                # Mark old version as not current
-                current.is_current = False
-                new_version = current.version + 1
-                previous_id = current.id
-            else:
-                new_version = 1
-                previous_id = None
-
-            # Insert new version
-            new_row = AgentIdentity(
-                agent_id=self.agent_id,
-                section=section,
-                content=content,
-                version=new_version,
-                is_current=True,
-                updated_by=updated_by,
-                previous_version_id=previous_id,
-            )
-            s.add(new_row)
-            await s.flush()
+            await self._write_version(s, section, content, updated_by)
             self._invalidate_cache()
 
         if session is not None:
@@ -130,6 +141,113 @@ class IdentityManager:
             async with self.db.session() as s:
                 await _update(s)
                 await s.commit()
+
+    async def _write_version(self, s: AsyncSession, section: str, content: str, updated_by: str) -> None:
+        """A new current version of ``section`` in ``s``; the current one, if any, is marked not current."""
+        # Get current version number
+        result = await s.execute(
+            select(AgentIdentity)
+            .where(
+                AgentIdentity.agent_id == self.agent_id,
+                AgentIdentity.section == section,
+                AgentIdentity.is_current == True,  # noqa: E712
+            )
+        )
+        current = result.scalar_one_or_none()
+
+        if current is not None:
+            # Mark old version as not current
+            current.is_current = False
+            new_version = current.version + 1
+            previous_id = current.id
+        else:
+            new_version = 1
+            previous_id = None
+
+        # Insert new version
+        new_row = AgentIdentity(
+            agent_id=self.agent_id,
+            section=section,
+            content=content,
+            version=new_version,
+            is_current=True,
+            updated_by=updated_by,
+            previous_version_id=previous_id,
+        )
+        s.add(new_row)
+        await s.flush()
+
+    async def get_goal_prompt(self, session: AsyncSession | None = None) -> GoalPromptRow | None:
+        """The owner's saved goal prompt, or None when nothing is saved (the default is then used). Not cached."""
+
+        async def _get(s: AsyncSession) -> GoalPromptRow | None:
+            row = (
+                await s.execute(
+                    select(AgentIdentity).where(
+                        AgentIdentity.agent_id == self.agent_id,
+                        AgentIdentity.section == GOAL_PROMPT_SECTION,
+                        AgentIdentity.is_current == True,  # noqa: E712
+                    )
+                )
+            ).scalar_one_or_none()
+            return None if row is None else GoalPromptRow(row.content, row.updated_at, row.updated_by)
+
+        if session is not None:
+            return await _get(session)
+        async with self.db.session() as s:
+            return await _get(s)
+
+    async def set_goal_prompt(self, text: str, updated_by: str, session: AsyncSession | None = None) -> None:
+        """Save ``text`` as the goal prompt, a new version. ``ValueError`` when it is blank or longer than
+        ``GOAL_PROMPT_MAX_CHARS`` once normalized (``normalize_goal_prompt``), or when ``updated_by`` is not a proof
+        the owner guard accepts; ``GoalPromptChanged`` when another save committed meanwhile."""
+        content = normalize_goal_prompt(text)
+        if not content:
+            raise ValueError("the goal prompt is empty")
+        if len(content) > GOAL_PROMPT_MAX_CHARS:
+            raise ValueError(f"the goal prompt is longer than {GOAL_PROMPT_MAX_CHARS} characters")
+        if updated_by not in GOAL_PROMPT_WRITERS:
+            raise ValueError(f"the goal prompt is written by {sorted(GOAL_PROMPT_WRITERS)} only")
+
+        async def _set(s: AsyncSession) -> None:
+            try:
+                await self._write_version(s, GOAL_PROMPT_SECTION, content, updated_by)
+                if session is None:
+                    await s.commit()
+            except IntegrityError as exc:
+                if _constraint_of(exc) == _CURRENT_INDEX:
+                    raise GoalPromptChanged() from None
+                raise
+
+        if session is not None:
+            await _set(session)
+        else:
+            async with self.db.session() as s:
+                await _set(s)
+
+    async def clear_goal_prompt(self, session: AsyncSession | None = None) -> bool:
+        """Go back to the default: the saved goal prompt is marked not current (its versions stay). True when one
+        was saved."""
+
+        async def _clear(s: AsyncSession) -> bool:
+            cleared = await s.execute(
+                update(AgentIdentity)
+                .where(
+                    AgentIdentity.agent_id == self.agent_id,
+                    AgentIdentity.section == GOAL_PROMPT_SECTION,
+                    AgentIdentity.is_current == True,  # noqa: E712
+                )
+                .values(is_current=False)
+                .returning(AgentIdentity.id)
+            )
+            return cleared.first() is not None
+
+        if session is not None:
+            return await _clear(session)
+        async with self.db.session() as s:
+            done = await _clear(s)
+            await s.commit()
+            return done
 
     async def is_initiated(self, session: AsyncSession | None = None) -> bool:
         """Check if agent has completed initiation.
@@ -171,7 +289,8 @@ class IdentityManager:
     async def reset_identity(self, session: AsyncSession | None = None) -> None:
         """Reset identity — deactivate all sections and clear is_initiated flag.
 
-        Used by POST /reinitiate to trigger fresh initiation on next conversation.
+        Used by POST /reinitiate to trigger fresh initiation on next conversation. The goal prompt is not
+        identity and is kept.
         """
         async def _reset(s: AsyncSession) -> None:
             # Deactivate all current identity sections
@@ -180,6 +299,7 @@ class IdentityManager:
                 .where(
                     AgentIdentity.agent_id == self.agent_id,
                     AgentIdentity.is_current == True,  # noqa: E712
+                    AgentIdentity.section != GOAL_PROMPT_SECTION,
                 )
                 .values(is_current=False)
             )
