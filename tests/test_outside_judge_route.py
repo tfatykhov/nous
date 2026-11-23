@@ -251,10 +251,10 @@ async def _seed(db, agent: str, rows: list[dict[str, Any]]) -> None:
                 text(
                     "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
                     "judge_version, model, status, verdict, confidence, labels, reason, against_grader, against_grade, "
-                    "evidence, tokens_in, tokens_out, latency_ms, calls, judged_at) VALUES (:agent_id, 'decision', "
-                    ":subject_id, :judge_name, :judge_version, 'claude-test', :status, :verdict, :confidence, "
-                    "CAST(:labels AS jsonb), :reason, :against_grader, :against_grade, CAST(:evidence AS jsonb), "
-                    ":tokens_in, :tokens_out, :latency_ms, :calls, :judged_at)"
+                    "evidence, tokens_in, tokens_out, latency_ms, calls, judged_at, claim_at) VALUES (:agent_id, "
+                    "'decision', :subject_id, :judge_name, :judge_version, 'claude-test', :status, :verdict, "
+                    ":confidence, CAST(:labels AS jsonb), :reason, :against_grader, :against_grade, "
+                    "CAST(:evidence AS jsonb), :tokens_in, :tokens_out, :latency_ms, :calls, :judged_at, :judged_at)"
                 ),
                 {
                     "agent_id": agent,
@@ -290,6 +290,7 @@ async def test_the_route_reads_the_numbers_of_this_agent_this_judge_and_this_win
             ),
             _row(verdict="failure", judged_at=now - timedelta(days=20)),  # outside the window of 14 days
             {**_row(verdict="failure", judged_at=today), "judge_version": "dj-0"},  # another version
+            {**_row(calls=4, judged_at=today), "judge_name": "another_judge"},  # another judge
         ],
     )
     await _seed(db, f"{agent}-other", [_row(verdict="partial", judged_at=today)])
@@ -317,7 +318,7 @@ async def test_the_route_reads_the_numbers_of_this_agent_this_judge_and_this_win
     assert body["decisions"]["judged"] == 2 and body["decisions"]["skipped_by_label"] == {"evidence_missing": 1}
     assert body["decisions"]["by_grader"]["agent"]["agree"] == 1
     assert body["decisions"]["by_grader"]["agent"]["judge_harsher"] == 1
-    # Today's calls count every row of today at any version (the cap is per agent, not per judge).
+    # Today's calls are this judge's at any version (the limit is per judge): not another judge's four.
     assert body["cost"]["calls"] == 2 and body["cost"]["today"] == {"calls": 3, "cap": 100}
     assert body["runtime"] == {"queued": 0, "dropped": 0, "over_cap": 0, "worker_alive": False}
     [disagreement] = body["disagreements"]

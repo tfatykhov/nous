@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ COLUMNS = {
     "reason": "text",
     "against_grader": "text",
     "against_grade": "text",
+    "claim_at": "timestamp with time zone",
     "evidence": "jsonb",
     "tokens_in": "integer",
     "tokens_out": "integer",
@@ -59,12 +61,14 @@ def test_the_migration_creates_one_table_and_one_index_and_grants_nothing():
     assert all(";" not in line for line in sql.splitlines() if line.lstrip().startswith("--"))
 
 
+CLAIM_AT = datetime(2026, 11, 22, 18, 0, tzinfo=UTC)
 ROW = {
     "subject_kind": "decision",
     "judge_name": "background_model",
     "judge_version": "dj-1",
     "status": "ok",
     "verdict": "success",
+    "claim_at": CLAIM_AT,
 }
 
 
@@ -109,13 +113,13 @@ async def test_the_migration_applies_twice_and_its_constraints_hold(db):
             row = (
                 await conn.execute(
                     text(
-                        "SELECT labels, evidence, attempts, calls, judged_at IS NOT NULL, confidence, reason "
+                        "SELECT labels, evidence, attempts, calls, judged_at IS NOT NULL, confidence, reason, claim_at "
                         "FROM nous_system.judge_verdicts WHERE agent_id = :a"
                     ),
                     {"a": agent},
                 )
             ).one()
-            assert tuple(row) == ([], {}, 1, 0, True, None, None)
+            assert tuple(row) == ([], {}, 1, 0, True, None, None, CLAIM_AT)
 
             # One verdict per subject, judge name and version; another version, judge or agent is another row.
             await _refused(conn, agent, subject, verdict="failure")
@@ -147,6 +151,15 @@ async def test_the_migration_applies_twice_and_its_constraints_hold(db):
             await _refused(conn, agent, uuid.uuid4(), attempts=0)
             await _refused(conn, agent, uuid.uuid4(), judge_version=None)
             await _refused(conn, agent, None)
+            # Every row says when its claim was fixed: there is no default for it.
+            await _refused(conn, agent, uuid.uuid4(), claim_at=None)
+            default = await conn.scalar(
+                text(
+                    "SELECT column_default FROM information_schema.columns WHERE table_schema = 'nous_system' "
+                    "AND table_name = 'judge_verdicts' AND column_name = 'claim_at'"
+                )
+            )
+            assert default is None
 
             count = await conn.scalar(
                 text("SELECT count(*) FROM nous_system.judge_verdicts WHERE agent_id = :a"), {"a": agent}

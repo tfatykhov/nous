@@ -3,12 +3,14 @@
 -- One row per subject (a decision the agent resolved, later a finished task report), judge name and judge version.
 -- The judge is harness code with fixed instructions: it reads the subject's record and the tool calls that were run,
 -- and its verdict is kept here beside the claim it was compared with. against_grader and against_grade are that claim
--- as it stood when it was handed to the judge, for the attempt that wrote the row. status says whether a call gave the
+-- as it stood when it was handed to the judge, for the attempt that wrote the row, and claim_at is when that claim
+-- was fixed (the resolve's time). It has no default: every writer knows it. status says whether a call gave the
 -- verdict (ok), none was made (skipped, verdict cannot_tell, a label says why), or the call failed (error, timeout).
 -- evidence holds counts only. reason is at most one redacted sentence of the judge, 200 characters. calls is the
--- number of model requests sent for the row (0 for a skipped row), the daily cap's count. An error or timeout row is
--- replaced by a later attempt at the same version, at most three (attempts), its calls added. No foreign key: a
--- verdict outlives its subject for the numbers. The second index serves the daily call count and the route's window.
+-- number of model requests sent for the row (0 for a skipped row): the daily limit counts them per judge_name. An
+-- error or timeout row is replaced by a later attempt at the same version, at most three (attempts), its calls added
+-- and its claim and claim_at those of the new attempt. No foreign key: a verdict outlives its subject for the numbers.
+-- The second index serves the daily call count and the route's window.
 --
 -- Writer and reader: the app only. No grant, and scripts/ops/db_roles.sql is not touched. Rollback is
 -- DROP TABLE IF EXISTS nous_system.judge_verdicts and deleting version 121 from schema_migrations.
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS nous_system.judge_verdicts (
     reason         TEXT        CHECK (reason IS NULL OR char_length(reason) <= 200),
     against_grader TEXT,
     against_grade  TEXT,
+    claim_at       TIMESTAMPTZ NOT NULL,
     evidence       JSONB       NOT NULL DEFAULT '{}'::jsonb,
     tokens_in      INTEGER,
     tokens_out     INTEGER,

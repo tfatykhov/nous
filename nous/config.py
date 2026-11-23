@@ -1080,7 +1080,8 @@ class Settings(BaseSettings):
     # F118 outside judge (nous/judge/): a decision the agent resolved as success, partial or failure is judged later,
     # in a background queue, from its record and the tool calls that were run; the verdict is stored beside the
     # agent's own grade in nous_system.judge_verdicts and changes nothing else. off: nothing is built. An empty model
-    # is NOUS_BACKGROUND_MODEL; any other must be a Claude model. The cap counts model calls per UTC day (0: none).
+    # is NOUS_BACKGROUND_MODEL; any other must be a Claude model. The limit counts each judge's model calls per
+    # UTC day (0: none).
     outside_judge_mode: Literal["off", "shadow"] = "off"
     outside_judge_model: str = ""
     outside_judge_daily_calls: int = Field(default=100, ge=0, le=5000)

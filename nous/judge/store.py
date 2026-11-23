@@ -23,13 +23,14 @@ RETRIED_STATUSES = ("error", "timeout")
 
 _INSERT = text(
     "INSERT INTO nous_system.judge_verdicts AS v (agent_id, subject_kind, subject_id, judge_name, judge_version, "
-    "model, status, verdict, confidence, labels, reason, against_grader, against_grade, evidence, tokens_in, "
-    "tokens_out, latency_ms, calls, attempts) VALUES (:agent_id, :subject_kind, :subject_id, :judge_name, "
+    "model, status, verdict, confidence, labels, reason, against_grader, against_grade, claim_at, evidence, "
+    "tokens_in, tokens_out, latency_ms, calls, attempts) VALUES (:agent_id, :subject_kind, :subject_id, :judge_name, "
     ":judge_version, :model, :status, :verdict, :confidence, CAST(:labels AS jsonb), :reason, :against_grader, "
-    ":against_grade, CAST(:evidence AS jsonb), :tokens_in, :tokens_out, :latency_ms, :calls, 1) "
+    ":against_grade, :claim_at, CAST(:evidence AS jsonb), :tokens_in, :tokens_out, :latency_ms, :calls, 1) "
     "ON CONFLICT ON CONSTRAINT uq_judge_verdicts_subject DO UPDATE SET model = EXCLUDED.model, "
     "status = EXCLUDED.status, verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence, labels = EXCLUDED.labels, "
     "reason = EXCLUDED.reason, against_grader = EXCLUDED.against_grader, against_grade = EXCLUDED.against_grade, "
+    "claim_at = EXCLUDED.claim_at, "
     "evidence = EXCLUDED.evidence, tokens_in = EXCLUDED.tokens_in, tokens_out = EXCLUDED.tokens_out, "
     "latency_ms = EXCLUDED.latency_ms, calls = v.calls + EXCLUDED.calls, attempts = v.attempts + 1, "
     "judged_at = now() "
@@ -41,14 +42,17 @@ _JUDGED = text(
     f"AND (status NOT IN {RETRIED_STATUSES!r} OR attempts >= {MAX_ATTEMPTS})"
 )
 # A row tried again counts all its calls on the day of its last attempt.
-_CALLS_TODAY = text(
+_CALLS_TODAY = (
     "SELECT COALESCE(SUM(calls), 0) FROM nous_system.judge_verdicts WHERE agent_id = :agent AND judged_at >= :since"
 )
+_CALLS_TODAY_ALL = text(_CALLS_TODAY)
+_CALLS_TODAY_OF_JUDGE = text(_CALLS_TODAY + " AND judge_name = :judge")
 
 
 async def insert_verdict(session: AsyncSession, row: dict[str, Any]) -> bool:
-    """Write one verdict row (``labels`` a list, ``evidence`` a dict, ``calls`` the model requests sent) and commit:
-    a new row, or the next attempt over an ``error`` or ``timeout`` row. False when the subject's row is final."""
+    """Write one verdict row (``labels`` a list, ``evidence`` a dict, ``calls`` the model requests sent, ``claim_at``
+    when the judged claim was fixed) and commit: a new row, or the next attempt over an ``error`` or ``timeout`` row,
+    which keeps that attempt's claim and its time. False when the subject's row is final."""
     params = {**row, "labels": json.dumps(list(row["labels"])), "evidence": json.dumps(row["evidence"])}
     result = await session.execute(_INSERT, params)
     await session.commit()
@@ -68,11 +72,13 @@ def start_of_utc_day(now: datetime) -> datetime:
     return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def calls_today(session: AsyncSession, agent_id: str, now: datetime) -> int:
-    """The judge's model requests of this agent since the start of ``now``'s UTC day (a row written without a call
-    counts none)."""
-    since = start_of_utc_day(now)
-    return int(await session.scalar(_CALLS_TODAY, {"agent": agent_id, "since": since}) or 0)
+async def calls_today(session: AsyncSession, agent_id: str, now: datetime, judge_name: str | None = None) -> int:
+    """The model requests of this agent's judge ``judge_name`` (every judge when None) since the start of ``now``'s
+    UTC day, at any version (a row written without a call counts none). The daily limit is per judge."""
+    params = {"agent": agent_id, "since": start_of_utc_day(now)}
+    if judge_name is None:
+        return int(await session.scalar(_CALLS_TODAY_ALL, params) or 0)
+    return int(await session.scalar(_CALLS_TODAY_OF_JUDGE, {**params, "judge": judge_name}) or 0)
 
 
 # ---- the numbers (GET /dashboard/outside-judge) -------------------------------------------------------------------
@@ -191,10 +197,10 @@ async def get_numbers(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """``summarize`` over this agent's verdicts of one judge name and version from the last ``days`` days, with
-    today's calls (every version: the cap is per agent) and the cap."""
+    today's calls of that judge (every version: the daily limit is per judge) and the limit."""
     now = now or datetime.now(UTC)
     params = {"agent": agent_id, "name": judge_name, "version": judge_version, "since": now - timedelta(days=days)}
     rows = [dict(row._mapping) for row in await session.execute(_WINDOW_ROWS, params)]
     numbers = summarize(rows)
-    numbers["cost"]["today"] = {"calls": await calls_today(session, agent_id, now), "cap": cap}
+    numbers["cost"]["today"] = {"calls": await calls_today(session, agent_id, now, judge_name), "cap": cap}
     return numbers

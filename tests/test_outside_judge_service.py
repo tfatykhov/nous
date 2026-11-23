@@ -117,7 +117,7 @@ async def _rows(db, agent: str) -> list[dict]:
             text(
                 "SELECT subject_kind, subject_id, judge_name, judge_version, model, status, verdict, confidence, "
                 "labels, reason, against_grader, against_grade, evidence, tokens_in, tokens_out, latency_ms, calls, "
-                "attempts FROM nous_system.judge_verdicts WHERE agent_id = :a ORDER BY judged_at"
+                "attempts, claim_at FROM nous_system.judge_verdicts WHERE agent_id = :a ORDER BY judged_at"
             ),
             {"a": agent},
         )
@@ -136,8 +136,15 @@ async def _decision_row(db, decision_id: uuid.UUID) -> tuple:
         )
 
 
-def _submit(judge: OutsideJudge, decision_id: uuid.UUID, grade: str = "success", note: str | None = "it ran") -> bool:
-    return judge.submit_decision(decision_id, grade=grade, note=note, grader="agent", resolved_at=datetime.now(UTC))
+def _submit(
+    judge: OutsideJudge,
+    decision_id: uuid.UUID,
+    grade: str = "success",
+    note: str | None = "it ran",
+    resolved_at: datetime | None = None,
+) -> bool:
+    at = resolved_at or datetime.now(UTC)
+    return judge.submit_decision(decision_id, grade=grade, note=note, grader="agent", resolved_at=at)
 
 
 async def _until(predicate, seconds: float = 10.0) -> None:
@@ -193,6 +200,7 @@ async def test_the_claim_is_fixed_when_it_is_submitted(db, agent):
     [record] = stub.records
     assert (record.claim.grader, record.claim.grade, record.claim.note) == ("agent", "success", "it ran")
     [row] = await _rows(db, agent)
+    assert row["claim_at"] == resolved_at  # the time the claim was fixed, not the time of the verdict
     assert (row["against_grader"], row["against_grade"]) == ("agent", "success")
 
 
@@ -420,22 +428,26 @@ async def test_an_error_row_is_replaced_by_the_next_attempt(db, agent):
     failing = StubJudge("raise", calls=1)
     service = OutsideJudge(db, _settings(agent), failing, **FAST)
     service.start()
-    _submit(service, decision_id, grade="success")
+    # Both after the session's call (four minutes ago), so each attempt has evidence.
+    first_claim = datetime.now(UTC) - timedelta(minutes=2)
+    _submit(service, decision_id, grade="success", resolved_at=first_claim)
     await _drain(service)
     await service.close()
     [row] = await _rows(db, agent)
     # It raised: whether it sent a request is not known, so one is counted.
-    assert (row["status"], row["attempts"], row["calls"]) == ("error", 1, 1)
+    assert (row["status"], row["attempts"], row["calls"], row["claim_at"]) == ("error", 1, 1, first_claim)
 
     working = StubJudge(calls=1)
     service = OutsideJudge(db, _settings(agent), working, **FAST)
     service.start()
-    _submit(service, decision_id, grade="partial")
+    second_claim = first_claim + timedelta(minutes=1)
+    _submit(service, decision_id, grade="partial", resolved_at=second_claim)
     await _drain(service)
     await service.close()
     [row] = await _rows(db, agent)
     assert (row["status"], row["verdict"], row["attempts"], row["calls"]) == ("ok", "failure", 2, 2)
-    assert row["against_grade"] == "partial"  # the claim the verdict was given on
+    # The claim the verdict was given on, and when that claim was fixed.
+    assert (row["against_grade"], row["claim_at"]) == ("partial", second_claim)
 
 
 async def test_a_timeout_row_is_tried_again_at_most_three_times_in_all(db, agent):
@@ -607,28 +619,62 @@ async def test_the_cap_fails_closed_when_the_count_cannot_be_read(db, agent, mon
     assert service.runtime()["over_cap"] == 1
 
 
-async def test_calls_today_counts_the_model_calls_sent_today(db, agent):
-    now = datetime.now(UTC)
+async def _verdict_rows(db, agent: str, rows: list[tuple[str, str, int, datetime]]) -> None:
+    """Rows of (judge name, status, calls, judged at), each for a subject of its own."""
     async with db.session() as session:
-        for status, calls, judged_at in (
-            ("ok", 1, now),
-            ("ok", 2, now),  # a model that refused the forced tool choice: two requests
-            ("error", 0, now),  # failed before any request
-            ("timeout", 3, now),  # three attempts
-            ("skipped", 0, now),
-            ("ok", 1, now - timedelta(days=1, hours=1)),
-        ):
+        for judge_name, status, calls, judged_at in rows:
             await session.execute(
                 text(
                     "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
-                    "judge_version, status, verdict, calls, judged_at) VALUES (:a, 'decision', :s, 'stub', "
-                    "'stub-1', :st, 'cannot_tell', :n, :t)"
+                    "judge_version, status, verdict, calls, judged_at, claim_at) VALUES (:a, 'decision', :s, :j, "
+                    "'v-1', :st, 'cannot_tell', :n, :t, :t)"
                 ),
-                {"a": agent, "s": uuid.uuid4(), "st": status, "n": calls, "t": judged_at},
+                {"a": agent, "s": uuid.uuid4(), "j": judge_name, "st": status, "n": calls, "t": judged_at},
             )
         await session.commit()
-        assert await store.calls_today(session, agent, store.start_of_utc_day(now) + timedelta(hours=23)) == 6
+
+
+async def test_calls_today_counts_the_model_calls_sent_today(db, agent):
+    now = datetime.now(UTC)
+    await _verdict_rows(
+        db,
+        agent,
+        [
+            ("stub", "ok", 1, now),
+            ("stub", "ok", 2, now),  # a model that refused the forced tool choice: two requests
+            ("stub", "error", 0, now),  # failed before any request
+            ("stub", "timeout", 3, now),  # three attempts
+            ("stub", "skipped", 0, now),
+            ("stub", "ok", 1, now - timedelta(days=1, hours=1)),
+        ],
+    )
+    async with db.session() as session:
+        # With one judge, its own count and the count of every judge are the same.
+        assert await store.calls_today(session, agent, now) == 6
+        assert await store.calls_today(session, agent, now, judge_name="stub") == 6
         assert await store.calls_today(session, f"{agent}-other", now) == 0
+
+
+async def test_calls_today_counts_one_judge_when_it_is_named(db, agent):
+    now = datetime.now(UTC)
+    await _verdict_rows(db, agent, [("stub", "ok", 1, now), ("stub", "ok", 2, now), ("other_judge", "ok", 5, now)])
+    async with db.session() as session:
+        assert await store.calls_today(session, agent, now, judge_name="stub") == 3
+        assert await store.calls_today(session, agent, now, judge_name="other_judge") == 5
+        assert await store.calls_today(session, agent, now) == 8
+
+
+async def test_another_judges_calls_do_not_count_against_this_judges_limit(db, agent):
+    await _verdict_rows(db, agent, [("other_judge", "ok", 5, datetime.now(UTC))])
+    stub = StubJudge()
+    service = OutsideJudge(db, _settings(agent, outside_judge_daily_calls=1), stub, **FAST)
+    service.start()
+    _submit(service, await _decision(db, agent))
+    await _drain(service)
+    _submit(service, await _decision(db, agent))  # its own one call of the day is spent
+    await _drain(service)
+    await service.close()
+    assert len(stub.records) == 1 and service.runtime()["over_cap"] == 1
 
 
 async def test_a_judge_that_sends_two_requests_counts_two_against_the_cap(db, agent):

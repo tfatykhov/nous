@@ -12,8 +12,8 @@ builds the evidence (in a thread), and then:
 - no evidence, or a record that cannot be rendered: a ``skipped`` row (``cannot_tell``, a label says why), no call;
 - otherwise, within the daily limit: one call of the judge under ``asyncio.wait_for`` and one row, ``ok``, ``error``
   or ``timeout``, with the number of model requests it sent. The limit is ``NOUS_OUTSIDE_JUDGE_DAILY_CALLS`` requests
-  a UTC day, counted from the table before every call; at the daily limit no further decision is judged that day, and
-  when the count cannot be read none is judged either (counted here, logged once a day).
+  of this judge a UTC day, counted from the table before every call; at the daily limit no further decision is judged
+  that day, and when the count cannot be read none is judged either (counted here, logged once a day).
 
 An ``error`` or ``timeout`` row is not final: the next submit of that decision tries again, at most ``MAX_ATTEMPTS``
 times in all (``store``). Everything in the worker is caught: one WARNING with the exception's class name, and an
@@ -241,6 +241,7 @@ class OutsideJudge:
             "judge_version": version,
             "against_grader": item.claim.grader,
             "against_grade": item.claim.grade,
+            "claim_at": item.resolved_at,
             "evidence": {},
             "latency_ms": None,
             "calls": 0,
@@ -291,7 +292,7 @@ class OutsideJudge:
         now = datetime.now(UTC)
         try:
             async with self._database.session() as session:
-                used = await store.calls_today(session, self._agent_id, now)
+                used = await store.calls_today(session, self._agent_id, now, judge_name=self.judge.name)
         except Exception as exc:
             logger.warning("F118: today's judge calls could not be counted (%s); no call", type(exc).__name__)
             used = None
