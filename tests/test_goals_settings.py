@@ -19,6 +19,7 @@ DEFAULTS = {
     "NOUS_GOALS_QUEUE_HEADROOM": "2",
     "NOUS_GOALS_PACING_ENABLED": "false",
     "NOUS_GOALS_TIMEZONE": "",
+    "NOUS_GOAL_ACTIVITY_ENABLED": "false",
 }
 
 
@@ -131,3 +132,15 @@ def test_the_zone_is_never_read_while_pacing_is_off(caplog):
 def test_a_zone_name_is_at_most_64_characters():
     with pytest.raises(ValueError):
         Settings(_env_file=None, goals_timezone="A" * 65)
+
+
+# ---- what a goal is doing now, and the folding Goals page ---------------------------------------------------------
+
+
+def test_the_activity_panel_is_off_by_default():
+    assert Settings(_env_file=None).goal_activity_enabled is False
+
+
+def test_the_activity_panel_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("NOUS_GOAL_ACTIVITY_ENABLED", "true")
+    assert Settings(_env_file=None).goal_activity_enabled is True

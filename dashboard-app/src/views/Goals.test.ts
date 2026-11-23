@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
 import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
-import { OPTIONS, PACING, goalDetail, goalRow } from '../lib/testing/goalFixtures';
+import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, activityAnswer, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { Action, GoalDetail } from '../lib/goals';
 
 // F114 goals PR 2: the Goals screen over the /goals routes. The fixtures have the shapes nous/api/goal_routes.py
@@ -467,7 +467,7 @@ describe('Goals: one column', () => {
 
 describe('Goals: the source', () => {
   const read = (f: string) => markupOf(readFileSync(join(__dirname, f), 'utf-8'));
-  it.each(['Goals.svelte', 'goals/GoalPane.svelte', 'goals/NewGoal.svelte'])('%s renders text only and builds its links', (f) => {
+  it.each(['Goals.svelte', 'goals/GoalPane.svelte', 'goals/NewGoal.svelte', 'goals/GoalActivity.svelte', 'goals/Fold.svelte'])('%s renders text only and builds its links', (f) => {
     const src = read(f);
     expect(src).not.toMatch(/\{@html/);
     expect(src).not.toMatch(/href="#\//);
@@ -1096,5 +1096,189 @@ describe('Goals: a lost change of session settings', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await vi.waitFor(() => expect(within(region).getByText('Changed. It applies from the next session.')).toBeTruthy());
     expect(within(region).queryByText('No answer came back. Check the goal before trying again.')).toBeNull();
+  });
+});
+
+describe('Goals: the page with the activity panel off', () => {
+  // Recorded from the page before the folding sections were built: with the server's options as they are (no
+  // `activity`), the goal's page renders exactly these headings, cards and ids, and asks for no activity.
+  it('renders the same headings, cards and ids in the same order, and reads no activity', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await waitFor(() => expect(reads('/goals/G-0001/tools')).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(Array.from(region.querySelectorAll('h3')).map((h) => h.textContent?.trim())).toEqual([
+      'Charter', 'Limits', 'Spend', 'Plan', 'Sessions', 'Journal',
+    ]);
+    expect(region.querySelectorAll('.card').length).toBe(8);
+    expect(Array.from(region.querySelectorAll('[id^="goal-"]')).map((e) => e.id)).toEqual([
+      'goal-h.G-0001', 'goal-a.G-0001.run-now', 'goal-a.G-0001.pause', 'goal-a.G-0001.stop', 'goal-a.G-0001.budget',
+      'goal-a.G-0001.deadline', 'goal-a.G-0001.cancel', 'goal-n.G-0001',
+    ]);
+    expect(calls.some((c) => c.url.split('?')[0].endsWith('/activity'))).toBe(false);
+    expect(region.querySelector('[id^="goal-f."]')).toBeNull();
+  });
+
+  it('with the per-goal tools, the run-any-command card and pacing on, the same holds', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ pacing: PACING(), commands: COMMANDS() })];
+    handlers['GET /goals/G-0001/tools'] = () => [200, goalToolsAnswer()];
+    details['G-0001'] = { ...A, daily_at: null, commands: COMMANDS_ON, mode: 'commands', actions: [...A.actions, 'contained'] };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await within(region).findByRole('heading', { level: 3, name: 'Tools this goal may use' });
+    expect(Array.from(region.querySelectorAll('h3')).map((h) => h.textContent?.trim())).toEqual([
+      'May run any command', 'Charter', 'Limits', 'Tools this goal may use', 'Spend', 'Plan', 'Sessions', 'Journal',
+    ]);
+    expect(region.querySelectorAll('.card').length).toBe(10);
+    expect(Array.from(region.querySelectorAll('[id^="goal-"]')).map((e) => e.id)).toEqual([
+      'goal-h.G-0001', 'goal-a.G-0001.run-now', 'goal-a.G-0001.pause', 'goal-a.G-0001.stop', 'goal-a.G-0001.budget',
+      'goal-a.G-0001.deadline', 'goal-a.G-0001.cancel', 'goal-m.G-0001', 'goal-a.G-0001.contained', 'goal-n.G-0001',
+      'goal-n.G-0001',
+    ]);
+    expect(calls.some((c) => c.url.split('?')[0].endsWith('/activity'))).toBe(false);
+    expect(region.querySelector('[id^="goal-f."]')).toBeNull();
+  });
+});
+
+describe('Goals: the page with the activity panel on', () => {
+  const ON = () => OPTIONS({ activity: true });
+  /** Each section heading in page order: a fold's title, else the heading's text. */
+  const headings = (region: HTMLElement) =>
+    Array.from(region.querySelectorAll('h3')).map((h) => (h.querySelector('[id^="goal-l."]') ?? h).textContent?.trim());
+  const fold = (id: string) => document.getElementById(`goal-f.G-0001.${id}`) as HTMLButtonElement | null;
+  const activityReads = () => reads('/goals/G-0001/activity');
+
+  beforeEach(() => {
+    localStorage.clear();
+    handlers['GET /goals/options'] = () => [200, ON()];
+    handlers['GET /goals/G-0001/activity'] = () => [200, activityAnswer()];
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+  });
+
+  it('what it is doing comes first, then the journal and the note box, then the other sections; the run-any-command card stays under the header, unfolded', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ activity: true, commands: COMMANDS() })];
+    handlers['GET /goals/G-0001/tools'] = () => [200, goalToolsAnswer()];
+    details['G-0001'] = { ...A, commands: COMMANDS_ON, mode: 'commands', actions: [...A.actions, 'contained'] };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await waitFor(() => expect(fold('tools')).not.toBeNull());
+    await within(region).findByText('Working on a task: Merge the duplicate pairs');
+    expect(headings(region)).toEqual([
+      'May run any command', 'What it is doing now', 'Journal', 'Plan', 'Spend', 'Sessions', 'Charter', 'Limits',
+      'Tools this goal may use',
+    ]);
+    const cards = Array.from(region.querySelectorAll('.card'));
+    expect(cards[1].querySelector('h3')?.textContent).toBe('May run any command');
+    expect(cards[1].querySelector('[id^="goal-f."]')).toBeNull();
+    const note = region.querySelector('textarea')!;
+    expect(fold('journal')!.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(note.compareDocumentPosition(fold('plan')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('the journal, plan and spend start open; sessions, charter, limits and tools closed; the summaries say how many', async () => {
+    handlers['GET /goals/G-0001/tools'] = () => [200, goalToolsAnswer()];
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    await waitFor(() => expect(fold('tools')).not.toBeNull());
+    const open = Object.fromEntries(
+      ['journal', 'plan', 'spend', 'sessions', 'charter', 'limits', 'tools'].map((id) => [id, fold(id)!.getAttribute('aria-expanded')]),
+    );
+    expect(open).toEqual({ journal: 'true', plan: 'true', spend: 'true', sessions: 'false', charter: 'false', limits: 'false', tools: 'false' });
+    expect(fold('tools')!.textContent).toContain('1 allowed');
+    expect(fold('sessions')!.textContent).toContain('1 so far');
+    expect(fold('journal')!.textContent).toContain('Hide');
+    expect(fold('charter')!.textContent).toContain('Show');
+  });
+
+  it('each section holds what its card held', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    const body = (id: string) => document.getElementById(`goal-b.G-0001.${id}`)!;
+    for (const [id, text] of [
+      ['journal', 'Use the 2024 folder.'], ['plan', 'Merge each pair'], ['spend', A.spend_note], ['sessions', 'Listed 14 duplicate pairs.'],
+      ['charter', 'Merge the duplicate notes in the notes folder'], ['limits', '1 hour'],
+    ]) {
+      expect(within(body(id)).getAllByText(text, { exact: true }).length, id).toBeGreaterThan(0);
+    }
+  });
+
+  it('with the per-goal tools off on the server there is no tools section and no button for it', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    await waitFor(() => expect(reads('/goals/G-0001/tools')).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fold('tools')).toBeNull();
+    expect(screen.queryByText('Tools this goal may use')).toBeNull();
+  });
+
+  it("the viewer's choice is kept for the next time the page is shown", async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    await fireEvent.click(fold('journal')!);
+    await fireEvent.click(fold('charter')!);
+    cleanup();
+    render(Goals);
+    await pane('Tidy the notes');
+    await waitFor(() => expect(fold('journal')!.getAttribute('aria-expanded')).toBe('false'));
+    expect(fold('charter')!.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('a confirmation still opens in the header card with the journal folded', async () => {
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(fold('journal')!);
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    const box = within(region).getByRole('group', { name: 'Confirm: Change budget' });
+    expect(region.querySelector('.card')!.contains(box)).toBe(true);
+    expect(posts()).toEqual([]);
+  });
+
+  it('reads what the goal is doing once per page poll while its session is open, and not while the tab is hidden', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    details['G-0001'] = { ...A, open_session: 4 };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await within(region).findByText('Working on a task: Merge the duplicate pairs');
+    const lists = () => calls.filter((c) => c.url.startsWith('/goals?')).length;
+    await vi.advanceTimersByTimeAsync(1_000);
+    const [lists0, reads0] = [lists(), activityReads()];
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(lists()).toBe(lists0 + 1));
+    await vi.waitFor(() => expect(activityReads()).toBe(reads0 + 1));
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(lists()).toBe(lists0 + 2));
+    await vi.waitFor(() => expect(activityReads()).toBe(reads0 + 2));
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lists()).toBe(lists0 + 2);
+    expect(activityReads()).toBe(reads0 + 2);
+  });
+
+  it('with no session open, a page poll does not read what the goal is doing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['GET /goals/G-0001/activity'] = () => [200, activityAnswer({ session: null, phase: 'none', current: null, running_count: 0 })];
+    go('#/goals/g/G-0001');
+    render(Goals);
+    await pane('Tidy the notes');
+    await screen.findByText('No session has run yet.');
+    const lists = () => calls.filter((c) => c.url.startsWith('/goals?')).length;
+    await vi.advanceTimersByTimeAsync(1_000);
+    const [lists0, reads0] = [lists(), activityReads()];
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() => expect(lists()).toBe(lists0 + 2));
+    expect(activityReads()).toBe(reads0);
   });
 });

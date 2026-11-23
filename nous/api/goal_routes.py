@@ -41,6 +41,13 @@ changes a goal's session settings (``GoalStore.change_sessions``); a goal's deta
 ``sessions``, and ``GET /goals/options`` carries ``pacing`` (the zone, the stall limit's range, the form's default
 time). With the flag off none of these keys is sent, ``sessions`` is not offered, a create that carries ``daily_at``
 is answered 503 ``PACING_OFF`` and ``POST /goals/{ref}/sessions`` is refused by the store (409).
+
+What a goal is doing now (``nous.goals.activity``, with ``NOUS_GOAL_ACTIVITY_ENABLED`` on): ``GET
+/goals/{ref}/activity`` sends the goal's open session (else its newest), its phase, the current task or workflow (by
+its name, redacted and cut), and with the tool-call log on the session's call counts, job launches, newest calls (tool
+name, time, outcome) and the session ids the Work screen opens; never a call's input, result, reason or error text.
+``GET /goals/options`` carries ``activity: true`` with the flag on. With it off the route answers ``activity_enabled:
+false`` and reads no table, and the options have no ``activity`` key.
 """
 
 from __future__ import annotations
@@ -76,6 +83,7 @@ from nous.api.owner_guard import OwnerGuard
 from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_background, mcp_tool_identity
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
+from nous.goals import activity as goal_activity
 from nous.goals import commands as goal_commands
 from nous.goals import pacing
 from nous.goals.envelope import _RANGES, PRESETS, STALL_RANGE
@@ -892,8 +900,13 @@ def build_goal_routes(
                 **({"commands": commands_options()} if goal_commands.enabled(settings) else {}),
                 # Goal pacing, with its flag on: the zone of the days and times, and the forms' bounds and default.
                 **({"pacing": pacing_options()} if pacing.zone(settings) is not None else {}),
+                # What a goal is doing now and the folding page, with that flag on.
+                **({"activity": True} if activity_on() else {}),
             }
         )
+
+    def activity_on() -> bool:
+        return getattr(settings, "goal_activity_enabled", False) is True
 
     def pacing_options() -> dict[str, Any]:
         tz = pacing.zone(settings)
@@ -1178,6 +1191,24 @@ def build_goal_routes(
         except Exception as exc:
             return failed("reading a goal's tools", exc)
 
+    async def activity_of(request: Request) -> Response:
+        """GET /goals/{ref}/activity"""
+        if not goals:
+            return JSONResponse({"enabled": False})
+        if not activity_on():
+            return JSONResponse({"enabled": True, "activity_enabled": False})
+        ref = request.path_params["ref"]
+        try:
+            goal = await goals.get(ref)
+            if goal is None:
+                return _no_goal(ref)
+            log_on = getattr(settings, "tool_call_log_enabled", False) is True
+            async with database.session() as session:
+                found = await goal_activity.read_activity(session, agent_id, goal.id, log_enabled=log_on)
+        except Exception as exc:
+            return failed("reading a goal's activity", exc)
+        return JSONResponse({"enabled": True, "activity_enabled": True, **found})
+
     async def allow_tool(request: Request) -> Response:
         """PUT /goals/{ref}/tools/{tool}"""
         if not goals:
@@ -1245,6 +1276,7 @@ def build_goal_routes(
         guard.route("/goals/commands", commands_now, methods=["GET"]),
         guard.route("/goals/{ref}", get_goal, methods=["GET"]),
         guard.route("/goals/{ref}/tools", tools_of, methods=["GET"]),
+        guard.route("/goals/{ref}/activity", activity_of, methods=["GET"]),
         guard.route("/goals/{ref}/tools/{tool}", allow_tool, methods=["PUT"]),
         guard.route("/goals/{ref}/tools/{tool}", remove_tool, methods=["DELETE"]),
         action("approve", NoBody, lambda store, gid, _b, proof: store.approve(gid, actor=ACTOR, proof=proof)),

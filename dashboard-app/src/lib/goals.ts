@@ -155,6 +155,8 @@ export interface GoalOptions {
   commands?: CommandsOptions;
   /** Goal pacing, with its flag on: the zone of once-a-day goals, the stall limit's range, the form's default time. */
   pacing?: PacingOptions;
+  /** With the goal activity panel on: a goal's page reads what it is doing now and its sections fold. */
+  activity?: boolean;
 }
 
 /** GET /goals/options `pacing`. */
@@ -986,3 +988,179 @@ export function sessionsNote(form: SessionsForm, start: SessionsForm): string {
   const newest = stall === 1 ? 'its last session' : `its last ${stall} sessions in a row`;
   return `${SESSIONS_NOTE} If ${newest} finished nothing, Nous pauses it at its next check.`;
 }
+
+// ── What a goal is doing now, and the folding page (GET /goals/options `activity`) ─────────────────────────────
+// GET /goals/{ref}/activity (nous/goals/activity.py). The answer holds numbers, times, ids and words from closed sets;
+// the only text the agent wrote in it is a task's, workflow's or step's name, shown as a text node.
+
+export type ActivityPhase = 'none' | 'task' | 'workflow' | 'waiting' | 'approval' | 'deciding' | 'asking' | 'between';
+export type WaitingFor = { kind: 'job'; job_id: string } | { kind: 'pr'; number: number } | { kind: 'file' } | { kind: 'other' };
+/** Where a call was made: the chain's decision turns, a task, a workflow step, or other work. */
+export type WorkKind = 'decisions' | 'task' | 'workflow' | 'other';
+/** A call, at the time it ended; `tool` is `other` for a name that is not shaped like a tool's. */
+export interface ActivityCall { tool: string; at: string; outcome: string; in: WorkKind }
+export interface ActivitySession { n: number; open: boolean; started_at: string; ended_at: string | null }
+export interface ActivityCurrent {
+  kind: 'task' | 'workflow';
+  /** Null for the session's first task (its purpose line only repeats the goal's title). */
+  name: string | null;
+  first_task: boolean;
+  status: 'running' | 'pending';
+  started_at: string | null;
+  waiting_for: WaitingFor | null;
+}
+export interface ActivityCalls { total: number; errors: number; capped: boolean }
+/** Coding jobs the session started; `capped` when more shell calls ran than were read, so `launched` is a least count. */
+export interface ActivityJobs { launched: number; last_launch_at: string | null; capped: boolean }
+export interface GoalActivity {
+  enabled: true;
+  activity_enabled: true;
+  log_enabled: boolean;
+  session: ActivitySession | null;
+  phase: ActivityPhase;
+  current: ActivityCurrent | null;
+  running_count: number;
+  last_call_at: string | null;
+  calls: ActivityCalls | null;
+  jobs: ActivityJobs | null;
+  recent: ActivityCall[];
+  work_sessions: { id: string; kind: WorkKind }[];
+}
+/** The route's answer with goals off, or with the panel off on the server. */
+export type GoalActivityOff = { enabled: false } | { enabled: true; activity_enabled: false };
+
+export const getGoalActivity = (ref: string, signal?: AbortSignal) =>
+  apiRequest<GoalActivity | GoalActivityOff>(`${goalPath(ref)}/activity`, 'GET', undefined, signal);
+/** Whether an answer carries the panel (the server's flag may have changed since the options were read). */
+export const activityOn = (answer: GoalActivity | GoalActivityOff): answer is GoalActivity =>
+  answer.enabled === true && answer.activity_enabled === true;
+
+export const ACTIVITY_TITLE = 'What it is doing now';
+export const ACTIVITY_ENDED_TITLE = 'Last session';
+export const ACTIVITY_LOADING_TEXT = 'Reading what it is doing.';
+export const ACTIVITY_FAILED_TEXT = 'Could not read what the goal is doing.';
+export const ACTIVITY_STALE_TEXT = `${ACTIVITY_FAILED_TEXT} What is shown is from the last read.`;
+export const ACTIVITY_LOG_OFF_TEXT = 'The tool-call log is off, so individual calls are not listed.';
+export const NO_SESSION_TEXT = 'No session has run yet.';
+export const WORK_LINKS_TEXT = 'See this session on the Work screen:';
+/** From this many minutes without a tool call, the panel says a long command or a job can take that long. */
+export const QUIET_MINUTES = 10;
+
+const ago = (at: string, now: number) => `${spanText(now - Date.parse(at))} ago`;
+
+function waitingText(wait: WaitingFor | null, more: string): string {
+  if (wait?.kind === 'job') return `Waiting for a coding job (${wait.job_id}) to finish${more}.`;
+  if (wait?.kind === 'pr') return `Waiting for pull request ${wait.number}${more}.`;
+  if (wait?.kind === 'file') return `Waiting for a file to appear${more}.`;
+  return `Waiting for a condition${more}.`;
+}
+
+/** What the open session is doing, in one line: the phase, with the current item's name where it has one. */
+export function phaseText(a: Pick<GoalActivity, 'session' | 'phase' | 'current' | 'running_count'>): string {
+  if (a.session === null) return NO_SESSION_TEXT;
+  const c = a.current;
+  const more = a.running_count > 1 ? ` and ${a.running_count - 1} more` : '';
+  const waiting = c?.status === 'pending';
+  switch (a.phase) {
+    case 'task':
+      if (c?.first_task) return `${waiting ? 'Waiting to start' : 'Working on'} its first task of this session${more}.`;
+      return `${waiting ? 'Waiting to start a task' : 'Working on a task'}: ${c?.name ?? ''}${more}`;
+    case 'workflow':
+      return `${waiting ? 'Waiting to start a workflow' : 'Running a workflow'}: ${c?.name ?? ''}${more}`;
+    case 'waiting':
+      return waitingText(c?.waiting_for ?? null, more);
+    case 'approval':
+      return `Waiting for your approval of a workflow step${more}.`;
+    case 'deciding':
+      return 'Deciding what to do next.';
+    case 'asking':
+      return 'Waiting for your answer to a question.';
+    default:
+      return 'Between steps.';
+  }
+}
+
+const OUTCOME_WORDS: Record<string, string> = {
+  ran: 'done', error: 'failed', refused: 'refused', gated: 'held for approval', suppressed: 'skipped', retired: 'retired tool',
+  bad_input: 'bad input', other: 'other',
+};
+export const outcomeWord = (outcome: string) => OUTCOME_WORDS[outcome] ?? 'other';
+const WORK_KIND_WORDS: Record<string, string> = { decisions: 'decisions', task: 'task', workflow: 'workflow', other: 'other' };
+export const workKindWord = (kind: string) => WORK_KIND_WORDS[kind] ?? 'other';
+const WORK_LINK_LABELS: Record<string, string> = { decisions: 'Decisions', task: 'Task', workflow: 'Workflow step', other: 'Other' };
+export const workLinkLabel = (kind: string) => WORK_LINK_LABELS[kind] ?? 'Other';
+
+const callCount = (calls: ActivityCalls) =>
+  calls.capped ? `more than ${formatNumber(calls.total)} tool calls` : `${formatNumber(calls.total)} tool call${calls.total === 1 ? '' : 's'}`;
+
+/** "31 tool calls this session, 2 failed." */
+export function callsText(calls: ActivityCalls): string {
+  const count = callCount(calls);
+  const failed = calls.errors ? `, ${calls.capped ? 'at least ' : ''}${formatNumber(calls.errors)} failed` : '';
+  return `${count[0].toUpperCase()}${count.slice(1)} this session${failed}.`;
+}
+
+export const startedText = (at: string, now: number) => `Started ${ago(at, now)}.`;
+export const lastCallText = (at: string, tool: string | null, now: number) =>
+  `Last tool call ${ago(at, now)}${tool ? ` (${tool})` : ''}.`;
+export const noCallYetText = (startedAt: string, now: number) => `No tool call yet in this session. It started ${ago(startedAt, now)}.`;
+
+/** Said once the open session has gone `QUIET_MINUTES` without a tool call; '' before. */
+export function quietText(lastCallAt: string, now: number): string {
+  const quiet = now - Date.parse(lastCallAt);
+  if (quiet < QUIET_MINUTES * 60_000) return '';
+  return `No tool call for ${spanText(quiet)}. A long command or a coding job can take this long; a call shows here when it ends.`;
+}
+
+/** Coding jobs the session started ("at least" when the server read only its newest shell calls); '' when none. It
+ * never says whether a job still runs. */
+export function jobsText(jobs: ActivityJobs, now: number): string {
+  if (jobs.launched <= 0) return '';
+  const last = jobs.last_launch_at ? ` The last one ${ago(jobs.last_launch_at, now)}.` : '';
+  return `Coding jobs started this session: ${jobs.capped ? 'at least ' : ''}${formatNumber(jobs.launched)}.${last}`;
+}
+
+/** The newest session once it has ended, in one line. */
+export function endedText(session: ActivitySession, calls: ActivityCalls | null, now: number): string {
+  const when = session.ended_at ? ` ended ${ago(session.ended_at, now)}` : ' ended';
+  return `Last session (${session.n})${when}${calls ? ` after ${callCount(calls)}` : ''}.`;
+}
+
+// The page's sections fold. The viewer's choice is kept in this browser (one choice for every goal); the page works
+// without the storage (a private window, blocked site data), with the defaults.
+export const FOLD_KEY = 'nous.goals.folds';
+export const FOLD_IDS = ['journal', 'plan', 'spend', 'sessions', 'charter', 'limits', 'tools'] as const;
+export type FoldId = typeof FOLD_IDS[number];
+/** Open at first: the journal, the plan and the spend; the rest closed. */
+export const FOLD_DEFAULTS: Record<FoldId, boolean> = {
+  journal: true, plan: true, spend: true, sessions: false, charter: false, limits: false, tools: false,
+};
+
+/** The sections the viewer chose to open or close: only known sections with a true or false; nothing on any problem. */
+export function readFolds(): Partial<Record<FoldId, boolean>> {
+  try {
+    const raw = localStorage.getItem(FOLD_KEY);
+    const stored: unknown = raw ? JSON.parse(raw) : null;
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    const kept: Partial<Record<FoldId, boolean>> = {};
+    for (const id of FOLD_IDS) {
+      const value = (stored as Record<string, unknown>)[id];
+      if (typeof value === 'boolean') kept[id] = value;
+    }
+    return kept;
+  } catch {
+    return {};
+  }
+}
+
+/** Keep the viewer's choice for one section; when the storage refuses, nothing is kept. */
+export function writeFold(id: FoldId, open: boolean): void {
+  try {
+    localStorage.setItem(FOLD_KEY, JSON.stringify({ ...readFolds(), [id]: open }));
+  } catch {
+    // not kept: the next page shows the defaults
+  }
+}
+
+export const toolsSummary = (n: number) => (n === 0 ? 'None allowed' : `${formatNumber(n)} allowed`);
+export const sessionsSummary = (n: number) => (n === 0 ? 'None yet' : `${formatNumber(n)} so far`);

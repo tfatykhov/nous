@@ -1,8 +1,8 @@
 // Test-only: answers of the goal routes (nous/api/goal_routes.py) in their real shape, with made-up values. The
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
 import type {
-  CommandsOptions, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords,
-  NewGoalTools, PacingOptions,
+  CommandsOptions, GoalActivity, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools,
+  GoalToolWords, NewGoalTools, PacingOptions,
 } from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
@@ -162,6 +162,42 @@ export const DETAIL_KEYS = [
   'quiet_hours_ok', 'stall_limit', 'mode_until', 'mode_hours', 'commands', 'approved_at', 'finished_at', 'created_at',
   'plan', 'sessions', 'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
 ];
+
+/** The keys of a real GET /goals/{ref}/activity answer with the panel on, in order. */
+export const ACTIVITY_KEYS = [
+  'enabled', 'activity_enabled', 'log_enabled', 'session', 'phase', 'current', 'running_count', 'last_call_at', 'calls',
+  'jobs', 'recent', 'work_sessions',
+];
+
+/** GET /goals/{ref}/activity in its real shape (nous/goals/activity.py): session 4 of G-0001, running since 11:48, its
+ * chain working on a task; times relative to `NOW`. */
+export function activityAnswer(over: Partial<GoalActivity> = {}): GoalActivity {
+  return {
+    enabled: true,
+    activity_enabled: true,
+    log_enabled: true,
+    session: { n: 4, open: true, started_at: '2026-11-15T11:48:00+00:00', ended_at: null },
+    phase: 'task',
+    current: {
+      kind: 'task', name: 'Merge the duplicate pairs', first_task: false, status: 'running',
+      started_at: '2026-11-15T11:50:00+00:00', waiting_for: null,
+    },
+    running_count: 1,
+    last_call_at: '2026-11-15T11:58:00+00:00',
+    calls: { total: 31, errors: 2, capped: false },
+    jobs: { launched: 0, last_launch_at: null, capped: false },
+    recent: [
+      { tool: 'bash', at: '2026-11-15T11:58:00+00:00', outcome: 'ran', in: 'task' },
+      { tool: 'read_file', at: '2026-11-15T11:57:00+00:00', outcome: 'error', in: 'task' },
+      { tool: 'spawn_task', at: '2026-11-15T11:49:00+00:00', outcome: 'ran', in: 'decisions' },
+    ],
+    work_sessions: [
+      { id: 'subtask-1a2b3c4d', kind: 'task' },
+      { id: 'intent-00000000-0000-4000-8000-0000000000bb', kind: 'decisions' },
+    ],
+    ...over,
+  };
+}
 
 // F115 per-goal tools: GET /goals/{ref}/tools in its real shape (nous/api/goal_routes.py `tools_payload`), with the
 // server's own sentences (nous/goals/grants.py) and made-up ids. Refresh it when the route's answer changes.

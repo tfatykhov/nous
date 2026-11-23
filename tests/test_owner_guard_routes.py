@@ -233,6 +233,7 @@ GOAL_READS = {
     "/goals/options": {"enabled": False},
     "/goals/G-0001": {"enabled": False},
     "/goals/G-0001/tools": {"enabled": False},
+    "/goals/G-0001/activity": {"enabled": False},
     "/goals/commands": {"enabled": False, "allowed": False, "active": []},
 }
 # F115: the autonomy reads require a secret too.
@@ -256,6 +257,7 @@ GOAL_ROUTE_SET = {
     ("GET", "/goals/commands"),
     ("GET", "/goals/{ref}"),
     ("GET", "/goals/{ref}/tools"),
+    ("GET", "/goals/{ref}/activity"),
     # The {tool} of a goal's tool route is not made by the G-0001 replacement below.
     ("PUT", "/goals/{ref}/tools/{tool}"),
     ("DELETE", "/goals/{ref}/tools/{tool}"),
@@ -495,7 +497,7 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         for method in route.methods - {"HEAD"}
     }
     assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
-    assert len(GOAL_ROUTE_SET) == 20
+    assert len(GOAL_ROUTE_SET) == 21
     assert len(AUTONOMY_ROUTE_SET) == 7
 
 
