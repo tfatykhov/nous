@@ -5,6 +5,10 @@ subject is a no-op, except over an ``error`` or ``timeout`` row with fewer than 
 replaced by the new attempt, its calls and known token counts added and its attempts counted. Read by the worker
 (whether a subject is judged, today's call count) and by ``GET /dashboard/outside-judge``. Every statement is filtered
 on the agent.
+
+With finished task reports judged (``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``), the sweep reads from here which decisions
+and reports have no final row yet (it reads ``brain.decisions`` and ``heart.subtasks`` and writes neither), and the
+route reads the report numbers, beside the finish checks' verdicts and the owner's spot checks.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # The most attempts at one subject at one judge version: an error or timeout row is tried again until then.
@@ -308,3 +312,98 @@ async def pair_numbers(
         "since": now - timedelta(days=days),
     }
     return summarize_pairs([dict(row._mapping) for row in await session.execute(_PAIR_ROWS, params)])
+
+
+# ---- the hourly sweep (NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED) -------------------------------------------------------
+
+# How far back the sweep looks: decisions graded by the owner or a fixed signal, decisions the agent resolved, reports.
+SWEEP_DECISION_DAYS = 30
+SWEEP_AGENT_DAYS = 7
+SWEEP_REPORT_DAYS = 2
+# The graders whose decisions the sweep takes (any other, such as a background turn's, is not taken).
+OWNER_GRADERS = ("a2ui", "external")  # a companion tap, the owner-guarded review route
+AGENT_GRADER = "agent"  # the agent in an interactive turn: what a restart lost
+SIGNAL_GRADER = "auto"  # the decision reviewer's fixed signals
+# The decision reviewer also grades failure from the low confidence the agent itself stated when it recorded the
+# decision (``ErrorSignal`` in nous/handlers/decision_reviewer.py, whose note starts with this text). That grade is not
+# an outcome: it is stored under its own grader name and kept out of the agreement with outcome grades.
+STATED_CONFIDENCE_GRADER = "auto:stated_confidence"
+STATED_CONFIDENCE_NOTE = "Low confidence ("
+
+# A verdict row the judge will not try again (the rule of ``_JUDGED``).
+_FINAL_ROW = f"(v.status NOT IN {RETRIED_STATUSES!r} OR v.attempts >= {MAX_ATTEMPTS})"
+_SWEEP_DECISIONS = text(
+    "SELECT d.id, d.reviewer, d.outcome, d.outcome_result, d.reviewed_at FROM brain.decisions d "
+    "WHERE d.agent_id = :agent AND d.outcome IN ('success', 'partial', 'failure') "
+    "AND (d.outcome <> 'failure' OR d.confidence IS DISTINCT FROM 0.0) AND d.reviewed_at >= :since "
+    "AND (d.reviewer IN :graders OR (d.reviewer = :agent_grader AND d.reviewed_at >= :agent_since)) "
+    "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = d.agent_id "
+    "AND v.subject_kind = 'decision' AND v.subject_id = d.id AND v.judge_name = :name "
+    f"AND v.judge_version = :version AND {_FINAL_ROW}) "
+    "ORDER BY CASE WHEN d.reviewer IN :owners THEN 0 WHEN d.reviewer = :agent_grader THEN 1 ELSE 2 END, "
+    "d.reviewed_at DESC, d.id LIMIT :limit"
+).bindparams(bindparam("graders", expanding=True), bindparam("owners", expanding=True))
+_SWEEP_REPORTS = text(
+    "SELECT s.id, s.completed_at FROM heart.subtasks s WHERE s.agent_id = :agent AND s.status = 'completed' "
+    "AND s.final_outcome = 'completed' AND s.completed_at >= :since "
+    "AND COALESCE(s.report_jsonb ->> 'summary', '') <> '' "
+    "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = s.agent_id "
+    "AND v.subject_kind = 'task_report' AND v.subject_id = s.id AND v.judge_name = :name "
+    f"AND v.judge_version = :version AND {_FINAL_ROW}) "
+    "ORDER BY s.completed_at DESC, s.id LIMIT :limit"
+)
+
+
+def grader_of(reviewer: str, outcome: str, note: str | None) -> str:
+    """The grader a swept decision's claim is stored under: its reviewer, except a reviewer's grade from the agent's
+    own low stated confidence, which is ``STATED_CONFIDENCE_GRADER``."""
+    if reviewer == SIGNAL_GRADER and outcome == "failure" and (note or "").startswith(STATED_CONFIDENCE_NOTE):
+        return STATED_CONFIDENCE_GRADER
+    return reviewer
+
+
+async def sweep_decisions(
+    session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
+) -> list[dict[str, Any]]:
+    """Up to ``limit`` of this agent's decisions graded success, partial or failure (not the abandoned mark) without a
+    final row at this judge name and version, in the sweep's order: graded by the owner in the last 30 days, by the
+    agent in an interactive turn in the last 7, by a fixed signal in the last 30; newest first in each. Each is a dict
+    of ``id``, ``grader`` (``grader_of``), ``grade``, ``note`` and ``graded_at``. Read-only."""
+    params = {
+        "agent": agent_id,
+        "since": now - timedelta(days=SWEEP_DECISION_DAYS),
+        "agent_since": now - timedelta(days=SWEEP_AGENT_DAYS),
+        "graders": [*OWNER_GRADERS, SIGNAL_GRADER],
+        "owners": list(OWNER_GRADERS),
+        "agent_grader": AGENT_GRADER,
+        "name": judge_name,
+        "version": judge_version,
+        "limit": limit,
+    }
+    return [
+        {
+            "id": row.id,
+            "grader": grader_of(row.reviewer, row.outcome, row.outcome_result),
+            "grade": row.outcome,
+            "note": row.outcome_result,
+            "graded_at": row.reviewed_at,
+        }
+        for row in await session.execute(_SWEEP_DECISIONS, params)
+    ]
+
+
+async def sweep_reports(
+    session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
+) -> list[dict[str, Any]]:
+    """Up to ``limit`` of this agent's tasks finished as completed with a report in the last 2 days, without a final
+    row at this judge name and version, newest first: dicts of ``id`` and ``completed_at``. Read-only."""
+    params = {
+        "agent": agent_id,
+        "since": now - timedelta(days=SWEEP_REPORT_DAYS),
+        "name": judge_name,
+        "version": judge_version,
+        "limit": limit,
+    }
+    return [
+        {"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)
+    ]

@@ -41,6 +41,7 @@ from uuid import UUID
 from nous.brain.schemas import GRADED_OUTCOMES
 from nous.cognitive.ledger_store import redacted_head
 from nous.judge import evidence, store
+from nous.judge.instructions import REPORT_VERDICTS as _REPORT_VERDICT_NAMES
 from nous.judge.slot import JUDGE_STATUSES, Claim, Judge, JudgeOutput, failed
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,19 @@ CLOSE_TIMEOUT_SECONDS = 5.0
 OUTER_GRACE_SECONDS = 5.0
 DECISION = "decision"
 DECISION_VERDICTS = frozenset({*GRADED_OUTCOMES, "cannot_tell"})
+TASK_REPORT = "task_report"
+REPORT_VERDICTS = frozenset(_REPORT_VERDICT_NAMES)
+VERDICTS_BY_KIND = {DECISION: DECISION_VERDICTS, TASK_REPORT: REPORT_VERDICTS}
+# A finished task's report as its author grades it (the claim read from the task's row is the same).
+REPORT_CLAIM = Claim(grader=evidence.REPORT_CLAIM_GRADER, grade=evidence.REPORT_CLAIM_GRADE)
+# The second judge grades decisions only for now: a finished task's report goes to the first judge alone. True hands
+# each report to the second judge as well (its service then needs a report judge).
+SECOND_JUDGE_GRADES_REPORTS = False
 MAX_ATTEMPTS = store.MAX_ATTEMPTS
+# The sweep: its first pass this long after the start, then one pass an interval; at most a batch of subjects a pass.
+SWEEP_FIRST_DELAY_SECONDS = 120.0
+SWEEP_INTERVAL_SECONDS = 3600.0
+SWEEP_BATCH = 5
 REASON_MAX = 200
 MAX_LABELS = 8
 LABEL_MAX = 64
@@ -89,7 +102,7 @@ def _checked(output: Any, kind: str) -> JudgeOutput:
     tokens_out = output.tokens_out if isinstance(output.tokens_out, int) else None
     if output.status != "ok":
         return failed(output.status, model, tokens_in=tokens_in, tokens_out=tokens_out)
-    if kind != DECISION or output.verdict not in DECISION_VERDICTS:
+    if output.verdict not in VERDICTS_BY_KIND.get(kind, ()):
         return failed("error", model, tokens_in=tokens_in, tokens_out=tokens_out)
     confidence = output.confidence
     if isinstance(confidence, bool) or not isinstance(confidence, int | float) or not math.isfinite(confidence):
@@ -112,6 +125,17 @@ def _checked(output: Any, kind: str) -> JudgeOutput:
     )
 
 
+# The sweep's order: decisions graded by the owner, then what a restart lost (decisions the agent resolved, then
+# finished reports), then decisions graded by a fixed signal.
+_REPORT_RANK = 2
+
+
+def _sweep_rank(grader: str) -> int:
+    if grader in store.OWNER_GRADERS:
+        return 0
+    return 1 if grader == store.AGENT_GRADER else 3
+
+
 class OutsideJudge:
     """The queue, the worker and the daily limit of one judge for one agent (one Nous process per database and
     agent, like the execution ledger)."""
@@ -126,11 +150,25 @@ class OutsideJudge:
         timeout_seconds: float = JUDGE_TIMEOUT_SECONDS,
         queue_max: int = QUEUE_MAX,
         daily_calls: int | None = None,
+        report_judge: Judge | None = None,
+        sweep: bool | None = None,
     ) -> None:
         self._database = database
         self._agent_id = settings.agent_id
         self._daily_calls = settings.outside_judge_daily_calls if daily_calls is None else daily_calls
         self.judge = judge
+        # The judge of finished task reports (None: this service takes no report), and the hourly sweep (None: on
+        # with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED).
+        self.report_judge = report_judge
+        self._sweep_on = bool(getattr(settings, "outside_judge_reports_enabled", False)) if sweep is None else sweep
+        self._sweeper: asyncio.Task | None = None
+        self._sweep_counts: dict[str, Any] = {
+            "passes": 0,
+            "enqueued": {},
+            "held_at_half_limit": 0,
+            "failed": 0,
+            "last_pass_at": None,
+        }
         self._settle = settle_seconds
         self._timeout = timeout_seconds
         self._queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=queue_max)
@@ -155,6 +193,32 @@ class OutsideJudge:
                 raise TypeError("a claim needs a grader, a grade and a time")
             claim = Claim(grader=grader, grade=grade, note=note if isinstance(note, str) else None)
             item = _Item(DECISION, subject_id, claim, resolved_at, time.monotonic())
+            if item.key in self._pending:
+                self._dropped += 1
+                return False
+            self._queue.put_nowait(item)
+            self._pending.add(item.key)
+            self._restart_if_ended()
+            return True
+        except Exception:
+            self._dropped += 1
+            return False
+
+    def submit_report(self, subtask_id: Any, *, claimed_at: Any) -> bool:
+        """Queue one finished task's report, judged by the report judge as it stood at the task's completion (read
+        from the task's row then; ``claimed_at`` is when it was handed in). True when queued. A service without a
+        report judge takes none and counts nothing; otherwise a report is dropped and counted like a decision. Never
+        raises and never waits."""
+        try:
+            if self.report_judge is None:
+                return False
+            if self._closed:
+                self._dropped += 1
+                return False
+            subject_id = subtask_id if isinstance(subtask_id, UUID) else UUID(str(subtask_id))
+            if not isinstance(claimed_at, datetime):
+                raise TypeError("a report needs the time it was handed in")
+            item = _Item(TASK_REPORT, subject_id, REPORT_CLAIM, claimed_at, time.monotonic())
             if item.key in self._pending:
                 self._dropped += 1
                 return False
@@ -203,20 +267,26 @@ class OutsideJudge:
     # ---- lifecycle -------------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start the worker (in the running event loop). A second call does nothing."""
+        """Start the worker (in the running event loop), and the sweep when it is on. A second call does nothing."""
         if self._worker is None and not self._closed:
             self._worker = asyncio.get_running_loop().create_task(self._run(), name="outside-judge")
+        if self._sweep_on and self._sweeper is None and not self._closed:
+            self._sweeper = asyncio.get_running_loop().create_task(self._sweep_loop(), name="outside-judge-sweep")
 
     async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
         """Stop taking work, wait up to ``timeout`` for the subject being judged, then cancel the rest (a cancelled
         subject writes nothing). Subjects still queued are dropped."""
         self._closed = True
+        if self._sweeper is not None:
+            self._sweeper.cancel()
         if self._inflight is not None and not self._inflight.done():
             await asyncio.wait({self._inflight}, timeout=timeout)
         for task in (self._inflight, self._worker):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(*(t for t in (self._inflight, self._worker) if t is not None), return_exceptions=True)
+        if self._sweeper is not None:
+            await asyncio.gather(self._sweeper, return_exceptions=True)
 
     # ---- the worker ------------------------------------------------------------------------------------------------
 
@@ -242,7 +312,11 @@ class OutsideJudge:
                 self._pending.discard(item.key)
 
     async def _judge_one(self, item: _Item) -> None:
-        name, version = self.judge.name, self.judge.version
+        # A report is judged by the report judge (submit_report takes none without one), a decision by the judge.
+        judge = self.report_judge if item.kind == TASK_REPORT else self.judge
+        if judge is None:
+            return
+        name, version = judge.name, judge.version
         row: dict[str, Any] = {
             "agent_id": self._agent_id,
             "subject_kind": item.kind,
@@ -260,18 +334,23 @@ class OutsideJudge:
             async with self._database.session() as session:
                 if await store.already_judged(session, self._agent_id, item.kind, item.subject_id, name, version):
                     return
-                found = await evidence.build_decision_evidence(
-                    session, self._agent_id, item.subject_id, item.claim, item.resolved_at
-                )
+                if item.kind == TASK_REPORT:
+                    found = await evidence.build_report_evidence(session, self._agent_id, item.subject_id)
+                else:
+                    found = await evidence.build_decision_evidence(
+                        session, self._agent_id, item.subject_id, item.claim, item.resolved_at
+                    )
             if found is None:
-                logger.debug("F118: decision %s is gone; not judged", item.subject_id)
+                logger.debug("F118: %s %s is gone or not finished as completed; not judged", item.kind, item.subject_id)
                 return
+            if item.kind == TASK_REPORT:  # the claim as it stood at the task's completion, read from its row
+                row.update(against_grader=found.claim.grader, against_grade=found.claim.grade, claim_at=found.claim_at)
             row["evidence"] = found.counts
             if found.record is None:
                 skipped = JudgeOutput(status="skipped", verdict="cannot_tell", labels=(found.skip_label,))
                 await self._write(row, skipped)
                 return
-            left = await self._requests_left()
+            left = await self._requests_left(name)
             if left is None:
                 return
             started = time.monotonic()
@@ -279,10 +358,10 @@ class OutsideJudge:
             # The judge bounds its own call; this outer bound, a little later, stops one that does not.
             outer = self._timeout + min(OUTER_GRACE_SECONDS, self._timeout)
             try:
-                judging = self.judge.grade(found.record, timeout=self._timeout, max_calls=left)
+                judging = judge.grade(found.record, timeout=self._timeout, max_calls=left)
                 output = await asyncio.wait_for(judging, timeout=outer)
             except TimeoutError:
-                model = getattr(self.judge, "model", None)
+                model = getattr(judge, "model", None)
                 output = failed("timeout", model if isinstance(model, str) else None)
             else:
                 row["calls"] = _calls_reported(output)
@@ -299,13 +378,14 @@ class OutsideJudge:
                     "F118: the error row for %s was not written (%s)", item.subject_id, type(write_exc).__name__
                 )
 
-    async def _requests_left(self) -> int | None:
-        """How many requests this judge may still send today (at least one), or None when it may send none. Fails
+    async def _requests_left(self, judge_name: str | None = None) -> int | None:
+        """How many requests the judge ``judge_name`` (this service's judge when None) may still send today (at least
+        one), or None when it may send none. The limit is per judge name: the report judge shares the judge's. Fails
         closed: a count that cannot be read allows none."""
         now = datetime.now(UTC)
         try:
             async with self._database.session() as session:
-                used = await store.calls_today(session, self._agent_id, now, judge_name=self.judge.name)
+                used = await store.calls_today(session, self._agent_id, now, judge_name=judge_name or self.judge.name)
         except Exception as exc:
             logger.warning("F118: today's judge calls could not be counted (%s); no call", type(exc).__name__)
             used = None
@@ -318,6 +398,99 @@ class OutsideJudge:
                 "F118: the judge reached its daily limit of %d calls; no more verdicts today", self._daily_calls
             )
         return None
+
+    # ---- the sweep -------------------------------------------------------------------------------------------------
+
+    def sweep_numbers(self) -> dict[str, Any] | None:
+        """What the sweep did in this process, or None when it is off: passes, subjects queued (decisions by grader,
+        reports), passes that queued nothing at half the day's limit, passes that failed, and the last pass's time."""
+        if not self._sweep_on:
+            return None
+        counts = self._sweep_counts
+        last = counts["last_pass_at"]
+        return {
+            "passes": counts["passes"],
+            "queued_decisions": {k: v for k, v in counts["enqueued"].items() if k != TASK_REPORT},
+            "queued_reports": counts["enqueued"].get(TASK_REPORT, 0),
+            "held_at_half_limit": counts["held_at_half_limit"],
+            "failed": counts["failed"],
+            "last_pass_at": None if last is None else last.isoformat(),
+        }
+
+    async def _sweep_loop(self) -> None:
+        await asyncio.sleep(SWEEP_FIRST_DELAY_SECONDS)
+        while not self._closed:
+            await self.sweep_once()
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
+    async def sweep_once(self, now: datetime | None = None) -> int:
+        """One pass of the sweep; how many subjects it queued. It queues at most ``SWEEP_BATCH`` subjects without a
+        final row at this service's judge names and versions (``store.sweep_decisions``, ``store.sweep_reports``, the
+        latter only with a report judge): decisions graded by the owner, then what a restart lost (decisions the agent
+        resolved in an interactive turn, finished reports), then decisions graded by a fixed signal, newest first in
+        each. A decision's claim is its grade as it stands now, at the time it was graded. Nothing is queued once
+        today's calls of the judge reach half its daily limit, so the day's own subjects keep the other half; nor when
+        that count cannot be read. A subject already queued is passed over. It reads ``brain.decisions`` and
+        ``heart.subtasks`` and writes neither. Never raises: a failure is one WARNING with the class name, counted."""
+        now = now or datetime.now(UTC)
+        counts = self._sweep_counts
+        counts["passes"] += 1
+        counts["last_pass_at"] = now
+        if self._closed:
+            return 0
+        try:
+            async with self._database.session() as session:
+                used = await store.calls_today(session, self._agent_id, now, judge_name=self.judge.name)
+                if used * 2 >= self._daily_calls:
+                    counts["held_at_half_limit"] += 1
+                    return 0
+                room = SWEEP_BATCH + len(self._pending)
+                decisions = await store.sweep_decisions(
+                    session,
+                    self._agent_id,
+                    judge_name=self.judge.name,
+                    judge_version=self.judge.version,
+                    now=now,
+                    limit=room,
+                )
+                reports = []
+                if self.report_judge is not None:
+                    reports = await store.sweep_reports(
+                        session,
+                        self._agent_id,
+                        judge_name=self.report_judge.name,
+                        judge_version=self.report_judge.version,
+                        now=now,
+                        limit=room,
+                    )
+        except Exception as exc:
+            counts["failed"] += 1
+            logger.warning("F118: a sweep pass failed (%s); nothing was queued", type(exc).__name__)
+            return 0
+        candidates = [(_sweep_rank(d["grader"]), -d["graded_at"].timestamp(), DECISION, d) for d in decisions]
+        candidates += [(_REPORT_RANK, -r["completed_at"].timestamp(), TASK_REPORT, r) for r in reports]
+        queued = 0
+        for _rank, _newest, kind, found in sorted(candidates, key=lambda c: (c[0], c[1], str(c[3]["id"]))):
+            if queued >= SWEEP_BATCH:
+                break
+            if (kind, found["id"]) in self._pending:
+                continue
+            if kind == TASK_REPORT:
+                taken = self.submit_report(found["id"], claimed_at=found["completed_at"])
+                key = TASK_REPORT
+            else:
+                taken = self.submit_decision(
+                    found["id"],
+                    grade=found["grade"],
+                    note=found["note"],
+                    grader=found["grader"],
+                    resolved_at=found["graded_at"],
+                )
+                key = found["grader"]
+            if taken:
+                queued += 1
+                counts["enqueued"][key] = counts["enqueued"].get(key, 0) + 1
+        return queued
 
     async def _write(self, row: dict[str, Any], output: JudgeOutput) -> None:
         values = {
@@ -373,6 +546,29 @@ class JudgeSet:
         runtime = self.primary.runtime()
         return runtime if second is None else {**runtime, "second": second.runtime()}
 
+    @property
+    def report_judge(self) -> Judge | None:
+        """The first judge's report judge (reports go to the first judge)."""
+        return getattr(self.primary, "report_judge", None)
+
+    def submit_report(self, subtask_id: Any, *, claimed_at: Any) -> bool:
+        """Hand a finished task's report to the first judge, and to the second only with
+        ``SECOND_JUDGE_GRADES_REPORTS`` (the second judge grades decisions only for now). The first judge's answer.
+        Never raises and never waits."""
+        second = self.second  # read once
+        queued = _handed_report(self.primary, subtask_id, claimed_at)
+        if SECOND_JUDGE_GRADES_REPORTS and second is not None:
+            _handed_report(second, subtask_id, claimed_at)
+        return queued
+
+    def sweep_numbers(self) -> dict[str, Any] | None:
+        """The first judge's sweep numbers, with the second judge's under ``second`` when there is one."""
+        second = self.second
+        numbers = _sweep_numbers_of(self.primary)
+        if numbers is None or second is None:
+            return numbers
+        return {**numbers, "second": _sweep_numbers_of(second)}
+
     async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
         """Close every judge at once (``OutsideJudge.close``); one that raises does not keep another open."""
         services = [service for service in (self.primary, self.second) if service is not None]
@@ -389,3 +585,20 @@ def _handed(service: Any, decision_id: Any, claim: dict[str, Any]) -> bool:
     except Exception as exc:
         logger.warning("F118: a judge did not take a decision (%s)", type(exc).__name__)
         return False
+
+
+def _handed_report(service: Any, subtask_id: Any, claimed_at: Any) -> bool:
+    """Submit one finished task's report to one judge's service: True when it queued it. Never raises."""
+    try:
+        return service.submit_report(subtask_id, claimed_at=claimed_at) is True
+    except Exception as exc:
+        logger.warning("F118: a judge did not take a report (%s)", type(exc).__name__)
+        return False
+
+
+def _sweep_numbers_of(service: Any) -> dict[str, Any] | None:
+    try:
+        return service.sweep_numbers()
+    except Exception as exc:
+        logger.warning("F118: a judge's sweep numbers were not read (%s)", type(exc).__name__)
+        return None
