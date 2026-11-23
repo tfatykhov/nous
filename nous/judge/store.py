@@ -21,7 +21,7 @@ from uuid import UUID
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.judge.evidence import FINISH_CHECK_VERDICTS
+from nous.judge.evidence import BLANK_SQL, FINISH_CHECK_VERDICTS
 
 # The most attempts at one subject at one judge version: an error or timeout row is tried again until then.
 MAX_ATTEMPTS = 3
@@ -366,7 +366,7 @@ _SWEEP_DECISIONS = text(
 _SWEEP_REPORTS = text(
     "SELECT s.id, s.completed_at FROM heart.subtasks s WHERE s.agent_id = :agent AND s.status = 'completed' "
     "AND s.final_outcome = 'completed' AND s.completed_at >= :since "
-    "AND COALESCE(s.report_jsonb ->> 'summary', '') <> '' "
+    f"AND COALESCE(btrim(s.report_jsonb ->> 'summary', {BLANK_SQL}), '') <> '' "
     "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = s.agent_id "
     "AND v.subject_kind = 'task_report' AND v.subject_id = s.id AND v.judge_name = :name "
     f"AND v.judge_version = :version AND {_SWEEP_HELD}) "

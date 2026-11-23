@@ -114,7 +114,13 @@ async def _decision(
 
 
 async def _task(
-    db, agent: str, *, completed_at: datetime | None = None, status: str = "completed", final_outcome: str = "completed"
+    db,
+    agent: str,
+    *,
+    completed_at: datetime | None = None,
+    status: str = "completed",
+    final_outcome: str = "completed",
+    summary: str = "Fixed the link.",
 ) -> uuid.UUID:
     task_id = uuid.uuid4()
     done = completed_at or NOW - timedelta(hours=2)
@@ -129,7 +135,7 @@ async def _task(
                 "a": agent,
                 "st": status,
                 "fo": final_outcome,
-                "r": json.dumps({"summary": "Fixed the link."}),
+                "r": json.dumps({"summary": summary}),
                 "c": done - timedelta(minutes=5),
                 "d": done,
             },
@@ -250,6 +256,20 @@ async def test_a_pass_takes_owner_grades_then_what_a_restart_lost_then_other_gra
     assert numbers["passes"] == 3
     assert numbers["queued_decisions"] == {"a2ui": 1, "external": 1, "agent": 2, "auto": 3}
     assert numbers["queued_reports"] == 3
+
+
+async def test_the_sweep_and_the_record_agree_on_a_blank_summary(db, agent):
+    blank = [await _task(db, agent, summary=text_) for text_ in ("", "   ", " \n\t\r\x0b\x0c ")]
+    kept = await _task(db, agent, summary=" \n Fixed the link. \t")
+    service, _d, reports = _service(db, agent)
+    service.start()
+    assert await _pass(service) == 1
+    await service.close()
+    assert [record.subject_id for record in reports.records] == [kept]
+    for task_id in [*blank, kept]:
+        async with db.session() as session:
+            built = await evidence.build_report_evidence(session, agent, task_id)
+        assert (built is not None) == (task_id == kept)
 
 
 async def test_the_review_routes_grade_is_taken_after_what_a_restart_lost_and_before_the_fixed_signals(db, agent):

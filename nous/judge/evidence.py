@@ -459,6 +459,9 @@ async def build_decision_evidence(
 # The calls that only hand in the report, or record, list or resolve decisions: they show nothing about the work.
 REPORT_BOOKKEEPING_TOOLS = BOOKKEEPING_TOOLS | frozenset({"submit_final_report"})
 _REPORT_BOOKKEEPING_SQL = "(" + ", ".join(f"'{name}'" for name in sorted(REPORT_BOOKKEEPING_TOOLS)) + ")"
+# The characters a blank report summary is made of; the sweep's query trims the same ones (``BLANK_SQL``).
+BLANK = " \t\n\r\x0b\x0c"
+BLANK_SQL = " || ".join(f"chr({ord(character)})" for character in BLANK)
 # What a finished task's report is graded by its author: the task marked completed.
 REPORT_CLAIM_GRADER = "agent"
 REPORT_CLAIM_GRADE = "completed"
@@ -544,7 +547,7 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
         return None
     report = row.report_jsonb if isinstance(row.report_jsonb, dict) else {}
     summary = report.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
+    if not isinstance(summary, str) or not summary.strip(BLANK):
         return None
     claim = Claim(grader=REPORT_CLAIM_GRADER, grade=REPORT_CLAIM_GRADE, note=summary)
     claim_at = row.completed_at

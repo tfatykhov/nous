@@ -357,6 +357,7 @@ async def test_without_a_finish_check_the_counts_hold_none(db, agent):
         {"status": "completed", "final_outcome": None},  # a task run before reports were validated
         {"report": {"guard_skipped": True, "guard": {"exit_code": 0}}},  # a scheduled run its guard skipped
         {"report": {"summary": ""}},
+        {"report": {"summary": " \n\t\r\x0b\x0c "}},  # blank: the characters the sweep's query trims too
         {"report": None},
         {"completed_at": None},
     ],
