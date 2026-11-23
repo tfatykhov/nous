@@ -539,9 +539,11 @@ export function budgetProblem(total: number, day: number, goal: Pick<GoalDetail,
     if (!inRange(value, range.low, range.high)) return capital(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
   }
   if (day > total) return capital('the day budget cannot be larger than the total budget');
-  if (total === goal.total_budget && day === goal.day_budget) return 'Type a new total or day budget.';
+  if (total === goal.total_budget && day === goal.day_budget) return BUDGET_UNCHANGED_TEXT;
   return null;
 }
+/** Said in place of a problem while the budget form still holds the goal's own budget: a hint, not a warning. */
+export const BUDGET_UNCHANGED_TEXT = 'Type a new total or day budget.';
 
 /** What is wrong with a number of days to add, in words; null when it can be sent. */
 export function deadlineProblem(days: number, options: GoalOptions): string | null {
@@ -740,9 +742,16 @@ export const LIMIT_LABEL: Record<NumberLimit, string> = {
   day_budget: 'Day budget (tokens)',
   deadline_days: 'Deadline (days from approval)',
   sessions_per_day: 'Sessions per day',
-  min_interval_seconds: 'Shortest gap between sessions (seconds)',
+  min_interval_seconds: 'Shortest gap between sessions (minutes)',
   jobs_per_day: 'Job launches per day',
 };
+
+/** A limit's range as the forms show it: the gap between sessions in whole minutes (the server's range, like the value
+ * it takes, is in seconds), every other limit as the server sends it. */
+export function formRange(range: Range): { low: number; high: number; words: string; unit: string } {
+  if (range.field !== 'min_interval_seconds') return { low: range.low, high: range.high, words: range.words, unit: '' };
+  return { low: Math.ceil(range.low / 60), high: Math.floor(range.high / 60), words: 'the shortest gap between sessions', unit: ' minutes' };
+}
 
 export interface CreateForm {
   title: string;
@@ -750,6 +759,7 @@ export interface CreateForm {
   done_when: string;
   preset: string;
   custom: boolean;
+  /** As typed; `min_interval_seconds` is typed in minutes (`createBody` sends seconds). */
   limits: Record<NumberLimit, string>;
   quiet_hours_ok: boolean;
   origin_channel: string;
@@ -761,7 +771,7 @@ export interface CreateForm {
 const capital = (text: string) => `${text[0].toUpperCase()}${text.slice(1)}.`;
 
 /** What is wrong with the form, in words, before anything is sent. The limits follow the server's ranges (the same
- * rules and words as nous/goals/envelope.py `problems`). */
+ * rules and words as nous/goals/envelope.py `problems`, but the gap between sessions in minutes: `formRange`). */
 export function createProblems(form: CreateForm, options: GoalOptions): string[] {
   const found: string[] = [];
   const bounds = options.bounds;
@@ -775,15 +785,18 @@ export function createProblems(form: CreateForm, options: GoalOptions): string[]
   if (form.custom) {
     const limits: string[] = [];
     const values: Partial<Record<NumberLimit, number>> = {};
-    for (const range of options.ranges ?? []) {
-      const raw = (form.limits[range.field] ?? '').trim();
+    for (const sent of options.ranges ?? []) {
+      const range = formRange(sent);
+      const raw = (form.limits[sent.field] ?? '').trim();
       if (!/^-?\d+$/.test(raw)) {
         limits.push(`${range.words} must be a whole number`);
         continue;
       }
       const value = Number(raw);
-      values[range.field] = value;
-      if (value < range.low || value > range.high) limits.push(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
+      values[sent.field] = value;
+      if (value < range.low || value > range.high) {
+        limits.push(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}${range.unit}`);
+      }
     }
     if (!limits.length && (values.day_budget ?? 0) > (values.total_budget ?? 0)) {
       limits.push('the day budget cannot be larger than the total budget');
@@ -821,7 +834,7 @@ export function createBody(form: CreateForm): CreateBody {
       day_budget: n('day_budget'),
       deadline_days: n('deadline_days'),
       sessions_per_day: n('sessions_per_day'),
-      min_interval_seconds: n('min_interval_seconds'),
+      min_interval_seconds: n('min_interval_seconds') * 60,
       jobs_per_day: n('jobs_per_day'),
       quiet_hours_ok: form.quiet_hours_ok,
     };
@@ -831,14 +844,14 @@ export function createBody(form: CreateForm): CreateBody {
   return body;
 }
 
-/** A preset's numbers as the form's text fields. */
+/** A preset's numbers as the form's text fields, the gap between sessions in minutes. */
 export function limitFields(limits: Limits): Record<NumberLimit, string> {
   return {
     total_budget: String(limits.total_budget),
     day_budget: String(limits.day_budget),
     deadline_days: String(limits.deadline_days),
     sessions_per_day: String(limits.sessions_per_day),
-    min_interval_seconds: String(limits.min_interval_seconds),
+    min_interval_seconds: String(limits.min_interval_seconds / 60),
     jobs_per_day: String(limits.jobs_per_day),
   };
 }
@@ -854,9 +867,14 @@ export const presetLine = (limits: Limits) =>
 /** "HH:MM", 00:00 to 23:59: a time of day as the server takes it. */
 export const TIME_OF_DAY = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 export const TIME_PROBLEM = 'Type the time of day as HH:MM, from 00:00 to 23:59.';
-/** What the owner reads before a change of session settings is sent (`sessionsNote` adds the stall limit's). */
-export const SESSIONS_NOTE =
-  'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.';
+/** What the owner reads before a change of session settings is sent (`sessionsNote` adds Run a session now's, where
+ * it is offered, and the stall limit's). */
+export const SESSIONS_NOTE = 'This applies from the next session. A session that is running now is not changed.';
+export const RUN_NOW_NOTE = `To start a session sooner, press ${ACTION_TEXT['run-now'].label}.`;
+/** Said in place of a problem while nothing in the form was changed: a hint, not a warning. */
+export const SESSIONS_UNCHANGED_TEXT = 'Change a setting first.';
+/** The stall limit's label is short; this says what it means, under the number fields. */
+export const STALL_HINT = 'Stall limit: the goal pauses after this many sessions in a row that finish nothing.';
 /** Said beside a once-a-day goal's sessions per day, which the server does not read for it. */
 export const ONCE_A_DAY_SESSIONS_NOTE = 'Sessions per day does not apply: a goal that works once a day starts one session a day.';
 /** How the server's journal row of such a change begins. */
@@ -874,12 +892,20 @@ function sessionsHeld(asked: SessionsBody | undefined, goal: GoalDetail): boolea
   return held.length > 0 && held.every(Boolean);
 }
 
-/** The hint beside a once-a-day time: on the create form (`create`), or on a goal's page (`change`). */
-export function dailyHint(zone: string, where: 'create' | 'change'): string {
+/** The hint under a once-a-day time: on the create form (`create`), or on a goal's page (`change`). The zone is said
+ * beside the time itself (`zoneWords`). */
+export function dailyHint(where: 'create' | 'change'): string {
   const then = where === 'create'
-    ? 'Approved after that time, it starts its first session at once.'
+    ? 'If you approve it after that time of day, its first session starts right away.'
     : 'If that time has passed today and no session ran today, one starts at once.';
-  return `Time of day in ${zone}. It starts one session at that time each day. ${then}`;
+  return `It starts one session at that time each day. ${then}`;
+}
+
+/** The server's time zone in plain words, beside a time of day: "New York time" for America/New_York; a zone that does
+ * not name a place (UTC, Etc/GMT+5, US/Eastern) as the server names it. */
+export function zoneWords(zone: string): string {
+  const place = /^(?:Africa|America|Antarctica|Asia|Atlantic|Australia|Europe|Indian|Pacific)\/(?:[A-Za-z_-]+\/)?([A-Za-z_-]+)$/.exec(zone)?.[1];
+  return place ? `${place.replace(/_/g, ' ')} time` : zone;
 }
 
 /** A goal's sessions per day as its facts show it: for a once-a-day goal, why the number does not count. */
@@ -960,11 +986,11 @@ export function sessionsBody(form: SessionsForm, start: SessionsForm): SessionsB
  * server's ranges: the create form's, the gap in whole minutes, and the stall limit's from `options.pacing`. */
 export function sessionsProblem(form: SessionsForm, start: SessionsForm, options: GoalOptions): string | null {
   const range = (field: NumberLimit) => rangeOf(options, field);
-  const gap = range('min_interval_seconds');
+  const gap = formRange(range('min_interval_seconds') ?? { field: 'min_interval_seconds', low: 60, high: 604_800, words: '' });
   const stall = options.pacing?.stall_limit ?? { low: 1, high: 10 };
   const checks: [SessionsNumber, string, number, number, string][] = [
     ['sessions_per_day', range('sessions_per_day')?.words ?? 'sessions per day', range('sessions_per_day')?.low ?? 1, range('sessions_per_day')?.high ?? 24, ''],
-    ['gap_minutes', 'the shortest gap between sessions', Math.ceil((gap?.low ?? 60) / 60), Math.floor((gap?.high ?? 604_800) / 60), ' minutes'],
+    ['gap_minutes', gap.words, gap.low, gap.high, gap.unit],
     ['jobs_per_day', range('jobs_per_day')?.words ?? 'jobs per day', range('jobs_per_day')?.low ?? 0, range('jobs_per_day')?.high ?? 20, ''],
     ['stall_limit', 'the stall limit', stall.low, stall.high, ''],
   ];
@@ -975,18 +1001,19 @@ export function sessionsProblem(form: SessionsForm, start: SessionsForm, options
     if (!inRange(value, low, high)) return capital(`${words} must be at least ${formatNumber(low)} and at most ${formatNumber(high)}${unit}`);
   }
   if (form.daily && !TIME_OF_DAY.test(form.daily_at.trim())) return TIME_PROBLEM;
-  if (!Object.keys(sessionsBody(form, start)).length) return 'Change a setting first.';
+  if (!Object.keys(sessionsBody(form, start)).length) return SESSIONS_UNCHANGED_TEXT;
   return null;
 }
 
-/** The sentence before a change of session settings is sent: `SESSIONS_NOTE`, and when the stall limit is lowered,
- * that a goal whose newest sessions already reach it is paused (the server's next check pauses it; the change never
- * does). */
-export function sessionsNote(form: SessionsForm, start: SessionsForm): string {
+/** The sentence before a change of session settings is sent: `SESSIONS_NOTE`; `RUN_NOW_NOTE` when the goal offers Run
+ * a session now (`runNow`); and when the stall limit is lowered, that a goal whose newest sessions already reach it is
+ * paused (the server's next check pauses it; the change never does). */
+export function sessionsNote(form: SessionsForm, start: SessionsForm, runNow: boolean): string {
+  const note = runNow ? `${SESSIONS_NOTE} ${RUN_NOW_NOTE}` : SESSIONS_NOTE;
   const stall = typedNumber(form.stall_limit);
-  if (!numberChanged(form, start, 'stall_limit') || !(stall < typedNumber(start.stall_limit))) return SESSIONS_NOTE;
+  if (!numberChanged(form, start, 'stall_limit') || !(stall < typedNumber(start.stall_limit))) return note;
   const newest = stall === 1 ? 'its last session' : `its last ${stall} sessions in a row`;
-  return `${SESSIONS_NOTE} If ${newest} finished nothing, Nous pauses it at its next check.`;
+  return `${note} If ${newest} finished nothing, Nous pauses it at its next check.`;
 }
 
 // ── What a goal is doing now, and the folding page (GET /goals/options `activity`) ─────────────────────────────

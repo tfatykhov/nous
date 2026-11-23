@@ -938,7 +938,7 @@ describe('Goals: timeouts and the clock', () => {
 });
 
 describe('Goals: how often a goal works (goal pacing)', () => {
-  const NOTE = 'This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.';
+  const NOTE = 'This applies from the next session. A session that is running now is not changed. To start a session sooner, press Run a session now.';
   const limits = (region: HTMLElement) => within(region).getByRole('heading', { name: 'Limits' }).parentElement as HTMLElement;
 
   it('the Limits card says how often only when the answer has it', async () => {
@@ -976,21 +976,31 @@ describe('Goals: how often a goal works (goal pacing)', () => {
     await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
     const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
     expect((within(box).getByLabelText('Sessions per day') as HTMLInputElement).value).toBe('4');
-    expect((within(box).getByLabelText('Shortest gap between sessions (minutes)') as HTMLInputElement).value).toBe('60');
+    expect((within(box).getByLabelText('Shortest gap (minutes)') as HTMLInputElement).value).toBe('60');
     expect((within(box).getByLabelText('Job launches per day') as HTMLInputElement).value).toBe('2');
     expect((within(box).getByLabelText('Sessions may start in quiet hours') as HTMLInputElement).checked).toBe(false);
-    expect((within(box).getByLabelText('Pause after this many sessions in a row that finish nothing') as HTMLInputElement).value).toBe('3');
+    expect((within(box).getByLabelText('Stall limit') as HTMLInputElement).value).toBe('3');
     expect((within(box).getByLabelText('As often as its limits allow') as HTMLInputElement).checked).toBe(true);
     expect(within(box).queryByLabelText('Time of day')).toBeNull();
     const yes = within(box).getByRole('button', { name: 'Yes, change how it works' }) as HTMLButtonElement;
     expect(within(box).getByText('Change a setting first.')).toBeTruthy();
     expect(yes.disabled).toBe(true);
-    expect(document.activeElement).toBe(within(box).getByLabelText('Sessions per day'));
+    // The number fields in one grid, sessions per day last: hiding it for once a day moves no other field.
+    expect(Array.from(box.querySelectorAll('.numbers input')).map((i) => i.id)).toEqual([
+      'goal-g.G-0001', 'goal-j.G-0001', 'goal-k.G-0001', 'goal-p.G-0001',
+    ]);
+    expect(document.activeElement).toBe(within(box).getByLabelText('Shortest gap (minutes)'));
     await fireEvent.input(within(box).getByLabelText('Job launches per day'), { target: { value: '1' } });
     await fireEvent.click(within(box).getByLabelText('Once a day'));
+    expect(Array.from(box.querySelectorAll('.numbers input')).map((i) => i.id)).toEqual(['goal-g.G-0001', 'goal-j.G-0001', 'goal-k.G-0001']);
     const time = within(box).getByLabelText('Time of day') as HTMLInputElement;
     expect(time.value).toBe('09:00');
-    expect(within(box).getByText('Time of day in America/New_York. It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.')).toBeTruthy();
+    // The zone in plain words beside the field; the hint under it, outside the field's column.
+    const zone = within(box).getByText('New York time');
+    expect(zone.parentElement?.contains(time)).toBe(true);
+    const hint = within(box).getByText('It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.');
+    expect(hint.closest('.field')).toBeNull();
+    expect(time.getAttribute('aria-describedby')?.split(' ')).toEqual([zone.id, hint.id]);
     await fireEvent.input(time, { target: { value: '07:30' } });
     expect(within(box).getByText(NOTE)).toBeTruthy();
     expect(yes.disabled).toBe(false);
@@ -1009,18 +1019,57 @@ describe('Goals: how often a goal works (goal pacing)', () => {
     const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
     const yes = within(box).getByRole('button', { name: 'Yes, change how it works' }) as HTMLButtonElement;
     expect((within(box).getByLabelText('Once a day') as HTMLInputElement).checked).toBe(true);
-    await fireEvent.input(within(box).getByLabelText('Pause after this many sessions in a row that finish nothing'), { target: { value: '11' } });
-    expect(within(box).getByText('The stall limit must be at least 1 and at most 10.')).toBeTruthy();
+    // Nothing changed yet: a neutral hint, not the warn colour of a problem.
+    expect(within(box).getByText('Change a setting first.').classList.contains('wrong')).toBe(false);
+    const stall = within(box).getByLabelText('Stall limit');
+    expect(stall.getAttribute('aria-describedby')).toBe('goal-y.G-0001');
+    expect(document.getElementById('goal-y.G-0001')?.textContent).toBe('Stall limit: the goal pauses after this many sessions in a row that finish nothing.');
+    await fireEvent.input(stall, { target: { value: '11' } });
+    expect(within(box).getByText('The stall limit must be at least 1 and at most 10.').classList.contains('wrong')).toBe(true);
     expect(yes.disabled).toBe(true);
-    await fireEvent.input(within(box).getByLabelText('Pause after this many sessions in a row that finish nothing'), { target: { value: '3' } });
-    await fireEvent.input(within(box).getByLabelText('Shortest gap between sessions (minutes)'), { target: { value: '0' } });
+    await fireEvent.input(stall, { target: { value: '3' } });
+    await fireEvent.input(within(box).getByLabelText('Shortest gap (minutes)'), { target: { value: '0' } });
     expect(within(box).getByText('The shortest gap between sessions must be at least 1 and at most 10,080 minutes.')).toBeTruthy();
     expect(yes.disabled).toBe(true);
-    await fireEvent.input(within(box).getByLabelText('Shortest gap between sessions (minutes)'), { target: { value: '60' } });
+    await fireEvent.input(within(box).getByLabelText('Shortest gap (minutes)'), { target: { value: '60' } });
     await fireEvent.click(within(box).getByLabelText('As often as its limits allow'));
     expect(yes.disabled).toBe(false);
     await fireEvent.click(within(box).getByRole('button', { name: 'No' }));
     expect(posts()).toEqual([]);
+  });
+
+  it('with a session open there is no Run a session now, and the sentence does not name it', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ pacing: PACING() })];
+    details['G-0001'] = { ...A, daily_at: null, open_session: 4, actions: ['pause', 'stop', 'budget', 'sessions', 'deadline', 'note', 'cancel'] };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
+    const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
+    await fireEvent.input(within(box).getByLabelText('Job launches per day'), { target: { value: '1' } });
+    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed.')).toBeTruthy();
+    expect(box.textContent).not.toMatch(/Run a session now|Run now/);
+  });
+
+  it('the number fields sit in a grid of fixed-width columns with their inputs in line', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'goals/GoalPane.svelte'), 'utf-8')));
+    expect(css.get('.numbers')).toMatchObject({
+      display: 'grid', 'grid-template-columns': 'repeat(auto-fill, minmax(9rem, 11rem))', 'align-items': 'end',
+    });
+    // The time of day sits in a column (How often): it takes only its own height there.
+    expect(css.get('.often')).toMatchObject({ display: 'flex', 'flex-direction': 'column' });
+    expect(css.get('.often .field')).toMatchObject({ flex: 'none' });
+  });
+});
+
+describe('Goals: an unchanged budget form', () => {
+  it('asks for a new budget in a neutral hint, and a real problem in the warn colour', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    const box = within(region).getByRole('group', { name: 'Confirm: Change budget' });
+    expect(within(box).getByText('Type a new total or day budget.').classList.contains('wrong')).toBe(false);
+    await fireEvent.input(within(box).getByLabelText('Day budget (tokens)'), { target: { value: '20000000' } });
+    expect(within(box).getByText('The day budget cannot be larger than the total budget.').classList.contains('wrong')).toBe(true);
   });
 });
 
@@ -1050,13 +1099,13 @@ describe('Goals: once a day, the review follow-ups', () => {
     const region = await pane('Tidy the notes');
     await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
     const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
-    const stall = within(box).getByLabelText('Pause after this many sessions in a row that finish nothing');
+    const stall = within(box).getByLabelText('Stall limit');
     await fireEvent.input(within(box).getByLabelText('Sessions per day'), { target: { value: '2' } });
-    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.')).toBeTruthy();
+    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, press Run a session now.')).toBeTruthy();
     await fireEvent.input(stall, { target: { value: '5' } });
-    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.')).toBeTruthy();
+    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, press Run a session now.')).toBeTruthy();
     await fireEvent.input(stall, { target: { value: '2' } });
-    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now. If its last 2 sessions in a row finished nothing, Nous pauses it at its next check.')).toBeTruthy();
+    expect(within(box).getByText('This applies from the next session. A session that is running now is not changed. To start a session sooner, press Run a session now. If its last 2 sessions in a row finished nothing, Nous pauses it at its next check.')).toBeTruthy();
   });
 
   it('the goal page\'s time says what happens when the time has already passed today', async () => {
@@ -1067,7 +1116,7 @@ describe('Goals: once a day, the review follow-ups', () => {
     await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
     const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
     await fireEvent.click(within(box).getByLabelText('Once a day'));
-    expect(within(box).getByText('Time of day in America/New_York. It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.')).toBeTruthy();
+    expect(within(box).getByText('It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.')).toBeTruthy();
   });
 });
 
@@ -1089,7 +1138,7 @@ describe('Goals: a lost change of session settings', () => {
     const region = await pane('Tidy the notes');
     await fireEvent.click(within(region).getByRole('button', { name: 'Change how it works' }));
     const box = within(region).getByRole('group', { name: 'Confirm: Change how it works' });
-    await fireEvent.input(within(box).getByLabelText('Pause after this many sessions in a row that finish nothing'), { target: { value: '5' } });
+    await fireEvent.input(within(box).getByLabelText('Stall limit'), { target: { value: '5' } });
     await fireEvent.click(within(box).getByRole('button', { name: 'Yes, change how it works' }));
     await vi.advanceTimersByTimeAsync(16_000);
     await vi.waitFor(() => expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());

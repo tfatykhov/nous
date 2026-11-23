@@ -138,7 +138,11 @@ describe('the create form', () => {
     expect(custom({ day_budget: '3000000' })).toEqual(['The day budget cannot be larger than the total budget.']);
     expect(custom({ sessions_per_day: '0' })).toEqual(['Sessions per day must be at least 1 and at most 24.']);
     expect(custom({ deadline_days: '91' })).toEqual(['The deadline in days must be at least 1 and at most 90.']);
-    expect(custom({ min_interval_seconds: '59' })).toEqual(['The interval between sessions in seconds must be at least 60 and at most 604,800.']);
+    // The gap is typed in whole minutes, as in Change how it works; the server's range is in seconds.
+    expect(custom({ min_interval_seconds: '0' })).toEqual(['The shortest gap between sessions must be at least 1 and at most 10,080 minutes.']);
+    expect(custom({ min_interval_seconds: '10081' })).toEqual(['The shortest gap between sessions must be at least 1 and at most 10,080 minutes.']);
+    expect(custom({ min_interval_seconds: '1.5' })).toEqual(['The shortest gap between sessions must be a whole number.']);
+    expect(custom({ min_interval_seconds: '10080' })).toEqual([]);
     expect(custom({ jobs_per_day: '1.5' })).toEqual(['Jobs per day must be a whole number.']);
     expect(custom({})).toEqual([]);
     // Every range the server sends is checked: a range with a new field is read, not ignored.
@@ -150,6 +154,25 @@ describe('the create form', () => {
     const body = createBody(form({ custom: true, quiet_hours_ok: true }));
     expect(body.preset).toBe('custom');
     expect(body.limits).toEqual({ ...options.presets!.small, quiet_hours_ok: true });
+  });
+
+  it('the gap between sessions is shown in minutes and sent in seconds', () => {
+    expect(goals.LIMIT_LABEL.min_interval_seconds).toBe('Shortest gap between sessions (minutes)');
+    expect(limitFields(options.presets!.small).min_interval_seconds).toBe('120'); // 7,200 seconds
+    expect(limitFields(options.presets!.large).min_interval_seconds).toBe('30');
+    const typed = form({ custom: true, limits: { ...limitFields(options.presets!.small), min_interval_seconds: ' 90 ' } });
+    expect(createBody(typed).limits?.min_interval_seconds).toBe(5400);
+    // A preset that is not whole minutes shows its minutes as they are, and is said to need a whole number.
+    const odd = limitFields({ ...options.presets!.small, min_interval_seconds: 90 });
+    expect(odd.min_interval_seconds).toBe('1.5');
+    expect(createProblems(form({ custom: true, limits: odd }), options)).toEqual(['The shortest gap between sessions must be a whole number.']);
+  });
+
+  it('a limit as the forms show it: the gap in whole minutes, the rest as the server sends them', () => {
+    const range = (field: string) => options.ranges!.find((r) => r.field === field)!;
+    expect(goals.formRange(range('min_interval_seconds'))).toEqual({ low: 1, high: 10_080, words: 'the shortest gap between sessions', unit: ' minutes' });
+    expect(goals.formRange({ field: 'min_interval_seconds', low: 90, high: 7_259, words: 'x' })).toMatchObject({ low: 2, high: 120 });
+    expect(goals.formRange(range('jobs_per_day'))).toEqual({ low: 0, high: 20, words: 'jobs per day', unit: '' });
   });
 
   it('the channel is required only without a default chat, and must be telegram:<chat id>', () => {
@@ -406,7 +429,9 @@ describe('goal pacing: how often a goal works, and changing its session settings
     expect(ACTION_TEXT.sessions.label).toBe('Change how it works');
     expect(asksFirst('sessions')).toBe(true);
     expect(confirmText('sessions', goal, { driverRunning: true })).toBe(goals.SESSIONS_NOTE);
-    expect(goals.SESSIONS_NOTE).toBe('This applies from the next session. A session that is running now is not changed. To start a session sooner, use Run now.');
+    expect(goals.SESSIONS_NOTE).toBe('This applies from the next session. A session that is running now is not changed.');
+    expect(goals.RUN_NOW_NOTE).toBe('To start a session sooner, press Run a session now.');
+    expect(goals.RUN_NOW_NOTE).toContain(ACTION_TEXT['run-now'].label);
   });
 
   it('how often, in words', () => {
@@ -485,20 +510,34 @@ describe('goal pacing: the review follow-ups', () => {
   const start = () => goals.sessionsForm(goal, options);
 
   it('the hint says a goal approved or changed after its time starts at once', () => {
-    expect(goals.dailyHint('America/New_York', 'create')).toBe('Time of day in America/New_York. It starts one session at that time each day. Approved after that time, it starts its first session at once.');
-    expect(goals.dailyHint('America/New_York', 'change')).toBe('Time of day in America/New_York. It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.');
+    expect(goals.dailyHint('create')).toBe('It starts one session at that time each day. If you approve it after that time of day, its first session starts right away.');
+    expect(goals.dailyHint('change')).toBe('It starts one session at that time each day. If that time has passed today and no session ran today, one starts at once.');
   });
 
-  it('the pause sentence is said only when the stall limit is lowered', () => {
-    expect(goals.sessionsNote(start(), start())).toBe(goals.SESSIONS_NOTE);
-    expect(goals.sessionsNote({ ...start(), sessions_per_day: '1' }, start())).toBe(goals.SESSIONS_NOTE);
-    expect(goals.sessionsNote({ ...start(), stall_limit: '5' }, start())).toBe(goals.SESSIONS_NOTE);
-    expect(goals.sessionsNote({ ...start(), stall_limit: '2' }, start())).toBe(
-      `${goals.SESSIONS_NOTE} If its last 2 sessions in a row finished nothing, Nous pauses it at its next check.`,
+  it('the time zone in plain words beside the time: the place of the zone, else the zone as the server names it', () => {
+    expect(goals.zoneWords('America/New_York')).toBe('New York time');
+    expect(goals.zoneWords('Europe/London')).toBe('London time');
+    expect(goals.zoneWords('America/Argentina/Buenos_Aires')).toBe('Buenos Aires time');
+    expect(goals.zoneWords('America/Port-au-Prince')).toBe('Port-au-Prince time');
+    for (const zone of ['UTC', 'Etc/GMT+5', 'US/Eastern', '']) expect(goals.zoneWords(zone)).toBe(zone);
+  });
+
+  it('the pause sentence is said only when the stall limit is lowered; Run a session now only when it is offered', () => {
+    const NOTE = `${goals.SESSIONS_NOTE} ${goals.RUN_NOW_NOTE}`;
+    expect(goals.sessionsNote(start(), start(), true)).toBe(NOTE);
+    expect(goals.sessionsNote(start(), start(), false)).toBe(goals.SESSIONS_NOTE);
+    expect(goals.sessionsNote({ ...start(), sessions_per_day: '1' }, start(), true)).toBe(NOTE);
+    expect(goals.sessionsNote({ ...start(), stall_limit: '5' }, start(), true)).toBe(NOTE);
+    expect(goals.sessionsNote({ ...start(), stall_limit: '2' }, start(), true)).toBe(
+      `${NOTE} If its last 2 sessions in a row finished nothing, Nous pauses it at its next check.`,
     );
-    expect(goals.sessionsNote({ ...start(), stall_limit: '1' }, start())).toBe(
+    expect(goals.sessionsNote({ ...start(), stall_limit: '1' }, start(), false)).toBe(
       `${goals.SESSIONS_NOTE} If its last session finished nothing, Nous pauses it at its next check.`,
     );
+  });
+
+  it('the stall limit has a short label and its meaning as a hint', () => {
+    expect(goals.STALL_HINT).toBe('Stall limit: the goal pauses after this many sessions in a row that finish nothing.');
   });
 
   it('once a day, sessions per day is not sent or checked, and the facts say why', () => {

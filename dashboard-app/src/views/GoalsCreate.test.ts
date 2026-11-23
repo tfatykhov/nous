@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
+import { parseBlocks, styleBlocks } from '../lib/testing/css';
 import { LEAD, NOTES_IDENTITY, OPTIONS, PACING, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { GoalOptions } from '../lib/goals';
 
@@ -259,7 +262,12 @@ describe('Goals: the create form and how often a goal works (goal pacing)', () =
     await fireEvent.click(within(group).getByLabelText('Once a day'));
     const time = within(group).getByLabelText('Time of day') as HTMLInputElement;
     expect(time.value).toBe('09:00');
-    expect(within(group).getByText('Time of day in America/New_York. It starts one session at that time each day. Approved after that time, it starts its first session at once.')).toBeTruthy();
+    // The zone in plain words beside the field; the hint under it, outside the field's column.
+    const zone = within(group).getByText('New York time');
+    expect(zone.parentElement?.contains(time)).toBe(true);
+    const hint = within(group).getByText('It starts one session at that time each day. If you approve it after that time of day, its first session starts right away.');
+    expect(hint.closest('.field')).toBeNull();
+    expect(time.getAttribute('aria-describedby')).toBe(`${zone.id} ${hint.id}`);
     await fireEvent.input(time, { target: { value: '06:45' } });
     await fillTexts(form);
     await type(form, 'Channel', 'telegram:4242');
@@ -293,5 +301,30 @@ describe('Goals: the create form, once a day, the review follow-ups', () => {
     expect(within(form).getByText('Sessions per day does not apply: a goal that works once a day starts one session a day.')).toBeTruthy();
     await fireEvent.click(within(form).getByLabelText('As often as its size allows'));
     expect(perDay.disabled).toBe(false);
+  });
+
+  it('a field that does not apply looks disabled, as disabled fields do elsewhere', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'goals/NewGoal.svelte'), 'utf-8')));
+    expect(css.get('.field input:disabled')).toMatchObject({ opacity: '0.6' });
+  });
+});
+
+describe('Goals: the create form, the gap between sessions in minutes', () => {
+  it('shows the gap in minutes with its range in minutes, and sends it in seconds', async () => {
+    const form = await openForm();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Customise the limits' }));
+    const gap = within(form).getByLabelText('Shortest gap between sessions (minutes)') as HTMLInputElement;
+    expect(gap.value).toBe('120'); // the small size's 7,200 seconds
+    expect(document.getElementById('goal-new-min_interval_seconds-hint')?.textContent).toBe('1 to 10,080');
+    await type(form, 'Shortest gap between sessions (minutes)', '0');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    expect(within(within(form).getByRole('alert')).getByText('The shortest gap between sessions must be at least 1 and at most 10,080 minutes.')).toBeTruthy();
+    expect(posts()).toEqual([]);
+    await type(form, 'Shortest gap between sessions (minutes)', '45');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await waitFor(() => expect(posts().length).toBe(1));
+    expect((posts()[0].body as { limits: { min_interval_seconds: number } }).limits.min_interval_seconds).toBe(2700);
   });
 });
