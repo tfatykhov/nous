@@ -323,6 +323,31 @@ async def test_a_pass_that_cannot_count_todays_calls_queues_nothing_and_does_not
     assert "RuntimeError" in caplog.text
 
 
+async def test_a_pass_that_fails_while_queueing_is_counted_and_the_next_pass_still_runs(
+    db, agent, monkeypatch, caplog
+):
+    await _decision(db, agent, "a2ui")
+    real = service_module._sweep_rank
+    ranked = {"n": 0}
+
+    def fails_once(grader: str) -> int:
+        ranked["n"] += 1
+        if ranked["n"] == 1:
+            raise RuntimeError("the ranking broke")
+        return real(grader)
+
+    monkeypatch.setattr(service_module, "_sweep_rank", fails_once)
+    monkeypatch.setattr(service_module, "SWEEP_FIRST_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(service_module, "SWEEP_INTERVAL_SECONDS", 0.05)
+    service, _d, _r = _service(db, agent)
+    service.start()
+    await _until(lambda: service.sweep_numbers()["queued_decisions"].get("a2ui") == 1)
+    await _until(lambda: service.idle)
+    assert service.sweep_numbers()["failed"] == 1 and not service._sweeper.done()
+    await service.close()
+    assert "RuntimeError" in caplog.text
+
+
 async def test_a_subject_already_queued_is_not_queued_again_or_counted_as_dropped(db, agent):
     decision_id = await _decision(db, agent, "a2ui")
     service, _d, _r = _service(db, agent)
@@ -332,42 +357,39 @@ async def test_a_subject_already_queued_is_not_queued_again_or_counted_as_droppe
     await service.close()
 
 
-async def test_a_service_without_a_report_judge_sweeps_decisions_only(db, agent):
+async def test_a_service_without_a_report_judge_sweeps_nothing_unless_it_is_given_a_sweep(db, agent):
     decision_id = await _decision(db, agent, "a2ui")
     await _task(db, agent)
-    service, decisions, _r = _service(db, agent, reports=False)
+    service, _d, _r = _service(db, agent, reports=False)  # the setting is on
     service.start()
-    assert await _pass(service) == 1
+    assert service.sweep_numbers() is None and service._sweeper is None
     await service.close()
+    given, decisions, _r = _service(db, agent, reports=False, sweep=True)
+    given.start()
+    assert await _pass(given) == 1  # decisions only
+    await given.close()
     assert [row["subject_kind"] for row in await _rows(db, agent)] == ["decision"]
     assert [record.subject_id for record in decisions.records] == [decision_id]
-    assert service.sweep_numbers()["queued_reports"] == 0
+    assert given.sweep_numbers()["queued_reports"] == 0
 
 
-async def test_with_two_judges_each_sweeps_its_own_and_the_second_takes_no_report(db, agent):
-    decision_id = await _decision(db, agent, "external")
+async def test_with_two_judges_only_the_first_sweeps(db, agent):
+    await _decision(db, agent, "external")
     task_id = await _task(db, agent)
     first, _d, first_reports = _service(db, agent)
-    second = OutsideJudge(db, _settings(agent), StubJudge(name="second", version="j1"), **FAST)
+    second_judge = StubJudge(name="second", version="j1")
+    second = OutsideJudge(db, _settings(agent), second_judge, **FAST)  # as main.py builds it: no report judge
     both = JudgeSet(first, second)
     first.start()
     second.start()
-    assert await first.sweep_once() == 2 and await second.sweep_once() == 1
+    assert second._sweeper is None
+    assert await first.sweep_once() == 2
     await _until(lambda: first.idle and second.idle)
     await both.close()
     assert [record.subject_id for record in first_reports.records] == [task_id]
-    async with db.session() as session:
-        second_rows = (
-            await session.execute(
-                text(
-                    "SELECT subject_kind, subject_id FROM nous_system.judge_verdicts WHERE agent_id = :a "
-                    "AND judge_name = 'second'"
-                ),
-                {"a": agent},
-            )
-        ).all()
-    assert [tuple(row) for row in second_rows] == [("decision", decision_id)]
-    assert both.sweep_numbers()["second"]["queued_reports"] == 0
+    assert second_judge.records == []
+    numbers = both.sweep_numbers()
+    assert numbers["second"] is None and numbers["queued_reports"] == 1
 
 
 # ---- the claim ------------------------------------------------------------------------------------------------------

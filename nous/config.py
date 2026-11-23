@@ -1098,8 +1098,8 @@ class Settings(BaseSettings):
     outside_judge_settings_enabled: bool = False
     # F118 task reports: with this on and the mode shadow, the report of a background task that finished as completed
     # is judged too, by the first judge only, from the calls the task ran (nous_system.judge_verdicts, subject_kind
-    # task_report), and each judge runs an hourly sweep that queues what a restart lost and decisions graded by the
-    # owner or by a fixed signal, at most five a pass and none past half its daily limit. Off: neither.
+    # task_report), and the first judge runs an hourly sweep that queues what a restart lost and decisions graded by
+    # the owner or by a fixed signal, at most five a pass and none past half its daily limit. Off: neither.
     outside_judge_reports_enabled: bool = False
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(

@@ -2,8 +2,8 @@
 
 ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` defaults to false. With it off, the judge in shadow is built exactly as before:
 no report judge and no sweep. With it on (and the mode shadow), the first judge's service gets the built-in report
-judge over the same client and model, and runs the sweep; the second judge's service gets no report judge. With the
-mode off nothing is built whatever the setting says. The tools a turn is offered do not change.
+judge over the same client and model, and runs the sweep; the second judge's service gets neither. With the mode off
+nothing is built whatever the setting says. The tools a turn is offered do not change.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ def test_the_second_judge_gets_no_report_judge(monkeypatch):
     )
     second = main._build_second_judge(settings, database=object())
     assert second is not None and second.judge.name == "jev"
-    assert second.report_judge is None
+    assert second.report_judge is None and second.sweep_numbers() is None  # no report and no sweep
     assert second.submit_report(uuid.uuid4(), claimed_at=None) is False
 
 

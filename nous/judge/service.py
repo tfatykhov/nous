@@ -25,6 +25,13 @@ rest. The worker reads the decision and the session's records and writes only ``
 
 ``JudgeSet`` puts two such services side by side, a second judge on the same decisions: a submit hands both the same
 claim, and neither one's failure, time or limit changes the other's.
+
+With ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` the first judge's service also has a report judge: ``submit_report`` (from
+the task executor, after a completed task's row is written) queues a finished task's report, which the worker judges
+as it stood at the task's completion, read from the task's row (a task not finished as completed is not judged). The
+report judge shares the judge's name, so the daily limit counts both. ``JudgeSet`` hands a report to the first judge
+only (``SECOND_JUDGE_GRADES_REPORTS``). That service also runs the sweep (``sweep_once``): soon after the start and
+then hourly, at most ``SWEEP_BATCH`` subjects without a final row, none past half the day's limit.
 """
 
 from __future__ import annotations
@@ -157,10 +164,13 @@ class OutsideJudge:
         self._agent_id = settings.agent_id
         self._daily_calls = settings.outside_judge_daily_calls if daily_calls is None else daily_calls
         self.judge = judge
-        # The judge of finished task reports (None: this service takes no report), and the hourly sweep (None: on
-        # with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED).
+        # The judge of finished task reports (None: this service takes no report), and the hourly sweep. None: the
+        # sweep runs in the service that judges reports, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, so the first judge's
+        # only; a second judge's service sweeps nothing (sweep=True would give it a sweep of decisions).
         self.report_judge = report_judge
-        self._sweep_on = bool(getattr(settings, "outside_judge_reports_enabled", False)) if sweep is None else sweep
+        if sweep is None:
+            sweep = report_judge is not None and bool(getattr(settings, "outside_judge_reports_enabled", False))
+        self._sweep_on = sweep
         self._sweeper: asyncio.Task | None = None
         self._sweep_counts: dict[str, Any] = {
             "passes": 0,
@@ -463,10 +473,15 @@ class OutsideJudge:
                         now=now,
                         limit=room,
                     )
+            return self._queue_swept(decisions, reports)
         except Exception as exc:
             counts["failed"] += 1
-            logger.warning("F118: a sweep pass failed (%s); nothing was queued", type(exc).__name__)
+            logger.warning("F118: a sweep pass failed (%s)", type(exc).__name__)
             return 0
+
+    def _queue_swept(self, decisions: list[dict[str, Any]], reports: list[dict[str, Any]]) -> int:
+        """Queue up to ``SWEEP_BATCH`` of the subjects a pass found, in the sweep's order; how many were queued."""
+        counts = self._sweep_counts
         candidates = [(_sweep_rank(d["grader"]), -d["graded_at"].timestamp(), DECISION, d) for d in decisions]
         candidates += [(_REPORT_RANK, -r["completed_at"].timestamp(), TASK_REPORT, r) for r in reports]
         queued = 0
