@@ -1181,6 +1181,49 @@ describe('Goals: the page with the activity panel on', () => {
     expect(note.compareDocumentPosition(fold('plan')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it('a goal not in the run-any-command mode says so in one line after what it is doing, not in a card under the header', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ activity: true, commands: COMMANDS() })];
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await within(region).findByText('Working on a task: Merge the duplicate pairs');
+    expect(within(region).queryByRole('heading', { name: 'May run any command' })).toBeNull();
+    const line = within(region).getByText('May run any command: Off');
+    expect(line.closest('.card')).toBeNull();
+    const activity = document.getElementById('goal-v.G-0001')!.closest('section')!;
+    expect(activity.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(line.compareDocumentPosition(fold('journal')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    cleanup();
+    details['G-0001'] = { ...A, commands: { state: 'ended', says: 'Ended: Its end time passed.', usable: false, not_usable_why: null, approve: null } };
+    render(Goals);
+    const ended = await pane('Tidy the notes');
+    expect(await within(ended).findByText('May run any command: Ended: Its end time passed.')).toBeTruthy();
+    expect(within(ended).queryByRole('heading', { name: 'May run any command' })).toBeNull();
+  });
+
+  it('an armed draft keeps the full card under the header; after Return to contained its result shows in the one line', async () => {
+    handlers['GET /goals/options'] = () => [200, OPTIONS({ activity: true, commands: COMMANDS() })];
+    details['G-0001'] = {
+      ...A, state: 'draft', mode: 'commands', actions: ['approve', 'note', 'cancel', 'contained'],
+      commands: { state: 'set', says: 'Set: 5 hours from approval.', usable: false, not_usable_why: null, approve: null },
+    };
+    handlers['POST /goals/G-0001/contained'] = () => {
+      details['G-0001'] = { ...details['G-0001'], mode: 'contained', actions: ['approve', 'note', 'cancel'],
+        commands: { state: 'ended', says: 'Ended: Returned to contained.', usable: false, not_usable_why: null, approve: null } };
+      return [200, details['G-0001']];
+    };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const cards = Array.from(region.querySelectorAll('.card'));
+    expect(cards[1].querySelector('h3')?.textContent).toBe('May run any command');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Return to contained' }));
+    const line = await within(region).findByText('May run any command: Ended: Returned to contained.');
+    expect(await within(region).findByText('Returned to contained.')).toBeTruthy();
+    expect(within(region).queryByRole('heading', { name: 'May run any command' })).toBeNull();
+    expect(line.parentElement!.contains(within(region).getByText('Returned to contained.'))).toBe(true);
+  });
+
   it('the journal, plan and spend start open; sessions, charter, limits and tools closed; the summaries say how many', async () => {
     handlers['GET /goals/G-0001/tools'] = () => [200, goalToolsAnswer()];
     go('#/goals/g/G-0001');

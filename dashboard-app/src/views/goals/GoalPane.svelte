@@ -24,7 +24,8 @@
   // With the server's goal pacing on, Change how it works opens the goal's session settings here, as the budget form
   // does, and sends only what changed.
   // With the server's goal activity panel on (`options.activity`), what the goal is doing now comes under the header
-  // (and the run-any-command card), then the journal and the note box, then the plan, spend, sessions, charter,
+  // (and the run-any-command card, for a goal in that mode; any other goal says it in one line after the panel), then
+  // the journal and the note box, then the plan, spend, sessions, charter,
   // limits and tools, each a folding section; the header card, which holds every confirmation, never folds. `tick`
   // is the page poll's last good read: the panel reads on it while a session is open.
   // Every text a session wrote is a text node. Ids of this goal's controls are
@@ -72,6 +73,11 @@
   let buttons = $derived(goal.actions.filter((a) => a !== 'note' && a !== 'contained'));
   let modeWords = $derived(options.commands?.words ?? null);
   let modeShown = $derived(modeWords !== null || goal.commands.state !== 'off');
+  /** With the folding page, a goal in the mode (on, or set on a draft) or that can return to contained keeps the full
+   * card under the header; any other goal says what the card would say in one line after what it is doing. */
+  let modeCard = $derived(
+    !folding || goal.commands.state === 'on' || goal.commands.state === 'set' || goal.actions.includes('contained'),
+  );
   // The note's last sentence names Stop now: only where Stop now is offered (not on a draft, nor on a paused goal
   // with no open session).
   let stopNamed = $derived(goal.actions.includes('stop'));
@@ -480,7 +486,7 @@
     {#if resultOf !== 'contained'}{@render line(result)}{/if}
   </div>
 
-  {#if modeShown}
+  {#if modeShown && modeCard}
     <div class="card" aria-labelledby="goal-m.{goal.ref}">
       <h3 id="goal-m.{goal.ref}">{modeWords?.heading ?? MODE_WORDS.commands}</h3>
       <p class="mode-says" class:mode-on={goal.commands.state === 'on'}>{goal.commands.says}</p>
@@ -504,6 +510,12 @@
 
   {#if folding}
     <GoalActivity {goal} {now} tick={pollTick} />
+    {#if modeShown && !modeCard}
+      <div class="mode-line">
+        <p class="mode-text">{modeWords?.heading ?? MODE_WORDS.commands}: {goal.commands.says}</p>
+        {#if resultOf === 'contained'}{@render line(result)}{/if}
+      </div>
+    {/if}
     <Fold id="journal" refOf={goal.ref} title="Journal" defaultOpen={FOLD_DEFAULTS.journal}>{@render journalPart()}</Fold>
   {:else}
     <div class="card">
@@ -582,6 +594,8 @@
   .reason { font-size: 0.8125rem; color: var(--muted); margin: 0.5rem 0 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
   .mode-says { font-size: 0.875rem; margin: 0.375rem 0 0; }
+  .mode-line { margin: -0.5rem 0 1.25rem; padding: 0 1.25rem; font-size: 0.8125rem; color: var(--muted); }
+  .mode-text { margin: 0; overflow-wrap: anywhere; }
   .mode-says.mode-on { font-weight: 600; color: var(--warn-text); }
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .confirm { margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
