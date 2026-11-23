@@ -68,6 +68,7 @@ async def _task(
     report: Any = REPORT,
     metadata: dict | None = None,
     created_at: datetime = T0,
+    started_at: datetime | None = None,
     completed_at: datetime | None = DONE,
     parent_session_id: str | None = None,
     task: str = "Fix the broken link on the pricing page and deploy the site",
@@ -78,8 +79,9 @@ async def _task(
         await session.execute(
             text(
                 "INSERT INTO heart.subtasks (id, agent_id, parent_session_id, task, status, final_outcome, "
-                "report_jsonb, metadata, success_criteria, created_at, completed_at) VALUES (:id, :a, :p, :t, :st, "
-                ":fo, CAST(:r AS jsonb), CAST(:m AS jsonb), 'The live page links to the new plan', :at, :done)"
+                "report_jsonb, metadata, success_criteria, created_at, started_at, completed_at) VALUES (:id, :a, :p, "
+                ":t, :st, :fo, CAST(:r AS jsonb), CAST(:m AS jsonb), 'The live page links to the new plan', :at, :sa, "
+                ":done)"
             ),
             {
                 "id": task_id,
@@ -91,6 +93,7 @@ async def _task(
                 "r": None if report is None else json.dumps(report),
                 "m": json.dumps(metadata if metadata is not None else {"finish_check": FLAGGED}),
                 "at": created_at,
+                "sa": started_at,
                 "done": completed_at,
             },
         )
@@ -412,6 +415,30 @@ async def test_a_call_that_started_after_the_completion_is_never_read_whatever_i
     await writer.drain(10)
     built = await _build(db, agent, task_id)
     assert _sources(built) == ["bash"] and built.counts["tool_calls"] == 1
+
+
+async def test_a_reclaimed_tasks_window_starts_at_its_last_start(db, agent):
+    """A task put back in the queue and run again: what its earlier run did is not this report's work."""
+    restarted = T0 + timedelta(minutes=3)
+    task_id = await _task(db, agent, started_at=restarted)
+    own = own_session(task_id)
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own, "write_file", T0 + timedelta(minutes=1), subtask_id=task_id, index=0)  # the earlier run
+    _call(recorder, own, "bash", restarted + timedelta(minutes=1), subtask_id=task_id, index=1)
+    await writer.drain(10)
+    await _ledger(db, agent, own, "send_email", T0 + timedelta(minutes=1), subtask_id=task_id)
+    await _task(db, agent, parent_session_id=own, created_at=T0 + timedelta(minutes=1))
+    built = await _build(db, agent, task_id)
+    assert _sources(built) == ["bash"]
+    assert (built.counts["tool_calls"], built.counts["ledger_rows"], built.counts["subtasks"]) == (1, 0, 0)
+
+
+async def test_without_a_start_the_window_starts_at_the_tasks_creation(db, agent):
+    task_id = await _task(db, agent, started_at=None)
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own_session(task_id), "write_file", T0 + timedelta(minutes=1), subtask_id=task_id)
+    await writer.drain(10)
+    assert _sources(await _build(db, agent, task_id)) == ["write_file"]
 
 
 async def test_the_record_is_the_same_whenever_it_is_read(db, agent):

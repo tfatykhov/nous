@@ -469,7 +469,7 @@ REPORT_CLAIM_GRADE = "completed"
 _TASK = text(
     "SELECT task, success_criteria, output_format, status, final_outcome, report_jsonb, "
     "metadata ->> 'session_id' AS shared_session, metadata -> 'finish_check' AS finish_check, created_at, "
-    "completed_at FROM heart.subtasks WHERE agent_id = :agent AND id = :id"
+    "started_at, completed_at FROM heart.subtasks WHERE agent_id = :agent AND id = :id"
 )
 # The task's own rows: its id on the row, or (a row without one) its own session; ``:own`` is NULL for a task in a
 # shared session, whose untagged rows may be other work's. Read as of the completion, like a decision's record.
@@ -534,7 +534,8 @@ def _finish_check_verdict(value: Any) -> str | None:
 
 
 async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: UUID) -> ReportEvidence | None:
-    """The record of one finished task's report as it stood when the task was completed, or None when the task is
+    """The record of one finished task's report as it stood when the task was completed, read from the start of the
+    run that reported (``started_at``; the task's creation when it has none), or None when the task is
     not this agent's task finished as ``completed`` (status and outcome) with a report that has a summary: a failed,
     cancelled or blocked task is never judged. Read-only, and the same whenever it is read: a call counts once it had
     ended by the completion, a ledger row or a child task once it had started, and one that finished later is shown
@@ -564,7 +565,10 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
         "truncated": False,
         "finish_check": _finish_check_verdict(row.finish_check),
     }
-    window = {"agent": agent_id, "task": task_id, "own": own, "since": row.created_at - CLOCK_SLACK, "until": claim_at}
+    # The run that reported started at started_at; a task put back in the queue and run again did earlier work that
+    # is not this report's. A row without a start is read from its creation.
+    since = (row.started_at or row.created_at) - CLOCK_SLACK
+    window = {"agent": agent_id, "task": task_id, "own": own, "since": since, "until": claim_at}
     calls, calls_bookkeeping = (await session.execute(_TASK_CALL_COUNTS, window)).one()
     ledger_rows, ledger_bookkeeping = (await session.execute(_TASK_LEDGER_COUNTS, window)).one()
     children = 0
