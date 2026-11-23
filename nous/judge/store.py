@@ -332,8 +332,9 @@ SWEEP_DECISION_DAYS = 30
 SWEEP_AGENT_DAYS = 7
 SWEEP_REPORT_DAYS = 2
 # The graders whose decisions the sweep takes (any other, such as a background turn's, is not taken).
-OWNER_GRADERS = ("a2ui", "external")  # a companion tap, the owner-guarded review route
+OWNER_GRADERS = ("a2ui",)  # the owner's tap on a companion card
 AGENT_GRADER = "agent"  # the agent in an interactive turn: what a restart lost
+EXTERNAL_GRADER = "external"  # the review route (the owner's or the proxy's secret): its own group, not the owner's
 SIGNAL_GRADER = "auto"  # the decision reviewer's fixed signals
 # The decision reviewer also grades failure from the low confidence the agent itself stated when it recorded the
 # decision (``ErrorSignal`` in nous/handlers/decision_reviewer.py, whose note starts with this text). That grade is not
@@ -356,7 +357,8 @@ _SWEEP_DECISIONS = text(
     "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = d.agent_id "
     "AND v.subject_kind = 'decision' AND v.subject_id = d.id AND v.judge_name = :name "
     f"AND v.judge_version = :version AND {_SWEEP_HELD}) "
-    "ORDER BY CASE WHEN d.reviewer IN :owners THEN 0 WHEN d.reviewer = :agent_grader THEN 1 ELSE 2 END, "
+    "ORDER BY CASE WHEN d.reviewer IN :owners THEN 0 WHEN d.reviewer = :agent_grader THEN 1 "
+    "WHEN d.reviewer = :external_grader THEN 2 ELSE 3 END, "
     "d.reviewed_at DESC, d.id LIMIT :limit"
 ).bindparams(bindparam("graders", expanding=True), bindparam("owners", expanding=True))
 _SWEEP_REPORTS = text(
@@ -383,16 +385,17 @@ async def sweep_decisions(
 ) -> list[dict[str, Any]]:
     """Up to ``limit`` of this agent's decisions graded success, partial or failure (not the abandoned mark) without a
     final row at this judge name and version (nor a failed one tried within ``SWEEP_RETRY_AFTER``), in the sweep's
-    order: graded by the owner in the last 30 days, by the
-    agent in an interactive turn in the last 7, by a fixed signal in the last 30; newest first in each. Each is a dict
-    of ``id``, ``grader`` (``grader_of``), ``grade``, ``note`` and ``graded_at``. Read-only."""
+    order: graded by the owner in the last 30 days, by the agent in an interactive turn in the last 7, through the
+    review route in the last 30, by a fixed signal in the last 30; newest first in each. Each is a dict of ``id``,
+    ``grader`` (``grader_of``), ``grade``, ``note`` and ``graded_at``. Read-only."""
     params = {
         "agent": agent_id,
         "since": now - timedelta(days=SWEEP_DECISION_DAYS),
         "agent_since": now - timedelta(days=SWEEP_AGENT_DAYS),
-        "graders": [*OWNER_GRADERS, SIGNAL_GRADER],
+        "graders": [*OWNER_GRADERS, EXTERNAL_GRADER, SIGNAL_GRADER],
         "owners": list(OWNER_GRADERS),
         "agent_grader": AGENT_GRADER,
+        "external_grader": EXTERNAL_GRADER,
         "name": judge_name,
         "version": judge_version,
         "retry_after": now - SWEEP_RETRY_AFTER,
@@ -538,7 +541,8 @@ async def report_numbers(
 def outcome_agreement(by_grader: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """From ``summarize``'s ``by_grader``: the judge's agreement with grades from outcomes (the owner's and the
     reviewer's outcome signals, pooled), and apart from it the agreement with the grade from the agent's own stated
-    confidence, which is not an outcome. The agent's own grades are in neither."""
+    confidence, which is not an outcome. The agent's own grades and those given through the review route
+    (``external``) are in neither: each is its own group in ``by_grader``."""
 
     def pooled(graders: tuple[str, ...]) -> dict[str, Any]:
         group = {"n": 0, "agree": 0, "judge_harsher": 0, "judge_kinder": 0, "cannot_tell": 0}

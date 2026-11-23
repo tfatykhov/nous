@@ -141,14 +141,16 @@ def _shown_claim(claim: Claim) -> Claim | None:
 
 
 # The sweep's order: decisions graded by the owner, then what a restart lost (decisions the agent resolved, then
-# finished reports), then decisions graded by a fixed signal.
+# finished reports), then decisions graded through the review route, then decisions graded by a fixed signal.
 _REPORT_RANK = 2
 
 
 def _sweep_rank(grader: str) -> int:
     if grader in store.OWNER_GRADERS:
         return 0
-    return 1 if grader == store.AGENT_GRADER else 3
+    if grader == store.AGENT_GRADER:
+        return 1
+    return 3 if grader == store.EXTERNAL_GRADER else 4
 
 
 class OutsideJudge:
@@ -460,8 +462,8 @@ class OutsideJudge:
         """One pass of the sweep; how many subjects it queued. It queues at most ``SWEEP_BATCH`` subjects without a
         final row at this service's judge names and versions (``store.sweep_decisions``, ``store.sweep_reports``, the
         latter only with a report judge): decisions graded by the owner, then what a restart lost (decisions the agent
-        resolved in an interactive turn, finished reports), then decisions graded by a fixed signal, newest first in
-        each. A decision's claim is its grade as it stands now, at the time it was graded. Nothing is queued once
+        resolved in an interactive turn, finished reports), then decisions graded through the review route, then by a
+        fixed signal, newest first in each. A decision's claim is its grade as it stands now, at the time it was graded. Nothing is queued once
         today's calls of the judge reach half its daily limit, so the day's own subjects keep the other half; nor when
         that count cannot be read. A subject already queued is passed over. It reads ``brain.decisions`` and
         ``heart.subtasks`` and writes neither. Never raises: a failure is one WARNING with the class name, counted."""

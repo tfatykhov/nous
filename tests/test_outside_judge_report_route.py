@@ -134,7 +134,7 @@ def _group(n: int, agree: int, harsher: int = 0, kinder: int = 0, cannot_tell: i
     }
 
 
-def test_the_headline_agreement_is_with_outcome_grades_and_the_stated_confidence_grade_is_apart():
+def test_the_headline_agreement_is_with_outcome_grades_and_the_review_route_and_stated_confidence_are_apart():
     by_grader = {
         "agent": _group(10, 2, harsher=8),
         "a2ui": _group(3, 2, kinder=1),
@@ -143,8 +143,8 @@ def test_the_headline_agreement_is_with_outcome_grades_and_the_stated_confidence
         store.STATED_CONFIDENCE_GRADER: _group(6, 1, kinder=5),
     }
     agreement = store.outcome_agreement(by_grader)
-    assert agreement == {
-        "outcome_grades": _group(8, 5, harsher=1, kinder=1, cannot_tell=1),
+    assert agreement == {  # the owner's taps and the reviewer's outcome signals; not the agent, not the review route
+        "outcome_grades": _group(7, 4, harsher=1, kinder=1, cannot_tell=1),
         "stated_confidence": _group(6, 1, kinder=5),
     }
     assert store.outcome_agreement({}) == {"outcome_grades": _group(0, 0), "stated_confidence": _group(0, 0)}

@@ -230,25 +230,38 @@ async def test_the_first_pass_runs_soon_after_the_start_and_then_every_interval(
 # ---- order and bounds -----------------------------------------------------------------------------------------------
 
 
-async def test_a_pass_takes_owner_grades_then_what_a_restart_lost_then_fixed_signals_at_most_five(db, agent):
+async def test_a_pass_takes_owner_grades_then_what_a_restart_lost_then_other_graders_at_most_five(db, agent):
     auto = [await _decision(db, agent, "auto", reviewed_at=NOW - timedelta(minutes=m)) for m in (1, 2, 3)]
-    owner = [await _decision(db, agent, "a2ui"), await _decision(db, agent, "external")]
+    external = await _decision(db, agent, "external", reviewed_at=NOW - timedelta(minutes=30))
+    owner = await _decision(db, agent, "a2ui", reviewed_at=NOW - timedelta(days=20))
     lost = [await _decision(db, agent, "agent", reviewed_at=NOW - timedelta(days=d)) for d in (1, 2)]
-    reports = [await _task(db, agent, completed_at=NOW - timedelta(hours=h)) for h in (1, 3)]
+    reports = [await _task(db, agent, completed_at=NOW - timedelta(hours=h)) for h in (1, 3, 5)]
     service, _d, _r = _service(db, agent)
     service.start()
     assert await _pass(service) == 5
     first = {row["subject_id"] for row in await _rows(db, agent)}
-    assert first == {*owner, *lost, reports[0]}
-    assert await _pass(service) == 4
+    assert first == {owner, *lost, reports[0], reports[1]}
+    assert await _pass(service) == 5
     second = {row["subject_id"] for row in await _rows(db, agent)} - first
-    assert second == {reports[1], *auto}
+    assert second == {reports[2], external, *auto}  # the review route's grade before the fixed signals'
     assert await _pass(service) == 0
     await service.close()
     numbers = service.sweep_numbers()
     assert numbers["passes"] == 3
     assert numbers["queued_decisions"] == {"a2ui": 1, "external": 1, "agent": 2, "auto": 3}
-    assert numbers["queued_reports"] == 2
+    assert numbers["queued_reports"] == 3
+
+
+async def test_the_review_routes_grade_is_taken_after_what_a_restart_lost_and_before_the_fixed_signals(db, agent):
+    auto = await _decision(db, agent, "auto", reviewed_at=NOW - timedelta(minutes=1))
+    external = await _decision(db, agent, "external", reviewed_at=NOW - timedelta(minutes=2))
+    lost = [await _decision(db, agent, "agent", reviewed_at=NOW - timedelta(days=1)) for _ in range(4)]
+    service, _d, _r = _service(db, agent)
+    service.start()
+    assert await _pass(service) == 5
+    await service.close()
+    taken = {row["subject_id"] for row in await _rows(db, agent)}
+    assert taken == {*lost, external} and auto not in taken
 
 
 async def test_a_pass_keeps_to_its_windows_and_its_graders(db, agent):
