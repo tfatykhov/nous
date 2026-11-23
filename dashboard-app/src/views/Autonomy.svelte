@@ -7,6 +7,7 @@
   import { usePoll } from '../lib/poll';
   import type { AutonomyData, GuardRecord, GuardReason, GuardSignal, InventoryTool, JobFixRow, LoopNumbersData, ScoreStats, VerifiedShare } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import SecondJudge from './autonomy/SecondJudge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import { fmtWhen, FLAG_GLOSS } from '../lib/harness';
@@ -280,6 +281,9 @@
       </div>
     </section>
   {/if}
+
+  <!-- F118 PR 3: the second judge's settings; drawn only when the server has them on. -->
+  <SecondJudge />
 
   <section class="panel" aria-labelledby="rollups-title">
     <div class="panel-head">
