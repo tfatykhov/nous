@@ -655,6 +655,26 @@ async def test_close_waits_for_the_change_in_flight_and_later_writes_are_refused
         assert (answer.status, answer.body["error"]) == (503, SHUTTING_DOWN)
 
 
+async def test_no_change_touches_the_first_judge(make):
+    env = await _keyed(make, enabled=False)
+    first = env.judges.primary
+    for answer in (
+        await env.manager.patch({"on": True}, confirm=True, actor="owner"),
+        await env.manager.patch({"model": "jev-1.15.0", "daily_calls": 3}, confirm=False, actor="owner"),
+        await env.manager.put_key(KEY_2, confirm=False, actor="owner"),
+        await env.manager.patch({"on": False}, confirm=False, actor="owner"),
+        await env.manager.remove_key(confirm=False, actor="owner"),
+    ):
+        assert answer.status == 200
+        assert env.judges.primary is first and first.calls == []
+        assert env.judges.judge is first.judge
+    decision = uuid.uuid4()
+    assert env.judges.submit_decision(
+        decision, grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC)
+    )
+    assert first.submitted[-1] == decision
+
+
 # ---- the key and the redaction ------------------------------------------------------------------------------------
 
 
