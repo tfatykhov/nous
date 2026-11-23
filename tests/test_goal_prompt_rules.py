@@ -72,7 +72,8 @@ def test_goal_plan_and_goal_note_are_tools_of_the_follow_up_turn():
     assert "- goal_plan:" in charter.RECORDING and "- goal_note:" in charter.RECORDING
 
 
-# ---- "a plan step is closed by citing one task or one workflow, and each citation closes one step only" ----------
+# ---- "a plan step is closed by citing a completed task or workflow of this session, and each citation closes one step
+# ---- only"
 
 
 async def test_each_citation_closes_one_step_only_and_a_workflow_is_one_citation(runner_env):  # noqa: F811
@@ -161,6 +162,9 @@ def test_the_number_of_task_workers_is_a_setting():
 
 
 # ---- "their results may be read in one follow-up turn or in several" ----------------------------------------------
+# The claim is continuation.claim_root (f099_support.claim) with the settings' debounce and longest wait: it takes
+# every ready result of the root once the newest is past the debounce or the oldest past the longest wait, and none
+# while a turn of the root is deciding.
 
 
 def _waits(env) -> dict[str, float]:

@@ -28,12 +28,12 @@ DEFAULT_GOAL_PROMPT = "\n".join(
         "- In a task: when a plan step is shown, do that one step well. If there is no plan yet, put one in your final "
         "result and say which steps do not depend on each other. End with what you did, what you found and what "
         "should run next.",
-        "- In a follow-up turn: a plan step is closed by citing one task or one workflow, and each citation closes one "
-        "step only. When several open steps do not depend on each other, start one task for each (spawn_task) in this "
-        "same turn. They run side by side as far as the task workers allow and the rest wait in the queue; their "
-        "results may be read in one follow-up turn or in several. Use a workflow (dag_create) when the parts of one "
-        "step can run side by side: it is one piece of evidence and closes one step, so make those parts one step "
-        "first (goal_plan). Use a single task for a step that needs the previous result.",
+        "- In a follow-up turn: a plan step is closed by citing a completed task or workflow of this session, and each "
+        "citation closes one step only. When several open steps do not depend on each other, start one task for each "
+        "(spawn_task) in this same turn. They run side by side as far as the task workers allow and the rest wait in "
+        "the queue; their results may be read in one follow-up turn or in several. Use a workflow (dag_create) when "
+        "the parts of one step can run side by side: it is one piece of evidence and closes one step, so make those "
+        "parts one step first (goal_plan). Use a single task for a step that needs the previous result.",
         "- The Limits of a follow-up turn show what is left of spawned work, follow-up turns and tokens, and whether "
         "more work can be started. Aim to close at least one plan step each session, and leave a note for the next "
         "session (goal_note) before the limits run out.",
