@@ -1,5 +1,6 @@
 """F118 outside judge: a decision the agent resolved is judged later, by harness code, from its record and the tool
-calls that were run (``slot``, ``instructions``, ``model_judge``, ``evidence``, ``store``, ``service``).
+calls that were run (``slot``, ``instructions``, ``model_judge``, ``evidence``, ``store``, ``service``; ``jev_judge`` is
+a second judge that can run beside the built-in one).
 
 This module holds only the process-wide accessor for the running service: ``nous.api.tools`` imports it, and nothing
 else of the package, so a build with the judge off loads no judge code. ``set_current`` is called by ``main.py`` alone.

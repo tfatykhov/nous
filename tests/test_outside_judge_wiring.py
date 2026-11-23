@@ -191,7 +191,7 @@ def _run(scenario: Any, seconds: float = 180.0) -> None:
         raise raised[0]
 
 
-def _boot_settings(agent_id: str, mode: str) -> Settings:
+def _boot_settings(agent_id: str, mode: str, **over: Any) -> Settings:
     return Settings(
         _env_file=None,
         ANTHROPIC_API_KEY="test-key",
@@ -202,6 +202,7 @@ def _boot_settings(agent_id: str, mode: str) -> Settings:
         dag_enabled=False,
         mcp_enabled=False,
         outside_judge_mode=mode,
+        **over,
     )
 
 
@@ -279,3 +280,213 @@ def test_in_shadow_the_tools_are_those_of_the_judge_off_and_the_service_runs_unt
     assert shadow["definitions"] == off["definitions"]
     assert shadow["offered"] == off["offered"]
     assert not [d for d in shadow["definitions"] if "judge" in d["name"]]
+
+
+# ---- the second judge -----------------------------------------------------------------------------------------------
+
+JEV_KEY = "ts-wiring-" + "W3" * 16
+
+
+@pytest.fixture(autouse=True)
+def _no_request_leaves_the_process(monkeypatch):
+    """The judges built here are never given a decision; a request through a real transport fails the test."""
+    import httpx
+
+    async def refuse(self: Any, request: Any) -> Any:
+        raise AssertionError(f"a real request was attempted to {request.url.host}")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+
+
+def _shadow(**over: Any) -> Settings:
+    return Settings(_env_file=None, outside_judge_mode="shadow", outside_judge_model="claude-haiku-5-5", **over)
+
+
+def test_with_no_second_judge_the_running_judge_is_pr_1s_and_nothing_of_the_second_is_imported():
+    loaded = _modules_after(
+        "import asyncio, sys\nimport nous.main as m\nfrom nous import judge\nfrom nous.config import Settings\n"
+        "from nous.judge.service import OutsideJudge\n"
+        "async def run():\n"
+        "    s = Settings(_env_file=None, outside_judge_mode='shadow', outside_judge_model='claude-haiku-5-5')\n"
+        "    service = await m._start_outside_judge(s, database=object(), api_client=object())\n"
+        "    assert type(service) is OutsideJudge and judge.current() is service\n"
+        "    assert set(service.runtime()) == {'queued', 'dropped', 'over_cap', 'worker_alive'}\n"
+        "    await service.close()\n"
+        "    off = Settings(_env_file=None, outside_judge_second='jev', TYPESAFE_API_KEY='k-off')\n"
+        "    assert await m._start_outside_judge(off, database=object(), api_client=object()) is None\n"
+        "asyncio.run(run())\n"
+        "print(' '.join(x for x in sys.modules if x.startswith('nous.judge')))"
+    )
+    assert "nous.judge.jev_judge" not in loaded and "nous.judge.service" in loaded
+
+
+async def test_with_the_second_judge_chosen_but_no_key_one_warning_and_the_first_judge_alone(caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.main"):
+        service = await main._start_outside_judge(
+            _shadow(outside_judge_second="jev"), database=object(), api_client=object()
+        )
+    try:
+        assert type(service) is OutsideJudge and judge_slot.current() is service
+        assert service.runtime()["worker_alive"] is True
+        [line] = [r.getMessage() for r in caplog.records if r.name == "nous.main"]
+        assert "TYPESAFE_API_KEY" in line
+    finally:
+        await service.close()
+        judge_slot.set_current(None)
+
+
+async def test_a_second_judge_that_fails_to_build_leaves_the_first_judge_running(monkeypatch, caplog):
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no second judge today")
+
+    monkeypatch.setattr(main, "_build_second_judge", broken)
+    settings = _shadow(outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY)
+    with caplog.at_level(logging.WARNING, logger="nous.main"):
+        service = await main._start_outside_judge(settings, database=object(), api_client=object())
+    try:
+        assert type(service) is OutsideJudge and judge_slot.current() is service
+        assert service.runtime()["worker_alive"] is True
+        [line] = [r.getMessage() for r in caplog.records if r.name == "nous.main"]
+        assert "RuntimeError" in line and "no second judge today" not in line
+    finally:
+        await service.close()
+        judge_slot.set_current(None)
+
+
+class _FailsToStart(OutsideJudge):
+    def start(self) -> None:
+        raise ValueError("cannot start")
+
+
+async def test_a_second_judge_that_fails_to_start_is_closed_and_the_first_judge_runs(monkeypatch, caplog):
+    built: list[OutsideJudge] = []
+
+    def fails_to_start(settings: Settings, *, database: Any) -> OutsideJudge:
+        built.append(_FailsToStart(database, settings, _NoModelJudge()))
+        return built[-1]
+
+    monkeypatch.setattr(main, "_build_second_judge", fails_to_start)
+    settings = _shadow(outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY)
+    with caplog.at_level(logging.WARNING, logger="nous.main"):
+        service = await main._start_outside_judge(settings, database=object(), api_client=object())
+    try:
+        assert type(service) is OutsideJudge and judge_slot.current() is service
+        assert service.runtime()["worker_alive"] is True
+        [second] = built
+        closed = second.submit_decision(
+            uuid.uuid4(), grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC)
+        )
+        assert closed is False
+        assert any("ValueError" in r.getMessage() for r in caplog.records if r.name == "nous.main")
+    finally:
+        await service.close()
+        judge_slot.set_current(None)
+
+
+async def test_with_a_key_both_judges_run_side_by_side(caplog):
+    from nous.judge.jev_judge import JevJudge
+    from nous.judge.service import JudgeSet
+
+    settings = _shadow(outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY, outside_judge_daily_calls=9)
+    assert settings.typesafe_api_key == JEV_KEY
+    with caplog.at_level(logging.INFO, logger="nous.main"):
+        service = await main._start_outside_judge(settings, database=object(), api_client=object())
+    try:
+        assert isinstance(service, JudgeSet) and judge_slot.current() is service
+        assert isinstance(service.judge, BackgroundModelJudge)
+        assert isinstance(service.second.judge, JevJudge) and service.second.judge.model == "jev-1.14.0"
+        assert service.second.judge._transport is None  # the real transport: never given a decision here
+        assert service.second._timeout == 10.0
+        assert service.second.daily_calls == service.primary.daily_calls == 9
+        runtime = service.runtime()
+        assert runtime["worker_alive"] is True and runtime["second"]["worker_alive"] is True
+        lines = [r.getMessage() for r in caplog.records if r.name == "nous.main"]
+        assert any("second judge" in line and "jev-1.14.0" in line for line in lines)
+        assert JEV_KEY not in "\n".join(lines)
+    finally:
+        await service.close()
+        judge_slot.set_current(None)
+    assert service.runtime()["worker_alive"] is False and service.runtime()["second"]["worker_alive"] is False
+
+
+@pytest.mark.postgres_only
+def test_with_two_judges_the_tools_are_those_of_the_judge_off_and_both_run_until_shutdown(monkeypatch):
+    from nous.api.execution_context import ExecutionContext
+    from nous.judge.service import JudgeSet
+
+    agents = {mode: f"test-f118-boot2-{mode}-{uuid.uuid4().hex[:6]}" for mode in ("off", "two")}
+
+    async def already_migrated(engine: Any) -> None:
+        async with engine.begin() as connection:
+            for agent_id in agents.values():
+                await connection.execute(
+                    text(
+                        "INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}') "
+                        "ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {"id": agent_id},
+                )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    seen: dict[str, Any] = {}
+    boots = {
+        "off": _boot_settings(agents["off"], "off"),
+        "two": _boot_settings(agents["two"], "shadow", outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY),
+    }
+
+    async def scenario() -> None:
+        for mode, settings in boots.items():
+            components = await main.create_components(settings)
+            try:
+                dispatcher, runner = components["dispatcher"], components["runner"]
+                ctx = ExecutionContext(kind="interactive", session_id=f"boot2-{mode}")
+                current = judge_slot.current()
+                seen[mode] = {
+                    "definitions": dispatcher.tool_definitions(),
+                    "offered": runner._offered_tools(
+                        ctx, "task", is_subtask=False, tool_filter=None, refuse_active=False
+                    ),
+                    "current": current,
+                    "component": components.get("outside_judge"),
+                    "runtime": current.runtime() if current is not None else None,
+                }
+            finally:
+                await main.shutdown_components(components)
+            seen[mode]["after"] = judge_slot.current()
+
+    try:
+        _run(scenario)
+    finally:
+
+        async def cleanup() -> None:
+            from nous.storage.database import Database
+
+            database = Database(boots["off"])
+            await database.connect()
+            try:
+                async with database.session() as session:
+                    for agent_id in agents.values():
+                        await session.execute(
+                            text("DELETE FROM heart.rubric_versions WHERE agent_id = :a"), {"a": agent_id}
+                        )
+                        await session.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+                    await session.commit()
+            finally:
+                await database.disconnect()
+
+        asyncio.run(cleanup())
+
+    off, two = seen["off"], seen["two"]
+    assert isinstance(two["current"], JudgeSet) and two["component"] is two["current"]
+    assert two["runtime"]["worker_alive"] is True and two["runtime"]["second"]["worker_alive"] is True
+    assert two["after"] is None
+    # Closed at shutdown: neither judge takes more work.
+    for service in (two["component"].primary, two["component"].second):
+        assert (
+            service.submit_decision(
+                uuid.uuid4(), grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC)
+            )
+            is False
+        )
+    assert two["definitions"] == off["definitions"]
+    assert two["offered"] == off["offered"]

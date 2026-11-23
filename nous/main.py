@@ -700,9 +700,62 @@ def _build_outside_judge(settings: Settings, *, database: Any, api_client: Any) 
     return OutsideJudge(database, settings, judge)
 
 
+def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:
+    """F118: register the second judge (``NOUS_OUTSIDE_JUDGE_SECOND=jev``) and build its own service, with the
+    judge's timeout and its daily limit; the caller starts it. None, with one WARNING, when ``TYPESAFE_API_KEY`` is
+    empty. Its key and model are read by the provider (``jev_judge.make_jev_judge``), its limit here."""
+    from nous.judge.jev_judge import NAME, TIMEOUT_SECONDS, register_jev_judge
+    from nous.judge.service import OutsideJudge
+    from nous.judge.slot import PROVIDERS
+
+    register_jev_judge()
+    judge = PROVIDERS[NAME](settings)
+    if judge is None:
+        logger.warning(
+            "F118: NOUS_OUTSIDE_JUDGE_SECOND is jev but TYPESAFE_API_KEY is empty; the first judge runs alone"
+        )
+        return None
+    return OutsideJudge(
+        database, settings, judge, timeout_seconds=TIMEOUT_SECONDS, daily_calls=settings.outside_judge_daily_calls
+    )
+
+
+async def _start_second_judge(settings: Settings, primary: Any, *, database: Any) -> Any:
+    """F118: with a second judge chosen, build and start it beside the running ``primary`` and return both as one
+    ``JudgeSet``; otherwise ``primary`` itself. Fails open: any error is one WARNING with the exception's class name,
+    a second service already built is closed, and ``primary`` is returned alone."""
+    if settings.outside_judge_second != "jev":
+        return primary
+    second = None
+    try:
+        second = _build_second_judge(settings, database=database)
+        if second is None:
+            return primary
+        second.start()
+        from nous.judge.service import JudgeSet
+
+        both = JudgeSet(primary, second)
+        logger.info(
+            "F118: a second judge runs in shadow beside the first (%s, model %s, at most %d calls a day)",
+            second.judge.name,
+            second.judge.model,
+            settings.outside_judge_daily_calls,
+        )
+        return both
+    except Exception as exc:
+        logger.warning("F118: the second judge did not start (%s); the first judge runs alone", type(exc).__name__)
+        if second is not None:
+            try:
+                await second.close(timeout=0)
+            except Exception as close_exc:
+                logger.debug("F118: closing the second judge that did not start failed (%s)", type(close_exc).__name__)
+        return primary
+
+
 async def _start_outside_judge(settings: Settings, *, database: Any, api_client: Any) -> Any | None:
-    """F118: build the outside judge (``_build_outside_judge``), start its worker, install it with
-    ``nous.judge.set_current`` and log its model; the running service, or None. Fails open: any error is one WARNING
+    """F118: build the outside judge (``_build_outside_judge``), start its worker, add the second judge when one is
+    chosen (``_start_second_judge``, which fails on its own), install the result with ``nous.judge.set_current`` and
+    log its model; the running service, or None. Fails open: any error is one WARNING
     with the exception's class name, a service already built is closed, nothing is installed, and start-up goes on."""
     from nous import judge as judge_slot
 
@@ -712,6 +765,7 @@ async def _start_outside_judge(settings: Settings, *, database: Any, api_client:
         if service is None:
             return None
         service.start()
+        service = await _start_second_judge(settings, service, database=database)
         judge_slot.set_current(service)
         model = getattr(service.judge, "model", None)
         logger.info(

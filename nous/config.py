@@ -1082,9 +1082,15 @@ class Settings(BaseSettings):
     # agent's own grade in nous_system.judge_verdicts and changes nothing else. off: nothing is built. An empty model
     # is NOUS_BACKGROUND_MODEL; any other must be a Claude model. The limit counts each judge's model calls per
     # UTC day (0: none).
+    # With NOUS_OUTSIDE_JUDGE_SECOND=jev (and the mode shadow), a second judge, TypeSafe's Jev model, grades the same
+    # decisions beside the built-in one, each writing its own rows under its own daily limit: the same record is also
+    # sent to api.typesafe.ai, with TYPESAFE_API_KEY, to the model NOUS_OUTSIDE_JUDGE_JEV_MODEL (a versioned id).
     outside_judge_mode: Literal["off", "shadow"] = "off"
     outside_judge_model: str = ""
     outside_judge_daily_calls: int = Field(default=100, ge=0, le=5000)
+    outside_judge_second: Literal["", "jev"] = ""
+    typesafe_api_key: str = Field("", validation_alias="TYPESAFE_API_KEY")
+    outside_judge_jev_model: str = "jev-1.14.0"
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",
@@ -3329,6 +3335,23 @@ class Settings(BaseSettings):
     def _empty_outside_judge_daily_calls(cls, v: object) -> object:
         """F118: an empty value is the default cap."""
         return 100 if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("outside_judge_second", mode="before")
+    @classmethod
+    def _empty_outside_judge_second(cls, v: object) -> object:
+        """F118: an empty value is no second judge. Any value other than jev is refused at start."""
+        return "" if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("outside_judge_jev_model", mode="before")
+    @classmethod
+    def _validate_outside_judge_jev_model(cls, v: object) -> object:
+        """F118: an empty value is the default; anything else must be a versioned id (jev-<major>.<minor>.<patch>),
+        so one judge version is one model."""
+        if isinstance(v, str) and not v.strip():
+            return "jev-1.14.0"
+        if not isinstance(v, str) or not re.fullmatch(r"jev-[0-9]+\.[0-9]+\.[0-9]+", v.strip()):
+            raise ValueError(f"outside_judge_jev_model must be a versioned id (jev-1.14.0) or empty, got {v!r}")
+        return v.strip()
 
     @field_validator("recall_deep_max_items", mode="before")
     @classmethod
