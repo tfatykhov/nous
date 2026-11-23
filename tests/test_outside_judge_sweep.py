@@ -323,9 +323,7 @@ async def test_a_pass_that_cannot_count_todays_calls_queues_nothing_and_does_not
     assert "RuntimeError" in caplog.text
 
 
-async def test_a_pass_that_fails_while_queueing_is_counted_and_the_next_pass_still_runs(
-    db, agent, monkeypatch, caplog
-):
+async def test_a_pass_that_fails_while_queueing_is_counted_and_the_next_pass_still_runs(db, agent, monkeypatch, caplog):
     await _decision(db, agent, "a2ui")
     real = service_module._sweep_rank
     ranked = {"n": 0}
