@@ -562,3 +562,91 @@ def test_importing_the_module_registers_nothing():
         check=True,
     )
     assert result.stdout.strip() == "[]"
+
+
+# ---- the card's check (PR 3) ---------------------------------------------------------------------------------------
+
+
+async def test_the_check_sends_the_fixed_record_to_the_same_address_with_the_key_in_the_header_only():
+    provider = _replying({"model": MODEL, "answers": {"check": {"choice": "yes"}}})
+    assert await _judge(provider).probe(5.0) == "ok"
+    [request] = provider.requests
+    assert (request.method, str(request.url)) == ("POST", jev_judge.URL)
+    assert request.headers["authorization"] == f"Bearer {KEY}"
+    assert request.headers["accept-encoding"] == "identity"
+    assert json.loads(request.content) == jev_judge.check_body(MODEL)
+    assert jev_judge.check_body(MODEL) == {
+        "model": MODEL,
+        "state": {"note": "connection check"},
+        "questions": {
+            "check": {
+                "type": "choice",
+                "instructions": "Is the state a connection check?",
+                "criteria": {"yes": "The state says it is a connection check.", "no": "The state does not say so."},
+            }
+        },
+    }
+    assert KEY not in request.content.decode()
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "word"),
+    [
+        (200, {"model": MODEL}, "ok"),
+        (200, {"model": "jev-9.9.9"}, "refused"),
+        (200, ["not", "an", "object"], "refused"),
+        (200, b"not json", "refused"),
+        (400, {}, "refused"),
+        (401, {}, "refused"),
+        (403, {}, "refused"),
+        (404, {}, "refused"),
+        (422, {}, "refused"),
+        (301, {}, "refused"),
+        (429, {}, "unreachable"),
+        (500, {}, "unreachable"),
+        (502, {}, "unreachable"),
+        (503, {}, "unreachable"),
+    ],
+)
+async def test_each_answer_of_the_check_is_one_word(status, body, word):
+    assert await _judge(_replying(body, status=status)).probe(5.0) == word
+
+
+async def test_a_check_answer_over_the_size_bound_is_refused():
+    assert await _judge(_replying(b"x" * (jev_judge.BODY_MAX_BYTES + 1))).probe(5.0) == "refused"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("no route"), httpx.ReadTimeout("slow"), RuntimeError("broken"), OSError("reset")],
+)
+async def test_a_check_that_fails_to_connect_or_raises_is_unreachable(failure):
+    def respond(request: httpx.Request) -> Any:
+        raise failure
+
+    assert await _judge(Provider(respond)).probe(5.0) == "unreachable"
+
+
+async def test_a_check_with_no_answer_in_time_is_unreachable():
+    async def hang(request: httpx.Request) -> Any:
+        await asyncio.sleep(30)
+
+    assert await _judge(Provider(hang)).probe(0.05) == "unreachable"
+
+
+async def test_the_check_logs_no_key_no_body_and_no_exception_text(caplog):
+    caplog.set_level(logging.DEBUG)
+
+    def echo_key(request: httpx.Request) -> Any:
+        raise RuntimeError(f"failed with {request.headers['authorization']}")
+
+    results = [
+        await _judge(Provider(echo_key)).probe(5.0),
+        await _judge(_replying({"model": MODEL, "echo": KEY})).probe(5.0),
+        await _judge(_replying({"error": KEY}, status=500)).probe(5.0),
+        await _judge(_replying({"error": KEY}, status=401)).probe(5.0),
+    ]
+    assert results == ["unreachable", "ok", "unreachable", "refused"]
+    for record in caplog.records:
+        logged = record.getMessage() + repr(record.args) + repr(record.exc_info)
+        assert KEY not in logged and "failed with" not in logged
