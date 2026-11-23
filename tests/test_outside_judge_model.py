@@ -100,7 +100,7 @@ class _StubJudge:
     name = "stub"
     version = "stub-1"
 
-    async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput:
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
         return JudgeOutput(status="ok", verdict="cannot_tell")
 
 
@@ -316,6 +316,13 @@ async def test_a_model_that_rejects_a_forced_tool_choice_counts_two_calls():
 
     out = await _judge(Rejects(usage={"input_tokens": 10, "output_tokens": 5})).grade(_record(), timeout=5)
     assert (out.status, out.calls, out.tokens_in, out.tokens_out) == ("ok", 2, 10, 5)
+
+    # With room for one request only, the request asking for the tool in the prompt is not sent.
+    nous.handlers._REJECTS_FORCED_TOOL_CHOICE.clear()
+    client = Rejects(usage={"input_tokens": 10, "output_tokens": 5})
+    out = await _judge(client).grade(_record(), timeout=5, max_calls=1)
+    assert (out.status, out.verdict, out.calls) == ("error", "cannot_tell", 1)
+    assert len(client.calls) == 1 and "tool_choice" in client.calls[0][0]
 
 
 async def test_the_record_is_rendered_off_the_event_loop(monkeypatch):

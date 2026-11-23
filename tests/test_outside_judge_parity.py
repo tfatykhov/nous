@@ -108,7 +108,7 @@ class StubJudge:
         self.behaviour = behaviour
         self.calls = 0
 
-    async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput:
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
         self.calls += 1
         if self.behaviour == "raise":
             raise RuntimeError("broken judge")

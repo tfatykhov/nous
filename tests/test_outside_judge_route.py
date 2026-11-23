@@ -338,7 +338,7 @@ async def test_the_route_names_the_running_judge_and_its_queue(tmp_path, db, age
     class Stub:
         name, version, model = "stub", "stub-9", "claude-stub"
 
-        async def grade(self, record, *, timeout):  # pragma: no cover - never called here
+        async def grade(self, record, *, timeout, max_calls=None):  # pragma: no cover - never called here
             raise AssertionError
 
     settings = Settings(_env_file=None, agent_id=agent, outside_judge_mode="shadow", outside_judge_daily_calls=7)

@@ -14,9 +14,11 @@ The rendered record keeps what the agent wrote under ``written_by_author`` and w
 ``build_decision_evidence`` reads a decision's record (read-only, every query filtered on the agent): the decision's
 own fields, then the session that recorded it (its ``session_id``, else the one ``record_decision`` call whose reply
 names its id, made up to two minutes before it), then that session's tool calls, execution ledger rows and spawned
-tasks from the decision's creation to the resolve. The calls that only record, list or resolve decisions are left out
-and counted. Without a session, or without any other row, there is nothing to judge, and neither is there when the
-record cannot be rendered.
+tasks from the decision's creation to the resolve, as they stood at the resolve: what finished later is shown as not
+finished, without its result, so the record is the same however long the judging waits. Rows past each query's
+limit are counted as left out. The calls that only record, list or resolve decisions are left out and counted.
+Without a session, or without any other row, there is nothing to judge, and neither is there when the record cannot
+be rendered.
 """
 
 from __future__ import annotations
@@ -194,13 +196,16 @@ def assemble(
     subject: Mapping[str, Any],
     claim: Claim | None,
     items: Iterable[Mapping[str, Any]],
+    *,
+    not_read: int = 0,
 ) -> JudgeInput:
     """The bounded record. ``items`` are raw evidence items, each with ``source`` (``tool_call``, ``ledger`` or
-    ``spawned_task``), ``at`` (a number that orders them in time) and its fields; any order. Every string is kept as
-    the second redaction leaves it where it sits; one that pass would break is replaced by ``LEFT_OUT`` and the record
-    is marked truncated. The kept items are returned in the order they ran. When the whole record still does not
-    render, the last-kept item is dropped and it is tried again; ``RenderError`` is raised only when the record
-    without any evidence does not render. CPU-bound: callers in the event loop run it in a thread."""
+    ``spawned_task``), ``at`` (a number that orders them in time) and its fields; any order. ``not_read`` counts items
+    the caller could not read (past a query's limit): they are counted as dropped and mark the record truncated. Every
+    string is kept as the second redaction leaves it where it sits; one that pass would break is replaced by
+    ``LEFT_OUT`` and the record is marked truncated. The kept items are returned in the order they ran. When the whole
+    record still does not render, the last-kept item is dropped and it is tried again; ``RenderError`` is raised only
+    when the record without any evidence does not render. CPU-bound: callers in the event loop run it in a thread."""
     bounded_subject, left_out = _settled({key: _bounded(value, SUBJECT_CAP) for key, value in subject.items()})
     bounded_claim = None
     if claim is not None:
@@ -225,7 +230,7 @@ def assemble(
             kept.append((at, item))
             used += size
     while True:
-        dropped = len(rendered) - len(kept)
+        dropped = len(rendered) - len(kept) + not_read
         ordered = tuple(item for _at, item in sorted(kept, key=lambda pair: pair[0]))
         cut = any(
             CUT_MARKER in leaf for leaf in _strings([bounded_subject, bounded_claim and bounded_claim.note, ordered])
@@ -246,6 +251,7 @@ def assemble(
 
 # The calls that only record, list or resolve decisions: they show nothing about an outcome.
 BOOKKEEPING_TOOLS = frozenset({"record_decision", "resolve_decisions", "list_decisions"})
+_BOOKKEEPING_SQL = "(" + ", ".join(f"'{name}'" for name in sorted(BOOKKEEPING_TOOLS)) + ")"
 MAX_CALLS = 200
 MAX_LEDGER_ROWS = 50
 MAX_SUBTASKS = 5
@@ -253,6 +259,8 @@ MAX_SUBTASKS = 5
 RECORD_CALL_WINDOW = timedelta(minutes=2)
 # Room for the clocks of the process (a call's start) and the database (the decision's creation) to differ.
 CLOCK_SLACK = timedelta(seconds=10)
+# The status of a ledger row or a task that had not finished when the claim was fixed (its later result is not read).
+NOT_FINISHED = "not finished when the claim was made"
 
 _DECISION = text(
     "SELECT description, context, pattern, category, stakes, confidence, confidence_raw, session_id, created_at "
@@ -264,30 +272,50 @@ _RECORD_CALLS = text(
     "AND started_at >= :since AND started_at <= :until AND result_preview LIKE :mark "
     "LIMIT 2"
 )
+# Every source is read as of the claim (``:until``): a call that had ended by then (its row is written when it ends),
+# a ledger row or a task that had started by then. What finished later is read without its result.
+_CALL_WINDOW = (
+    "FROM nous_system.tool_call_log WHERE agent_id = :agent AND session_id = :session AND started_at >= :since "
+    "AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until"
+)
+_CALL_COUNTS = text(
+    f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_BOOKKEEPING_SQL}), "
+    f"count(*) FILTER (WHERE tool_name IN {_BOOKKEEPING_SQL}) {_CALL_WINDOW}"
+)
 _CALLS = text(
     "SELECT tool_name, outcome, is_error, input_text, result_preview, result_text, error_text, started_at "
-    "FROM nous_system.tool_call_log "
-    "WHERE agent_id = :agent AND session_id = :session AND started_at >= :since AND started_at <= :until "
-    f"ORDER BY started_at DESC LIMIT {MAX_CALLS}"
+    f"{_CALL_WINDOW} AND tool_name NOT IN {_BOOKKEEPING_SQL} ORDER BY started_at DESC LIMIT :limit"
+)
+_LEDGER_WINDOW = (
+    "FROM nous_system.execution_ledger WHERE agent_id = :agent AND session_id = :session AND created_at >= :since "
+    "AND created_at <= :until"
+)
+_LEDGER_COUNTS = text(
+    f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_BOOKKEEPING_SQL}), "
+    f"count(*) FILTER (WHERE tool_name IN {_BOOKKEEPING_SQL}) {_LEDGER_WINDOW}"
 )
 _LEDGER = text(
-    "SELECT tool_name, status, result_summary, created_at FROM nous_system.execution_ledger "
-    "WHERE agent_id = :agent AND session_id = :session AND created_at >= :since AND created_at <= :until "
-    f"ORDER BY created_at DESC LIMIT {MAX_LEDGER_ROWS}"
+    "SELECT tool_name, status, result_summary, created_at, completed_at "
+    f"{_LEDGER_WINDOW} AND tool_name NOT IN {_BOOKKEEPING_SQL} ORDER BY created_at DESC LIMIT :limit"
 )
+_SUBTASK_WINDOW = (
+    "FROM heart.subtasks WHERE agent_id = :agent AND parent_session_id = :session AND created_at >= :since "
+    "AND created_at <= :until"
+)
+_SUBTASK_COUNT = text(f"SELECT count(*) {_SUBTASK_WINDOW}")
 _SUBTASKS = text(
-    "SELECT COALESCE(final_outcome, status), report_jsonb ->> 'summary', metadata -> 'finish_check' ->> 'verdict', "
-    "created_at FROM heart.subtasks "
-    "WHERE agent_id = :agent AND parent_session_id = :session AND created_at >= :since AND created_at <= :until "
-    f"ORDER BY created_at DESC LIMIT {MAX_SUBTASKS}"
+    "SELECT COALESCE(final_outcome, status) AS status, report_jsonb ->> 'summary' AS summary, "
+    "metadata -> 'finish_check' ->> 'verdict' AS finish_check, created_at, completed_at "
+    f"{_SUBTASK_WINDOW} ORDER BY created_at DESC LIMIT :limit"
 )
 
 
 @dataclass(frozen=True)
 class DecisionEvidence:
     """What was found for one decision: the bounded record (None: nothing to judge, ``skip_label`` says why) and the
-    counts kept on the verdict row (``link``, ``tool_calls``, ``ledger_rows``, ``subtasks``, ``bookkeeping``,
-    ``dropped``, ``chars``, ``truncated``)."""
+    counts kept on the verdict row: ``link``; ``tool_calls``, ``ledger_rows`` and ``subtasks`` in the claim's window;
+    ``bookkeeping``; ``over_limit``, the rows past the queries' limits (never read); ``dropped``, every item left out
+    (those and the ones the size cap dropped); ``chars``; ``truncated``."""
 
     record: JudgeInput | None
     counts: dict[str, Any]
@@ -295,10 +323,10 @@ class DecisionEvidence:
 
 
 def _assemble_and_measure(
-    decision_id: UUID, subject: dict[str, Any], claim: Claim, items: list[dict[str, Any]]
+    decision_id: UUID, subject: dict[str, Any], claim: Claim, items: list[dict[str, Any]], not_read: int
 ) -> tuple[JudgeInput, int]:
     """The record and the length of its rendered text (run in a thread)."""
-    record = assemble("decision", decision_id, subject, claim, items)
+    record = assemble("decision", decision_id, subject, claim, items, not_read=not_read)
     return record, len(render_record(record))
 
 
@@ -314,6 +342,10 @@ async def _linked_session(session: AsyncSession, agent_id: str, decision_id: UUI
     return "none", None
 
 
+def _finished_by(completed_at: datetime | None, claim_at: datetime) -> bool:
+    return completed_at is not None and completed_at <= claim_at
+
+
 async def build_decision_evidence(
     session: AsyncSession,
     agent_id: str,
@@ -321,9 +353,12 @@ async def build_decision_evidence(
     claim: Claim,
     resolved_at: datetime,
 ) -> DecisionEvidence | None:
-    """The record of one decision as of ``resolved_at``, or None when the decision does not exist for this agent.
-    Read-only. The record is assembled in a thread, off the event loop; one that cannot be rendered gives no record
-    and the skip label ``NOT_RENDERED``."""
+    """The record of one decision as it stood at ``resolved_at`` (when the claim was fixed), or None when the decision
+    does not exist for this agent. Read-only, and the same whenever it is read: a call counts once it had ended by
+    then, a ledger row or a task once it had started, and one that finished later is shown as ``NOT_FINISHED``
+    without its result. Each source reads its newest rows up to its limit; the rest are counted as left out. The record
+    is assembled in a thread, off the event loop; one that cannot be rendered gives no record and the skip label
+    ``NOT_RENDERED``."""
     row = (await session.execute(_DECISION, {"agent": agent_id, "id": decision_id})).one_or_none()
     if row is None:
         return None
@@ -333,6 +368,7 @@ async def build_decision_evidence(
         "ledger_rows": 0,
         "subtasks": 0,
         "bookkeeping": 0,
+        "over_limit": 0,
         "dropped": 0,
         "chars": 0,
         "truncated": False,
@@ -342,12 +378,19 @@ async def build_decision_evidence(
         return DecisionEvidence(None, counts)
 
     window = {"agent": agent_id, "session": linked, "since": row.created_at, "until": resolved_at}
+    calls, calls_bookkeeping = (await session.execute(_CALL_COUNTS, window)).one()
+    ledger_rows, ledger_bookkeeping = (await session.execute(_LEDGER_COUNTS, window)).one()
+    subtasks = (await session.execute(_SUBTASK_COUNT, window)).scalar_one()
+    counts.update(
+        tool_calls=calls,
+        ledger_rows=ledger_rows,
+        subtasks=subtasks,
+        bookkeeping=calls_bookkeeping + ledger_bookkeeping,
+        over_limit=max(0, calls - MAX_CALLS) + max(0, ledger_rows - MAX_LEDGER_ROWS) + max(0, subtasks - MAX_SUBTASKS),
+    )
+
     items: list[dict[str, Any]] = []
-    for call in (await session.execute(_CALLS, window)).all():
-        if call.tool_name in BOOKKEEPING_TOOLS:
-            counts["bookkeeping"] += 1
-            continue
-        counts["tool_calls"] += 1
+    for call in (await session.execute(_CALLS, {**window, "limit": MAX_CALLS})).all():
         items.append(
             {
                 "source": "tool_call",
@@ -359,30 +402,27 @@ async def build_decision_evidence(
                 "at": call.started_at.timestamp(),
             }
         )
-    for entry in (await session.execute(_LEDGER, window)).all():
-        if entry.tool_name in BOOKKEEPING_TOOLS:
-            counts["bookkeeping"] += 1
-            continue
-        counts["ledger_rows"] += 1
+    for entry in (await session.execute(_LEDGER, {**window, "limit": MAX_LEDGER_ROWS})).all():
+        finished = _finished_by(entry.completed_at, resolved_at)
         items.append(
             {
                 "source": "ledger",
                 "tool": entry.tool_name,
-                "status": entry.status,
-                "is_error": entry.status == "error",
-                "result": entry.result_summary,
+                "status": entry.status if finished else NOT_FINISHED,
+                "is_error": finished and entry.status == "error",
+                "result": entry.result_summary if finished else None,
                 "at": entry.created_at.timestamp(),
             }
         )
-    for status, summary, finish_check, created_at in (await session.execute(_SUBTASKS, window)).all():
-        counts["subtasks"] += 1
+    for task in (await session.execute(_SUBTASKS, {**window, "limit": MAX_SUBTASKS})).all():
+        finished = _finished_by(task.completed_at, resolved_at)
         items.append(
             {
                 "source": "spawned_task",
-                "status": status,
-                "finish_check": finish_check,
-                "report": summary,
-                "at": created_at.timestamp(),
+                "status": task.status if finished else NOT_FINISHED,
+                "finish_check": task.finish_check if finished else None,
+                "report": task.summary if finished else None,
+                "at": task.created_at.timestamp(),
             }
         )
     if not items:
@@ -397,7 +437,9 @@ async def build_decision_evidence(
         "stated_confidence": row.confidence_raw if row.confidence_raw is not None else row.confidence,
     }
     try:
-        record, chars = await asyncio.to_thread(_assemble_and_measure, decision_id, subject, claim, items)
+        record, chars = await asyncio.to_thread(
+            _assemble_and_measure, decision_id, subject, claim, items, counts["over_limit"]
+        )
     except RenderError:
         return DecisionEvidence(None, counts, NOT_RENDERED)
     counts["dropped"] = record.evidence_dropped

@@ -221,3 +221,62 @@ async def test_a_usage_value_that_is_not_a_number_is_not_counted():
     client = _Client(usage={"input_tokens": "many", "output_tokens": True})
     assert await _structured(client, usage_out=usage) == {"answer": "yes"}
     assert usage == {"requests": 1}
+
+
+# ---- a bound on the requests one call may send (max_requests) ---------------------------------------------------
+
+
+async def test_without_a_bound_a_model_that_rejects_forcing_gets_both_requests():
+    client = _Client(rejects_forcing=True)
+    assert await call_with_tool_choice(client, _forced_payload(), max_requests=None) == {"answer": "yes"}
+    assert len(client.calls) == 2
+
+
+async def test_a_bound_of_one_sends_no_fallback_request():
+    from nous.handlers import RequestBoundReached
+
+    usage: dict[str, int] = {}
+    client = _Client(rejects_forcing=True)
+    with pytest.raises(RequestBoundReached):
+        await call_with_tool_choice(client, _forced_payload(), usage_out=usage, max_requests=1)
+    assert len(client.calls) == 1 and usage == {"requests": 1}
+    # The model is remembered as rejecting forcing: the next call asks in the prompt, one request within a bound of 1.
+    client.calls.clear()
+    assert await call_with_tool_choice(client, _forced_payload(), max_requests=1) == {"answer": "yes"}
+    assert len(client.calls) == 1 and "tool_choice" not in client.calls[0][0]
+
+
+async def test_the_structured_helper_passes_the_bound_on_and_answers_none_when_it_is_reached():
+    usage: dict[str, int] = {}
+    client = _Client(rejects_forcing=True)
+    assert await _structured(client, usage_out=usage, max_requests=1) is None
+    assert len(client.calls) == 1 and usage == {"requests": 1}
+
+
+async def test_a_bound_of_two_allows_the_fallback_request():
+    client = _Client(rejects_forcing=True)
+    assert await _structured(client, max_requests=2) == {"answer": "yes"}
+    assert len(client.calls) == 2
+
+
+async def test_a_bound_of_zero_sends_nothing():
+    from nous.handlers import RequestBoundReached
+
+    client = _Client()
+    with pytest.raises(RequestBoundReached):
+        await call_with_tool_choice(client, _forced_payload(), max_requests=0)
+    assert client.calls == []
+
+
+async def test_without_a_bound_the_structured_helper_calls_the_tool_choice_helper_without_the_keyword(monkeypatch):
+    seen: list[dict[str, Any]] = []
+
+    async def today_signature(
+        client: Any, payload: dict[str, Any], *, purpose: str = "unlabelled", usage_out=None
+    ) -> dict[str, Any]:
+        seen.append({"purpose": purpose, "usage_out": usage_out})
+        return {"answer": "today"}
+
+    monkeypatch.setattr(nous.handlers, "call_with_tool_choice", today_signature)
+    assert await _structured(_Client(), usage_out={}) == {"answer": "today"}
+    assert seen == [{"purpose": "critic", "usage_out": {}}]

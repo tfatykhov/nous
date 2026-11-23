@@ -2,8 +2,9 @@
 
 Written by the outside judge's worker only, one row per subject, judge name and judge version. A second write for a
 subject is a no-op, except over an ``error`` or ``timeout`` row with fewer than ``MAX_ATTEMPTS`` attempts: that row is
-replaced by the new attempt, its calls added and its attempts counted. Read by the worker (whether a subject is
-judged, today's call count) and by ``GET /dashboard/outside-judge``. Every statement is filtered on the agent.
+replaced by the new attempt, its calls and known token counts added and its attempts counted. Read by the worker
+(whether a subject is judged, today's call count) and by ``GET /dashboard/outside-judge``. Every statement is filtered
+on the agent.
 """
 
 from __future__ import annotations
@@ -20,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 MAX_ATTEMPTS = 3
 # The statuses of a row that a later attempt replaces.
 RETRIED_STATUSES = ("error", "timeout")
+# A retried row's tokens: the sum of the attempts' known counts. An attempt whose count is unknown adds nothing, and
+# the sum is unknown (NULL) only while no attempt's count is known.
+_TOKEN_SUM = (
+    "CASE WHEN v.{column} IS NULL AND EXCLUDED.{column} IS NULL THEN NULL "
+    "ELSE COALESCE(v.{column}, 0) + COALESCE(EXCLUDED.{column}, 0) END"
+)
 
 _INSERT = text(
     "INSERT INTO nous_system.judge_verdicts AS v (agent_id, subject_kind, subject_id, judge_name, judge_version, "
@@ -31,7 +38,8 @@ _INSERT = text(
     "status = EXCLUDED.status, verdict = EXCLUDED.verdict, confidence = EXCLUDED.confidence, labels = EXCLUDED.labels, "
     "reason = EXCLUDED.reason, against_grader = EXCLUDED.against_grader, against_grade = EXCLUDED.against_grade, "
     "claim_at = EXCLUDED.claim_at, "
-    "evidence = EXCLUDED.evidence, tokens_in = EXCLUDED.tokens_in, tokens_out = EXCLUDED.tokens_out, "
+    "evidence = EXCLUDED.evidence, "
+    f"tokens_in = {_TOKEN_SUM.format(column='tokens_in')}, tokens_out = {_TOKEN_SUM.format(column='tokens_out')}, "
     "latency_ms = EXCLUDED.latency_ms, calls = v.calls + EXCLUDED.calls, attempts = v.attempts + 1, "
     "judged_at = now() "
     f"WHERE v.status IN {RETRIED_STATUSES!r} AND v.attempts < {MAX_ATTEMPTS}"

@@ -127,7 +127,9 @@ async def test_a_build_that_raises_leaves_the_process_without_a_judge(monkeypatc
 class _NoModelJudge:
     name, version = "no_model", "nm-1"
 
-    async def grade(self, record: Any, *, timeout: float) -> Any:  # pragma: no cover - never called here
+    async def grade(  # pragma: no cover - never called here
+        self, record: Any, *, timeout: float, max_calls: int | None = None
+    ) -> Any:
         raise AssertionError
 
 

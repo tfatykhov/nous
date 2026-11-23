@@ -41,16 +41,27 @@ class StubJudge:
         self.version = version
         self.verdict = verdict
         self.calls = calls
+        self.tokens: tuple[int | None, int | None] = (1200, 35)
         self.records: list[JudgeInput] = []
         self.called_at: list[float] = []
+        self.max_calls: list[int | None] = []
 
-    async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput:
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
         self.records.append(record)
         self.called_at.append(asyncio.get_running_loop().time())
+        self.max_calls.append(max_calls)
         if self.behaviour == "raise":
             raise RuntimeError("the stub judge broke")
         if self.behaviour == "hang":
             await asyncio.sleep(3600)
+        if self.behaviour == "error":
+            return JudgeOutput(
+                status="error",
+                verdict="cannot_tell",
+                tokens_in=self.tokens[0],
+                tokens_out=self.tokens[1],
+                calls=self.calls,
+            )
         return JudgeOutput(
             status="ok",
             verdict=self.verdict,
@@ -58,8 +69,8 @@ class StubJudge:
             labels=("evidence_contradicts",),
             reason="The job did not run after the change.",
             model="stub-model",
-            tokens_in=1200,
-            tokens_out=35,
+            tokens_in=self.tokens[0],
+            tokens_out=self.tokens[1],
             calls=self.calls,
         )
 
@@ -537,9 +548,9 @@ async def test_close_cancels_a_call_in_flight_and_writes_nothing(db, agent):
 
 async def test_close_waits_for_a_call_that_ends_within_its_time(db, agent):
     class Slow(StubJudge):
-        async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput:
+        async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
             await asyncio.sleep(0.2)
-            return await super().grade(record, timeout=timeout)
+            return await super().grade(record, timeout=timeout, max_calls=max_calls)
 
     stub = Slow()
     service = OutsideJudge(db, _settings(agent), stub, **FAST)
@@ -696,3 +707,100 @@ def test_the_module_constants():
         60.0,
         50,
     )
+
+
+# ---- tokens across attempts ---------------------------------------------------------------------------------------
+
+
+async def _two_attempts(db, agent: str, first: StubJudge, second: StubJudge) -> dict:
+    decision_id = await _decision(db, agent)
+    for judge in (first, second):
+        service = OutsideJudge(db, _settings(agent), judge, **FAST)
+        service.start()
+        _submit(service, decision_id)
+        await _drain(service)
+        await service.close()
+    [row] = await _rows(db, agent)
+    return row
+
+
+async def test_a_retried_row_adds_the_tokens_of_every_attempt(db, agent):
+    failed = StubJudge("error", calls=1)
+    failed.tokens = (900, 12)
+    row = await _two_attempts(db, agent, failed, StubJudge(calls=1))
+    assert (row["status"], row["attempts"], row["calls"]) == ("ok", 2, 2)
+    assert (row["tokens_in"], row["tokens_out"]) == (900 + 1200, 12 + 35)
+
+
+async def test_an_attempt_whose_tokens_are_unknown_adds_nothing_to_the_known_ones(db, agent):
+    failed = StubJudge("error", calls=1)
+    failed.tokens = (None, None)
+    row = await _two_attempts(db, agent, failed, StubJudge(calls=1))
+    assert (row["tokens_in"], row["tokens_out"]) == (1200, 35)
+
+
+async def test_tokens_stay_unknown_while_no_attempt_knows_them(db, agent):
+    first, second = StubJudge("error", calls=1), StubJudge("error", calls=1)
+    first.tokens = second.tokens = (None, None)
+    row = await _two_attempts(db, agent, first, second)
+    assert (row["status"], row["attempts"]) == ("error", 2)
+    assert (row["tokens_in"], row["tokens_out"]) == (None, None)
+
+
+# ---- the requests left in the day's limit --------------------------------------------------------------------------
+
+
+async def test_the_judge_is_given_the_requests_left_today(db, agent):
+    await _verdict_rows(db, agent, [("stub", "ok", 1, datetime.now(UTC))])
+    stub = StubJudge()
+    service = OutsideJudge(db, _settings(agent, outside_judge_daily_calls=3), stub, **FAST)
+    service.start()
+    _submit(service, await _decision(db, agent))
+    await _drain(service)
+    await service.close()
+    assert stub.max_calls == [2]
+
+
+async def test_with_one_request_left_a_model_that_rejects_forcing_gets_exactly_one(db, agent, monkeypatch):
+    from types import SimpleNamespace
+
+    import nous.handlers
+    from nous.judge.model_judge import BackgroundModelJudge
+
+    monkeypatch.setattr(nous.handlers, "_REJECTS_FORCED_TOOL_CHOICE", set())
+
+    class RejectsForcing:
+        supports_call_context = True
+
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        async def call(self, payload, call_context=None):
+            self.payloads.append(payload)
+            if "tool_choice" in payload:
+                raise RuntimeError(
+                    'Anthropic API error (400): invalid_request_error - tool_choice: type "tool" and "any" are not '
+                    "supported for this model."
+                )
+            block = {
+                "type": "tool_use",
+                "id": "t",
+                "name": payload["tools"][0]["name"],
+                "input": {"verdict": "success"},
+            }
+            return SimpleNamespace(content=[block], stop_reason="tool_use")
+
+    client = RejectsForcing()
+    service = OutsideJudge(
+        db, _settings(agent, outside_judge_daily_calls=1), BackgroundModelJudge(client, "claude-rejects"), **FAST
+    )
+    service.start()
+    _submit(service, await _decision(db, agent))
+    await _drain(service)
+    _submit(service, await _decision(db, agent))  # the day's one request is spent
+    await _drain(service)
+    await service.close()
+    assert len(client.payloads) == 1  # the forced request only: no fallback past the limit
+    [row] = await _rows(db, agent)
+    assert (row["status"], row["calls"], row["attempts"]) == ("error", 1, 1)  # tried again on a later resolve
+    assert service.runtime()["over_cap"] == 1

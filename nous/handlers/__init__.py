@@ -127,6 +127,10 @@ class UnusableToolReply(Exception):
     """A reply that is no whole call of the requested tool: cut off, refused, without the call or a required key."""
 
 
+class RequestBoundReached(Exception):
+    """The call would send more requests than its ``max_requests`` allows; that request is not sent."""
+
+
 def _tool_input(response: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """The input of the reply's call of ``payload``'s one tool, if the reply is a whole answer."""
     (tool,) = payload["tools"]
@@ -181,6 +185,7 @@ async def call_with_tool_choice(
     *,
     purpose: str = "unlabelled",
     usage_out: dict[str, int] | None = None,
+    max_requests: int | None = None,
 ) -> dict[str, Any]:
     """Send a request that forces its one tool, or asks for it where the model rejects forcing; return the call's input.
 
@@ -193,11 +198,17 @@ async def call_with_tool_choice(
     Each request is labelled ``purpose``; the requests of one call share a ``group_id``,
     and the one asking for the tool in the prompt is marked ``is_fallback``. With a dict as
     ``usage_out``, ``requests`` counts each request sent and each reply's token counts
-    (``USAGE_KEYS``) are added into it, before the reply is checked.
+    (``USAGE_KEYS``) are added into it, before the reply is checked. With ``max_requests``,
+    a request past that many is not sent: RequestBoundReached is raised instead (None:
+    no bound, the request asking for the tool follows a rejected forced one).
     """
     model = payload["model"]
     forced = CallContext(purpose=purpose, group_id=uuid.uuid4())
+    sent = 0
     if model not in _REJECTS_FORCED_TOOL_CHOICE:
+        if max_requests is not None and sent >= max_requests:
+            raise RequestBoundReached(f"max_requests={max_requests}")
+        sent += 1
         try:
             _count_request(usage_out)
             response = await client.call(payload, **context_kwargs(client, forced))
@@ -210,6 +221,8 @@ async def call_with_tool_choice(
             _add_usage(usage_out, response)
             return _tool_input(response, payload)
     asked = dataclasses.replace(forced, is_fallback=True)
+    if max_requests is not None and sent >= max_requests:
+        raise RequestBoundReached(f"max_requests={max_requests}")
     _count_request(usage_out)
     response = await client.call(_asking_for_the_tool(payload), **context_kwargs(client, asked))
     _add_usage(usage_out, response)
@@ -228,6 +241,7 @@ async def call_background_llm_structured(
     *,
     purpose: str = "unlabelled",
     usage_out: dict[str, int] | None = None,
+    max_requests: int | None = None,
 ) -> dict[str, Any] | None:
     """Call LLM using tool_use trick for structured JSON output.
 
@@ -236,7 +250,8 @@ async def call_background_llm_structured(
     a forced tool_choice, call_with_tool_choice asks for the tool in the system
     prompt instead. ``purpose`` (one of ``PURPOSES``) labels the call. With a dict
     as ``usage_out``, the requests sent and the token counts of every reply are added
-    into it (passed on to call_with_tool_choice only then).
+    into it, and ``max_requests`` bounds the requests sent (each passed on to
+    call_with_tool_choice only when given).
 
     Returns the structured dict, or None on failure: an error, or a reply cut off
     at max_tokens, refused, without a tool call or without a required key.
@@ -278,9 +293,11 @@ async def call_background_llm_structured(
         "tool_choice": {"type": "tool", "name": tool_name},
     }
 
-    usage_kwargs: dict[str, Any] = {} if usage_out is None else {"usage_out": usage_out}
+    passed_on: dict[str, Any] = {} if usage_out is None else {"usage_out": usage_out}
+    if max_requests is not None:
+        passed_on["max_requests"] = max_requests
     try:
-        return await call_with_tool_choice(client, payload, purpose=purpose, **usage_kwargs)
+        return await call_with_tool_choice(client, payload, purpose=purpose, **passed_on)
     except UnusableToolReply as e:
         logger.warning("Structured LLM call %s (model=%s) not used: %s", tool_name, model, e)
         return None

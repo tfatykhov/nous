@@ -71,12 +71,13 @@ def failed(status: str, model: str | None = None, **counts: int | None) -> Judge
 
 @runtime_checkable
 class Judge(Protocol):
-    """What the service calls. ``grade`` never raises and returns within about ``timeout`` seconds."""
+    """What the service calls. ``grade`` never raises, returns within about ``timeout`` seconds and sends at most
+    ``max_calls`` model requests (None: no bound)."""
 
     name: str
     version: str
 
-    async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput: ...
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput: ...
 
 
 PROVIDERS: dict[str, Callable[[Settings], Judge | None]] = {}

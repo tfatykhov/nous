@@ -82,6 +82,7 @@ def _call(
     is_error: bool = False,
     index: int = 0,
     tool_input: dict | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     recorder.record(
         ToolCallRecord(
@@ -96,41 +97,78 @@ def _call(
             result_preview="" if is_error else result,
             is_error=is_error,
             error_text=result if is_error else None,
+            duration_ms=duration_ms,
             started_at=at,
         )
     )
 
 
-async def _ledger(db, agent: str, session_id: str, tool: str, at: datetime, status: str = "success") -> None:
+_ONE_SECOND = timedelta(seconds=1)
+
+
+async def _ledger(
+    db,
+    agent: str,
+    session_id: str,
+    tool: str,
+    at: datetime,
+    status: str = "success",
+    completed_at: datetime | None | object = _ONE_SECOND,
+) -> uuid.UUID:
+    """A ledger row created at ``at``; completed a second later unless ``completed_at`` says otherwise (None: still
+    pending)."""
+    done = at + _ONE_SECOND if completed_at is _ONE_SECOND else completed_at
+    row_id = uuid.uuid4()
     async with db.session() as session:
         await session.execute(
             text(
-                "INSERT INTO nous_system.execution_ledger (agent_id, session_id, context_kind, tool_name, "
-                "side_effect_type, status, result_summary, created_at) VALUES (:a, :s, 'interactive', :t, 'write', "
-                ":st, :r, :at)"
-            ),
-            {"a": agent, "s": session_id, "t": tool, "st": status, "r": f"{tool} {status}", "at": at},
-        )
-        await session.commit()
-
-
-async def _subtask(db, agent: str, session_id: str, at: datetime, summary: str) -> None:
-    async with db.session() as session:
-        await session.execute(
-            text(
-                "INSERT INTO heart.subtasks (agent_id, parent_session_id, task, status, final_outcome, report_jsonb, "
-                "metadata, created_at) VALUES (:a, :s, 'check the job', 'completed', 'completed', "
-                "CAST(:r AS jsonb), CAST(:m AS jsonb), :at)"
+                "INSERT INTO nous_system.execution_ledger (id, agent_id, session_id, context_kind, tool_name, "
+                "side_effect_type, status, result_summary, created_at, completed_at) VALUES (:id, :a, :s, "
+                "'interactive', :t, 'write', :st, :r, :at, :done)"
             ),
             {
+                "id": row_id,
                 "a": agent,
                 "s": session_id,
-                "r": json.dumps({"summary": summary, "findings": []}),
-                "m": json.dumps({"finish_check": {"verdict": "clean", "failed": []}}),
+                "t": tool,
+                "st": status,
+                "r": None if done is None else f"{tool} {status}",
                 "at": at,
+                "done": done,
             },
         )
         await session.commit()
+    return row_id
+
+
+async def _subtask(
+    db, agent: str, session_id: str, at: datetime, summary: str, completed_at: datetime | None | object = _ONE_SECOND
+) -> uuid.UUID:
+    """A task created at ``at`` and finished a second later with ``summary``, unless ``completed_at`` says otherwise
+    (None: still running, no report yet)."""
+    done = at + _ONE_SECOND if completed_at is _ONE_SECOND else completed_at
+    row_id = uuid.uuid4()
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "INSERT INTO heart.subtasks (id, agent_id, parent_session_id, task, status, final_outcome, "
+                "report_jsonb, metadata, created_at, completed_at) VALUES (:id, :a, :s, 'check the job', :st, :fo, "
+                "CAST(:r AS jsonb), CAST(:m AS jsonb), :at, :done)"
+            ),
+            {
+                "id": row_id,
+                "a": agent,
+                "s": session_id,
+                "st": "running" if done is None else "completed",
+                "fo": None if done is None else "completed",
+                "r": None if done is None else json.dumps({"summary": summary, "findings": []}),
+                "m": json.dumps({} if done is None else {"finish_check": {"verdict": "clean", "failed": []}}),
+                "at": at,
+                "done": done,
+            },
+        )
+        await session.commit()
+    return row_id
 
 
 async def _build(db, agent: str, decision_id: uuid.UUID, resolved_at: datetime):
@@ -167,6 +205,7 @@ async def test_the_session_of_the_decision_links_its_calls_and_the_window_ends_a
         "ledger_rows",
         "subtasks",
         "bookkeeping",
+        "over_limit",
         "dropped",
         "chars",
         "truncated",
@@ -259,6 +298,7 @@ async def test_a_decision_with_no_link_is_skipped(db, agent):
         "ledger_rows": 0,
         "subtasks": 0,
         "bookkeeping": 0,
+        "over_limit": 0,
         "dropped": 0,
         "chars": 0,
         "truncated": False,
@@ -389,3 +429,121 @@ async def test_the_record_is_assembled_off_the_event_loop(db, agent, monkeypatch
     pause, built = await _longest_pause_while(_build(db, agent, decision_id, T0 + timedelta(seconds=10)))
     assert built.record is not None and built.counts["tool_calls"] == 1
     assert pause < 0.3, pause
+
+
+# ---- the record as it stood when the claim was fixed --------------------------------------------------------------
+
+
+async def test_the_same_claim_judged_at_two_delays_gets_the_same_record(db, agent):
+    decision_id = await _decision(db, agent, session_id="sess-asof")
+    claim_at = T0 + timedelta(seconds=10)
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, "sess-asof", "bash", T0 + timedelta(seconds=1), result="moved", duration_ms=1000, index=1)
+    # Started before the claim, ended after it: its result was not known when the claim was fixed.
+    _call(recorder, "sess-asof", "web_fetch", T0 + timedelta(seconds=8), result="late page", duration_ms=5000, index=2)
+    await writer.drain(10)
+    ledger_id = await _ledger(db, agent, "sess-asof", "write_file", T0 + timedelta(seconds=3), "pending", None)
+    task_id = await _subtask(db, agent, "sess-asof", T0 + timedelta(seconds=4), "", None)
+
+    soon = await _build(db, agent, decision_id, claim_at)
+
+    # Later, while the decision waits for the judge: the write and the task finish, and more work is done.
+    async with db.session() as session:
+        await session.execute(
+            text(
+                "UPDATE nous_system.execution_ledger SET status = 'success', result_summary = 'written late', "
+                "completed_at = :t WHERE id = :id"
+            ),
+            {"t": claim_at + timedelta(seconds=5), "id": ledger_id},
+        )
+        await session.execute(
+            text(
+                "UPDATE heart.subtasks SET status = 'completed', final_outcome = 'completed', completed_at = :t, "
+                "report_jsonb = CAST(:r AS jsonb), metadata = CAST(:m AS jsonb) WHERE id = :id"
+            ),
+            {
+                "t": claim_at + timedelta(seconds=20),
+                "r": json.dumps({"summary": "Checked after the claim.", "findings": []}),
+                "m": json.dumps({"finish_check": {"verdict": "clean", "failed": []}}),
+                "id": task_id,
+            },
+        )
+        await session.commit()
+    _call(recorder, "sess-asof", "bash", claim_at + timedelta(seconds=1), result="after the claim", index=3)
+    await writer.drain(10)
+    await _ledger(db, agent, "sess-asof", "send_email", claim_at + timedelta(seconds=2))
+    await _subtask(db, agent, "sess-asof", claim_at + timedelta(seconds=3), "a later task")
+
+    later = await _build(db, agent, decision_id, claim_at)
+    assert later.record == soon.record and later.counts == soon.counts
+
+    ledger, task, call = sorted(soon.record.evidence, key=lambda item: item["source"])
+    assert (call["tool"], call["outside_data"]["result"]) == ("bash", "moved")  # the late call is not there
+    assert (ledger["tool"], ledger["status"], ledger["outside_data"]["result"]) == (
+        "write_file",
+        evidence.NOT_FINISHED,
+        None,
+    )
+    assert (task["status"], task["finish_check"], task["written_by_author"]["report"]) == (
+        evidence.NOT_FINISHED,
+        None,
+        None,
+    )
+    assert "Checked after the claim." not in json.dumps(soon.record.evidence)
+
+
+async def test_work_finished_by_the_claim_keeps_its_result(db, agent):
+    decision_id = await _decision(db, agent, session_id="sess-done")
+    claim_at = T0 + timedelta(seconds=10)
+    await _ledger(db, agent, "sess-done", "write_file", T0 + timedelta(seconds=2), completed_at=claim_at)
+    await _subtask(db, agent, "sess-done", T0 + timedelta(seconds=3), "Done in time.", completed_at=claim_at)
+    built = await _build(db, agent, decision_id, claim_at)
+    ledger, task = built.record.evidence
+    assert (ledger["status"], ledger["outside_data"]["result"]) == ("success", "write_file success")
+    assert (task["status"], task["finish_check"], task["written_by_author"]["report"]) == (
+        "completed",
+        "clean",
+        "Done in time.",
+    )
+
+
+# ---- rows past the queries' limits -----------------------------------------------------------------------------
+
+
+async def test_tasks_past_the_limit_are_counted_as_left_out(db, agent):
+    decision_id = await _decision(db, agent, session_id="sess-many")
+    for i in range(6):
+        await _subtask(db, agent, "sess-many", T0 + timedelta(seconds=1 + i), f"report {i}")
+    built = await _build(db, agent, decision_id, T0 + timedelta(minutes=1))
+    reports = [item["written_by_author"]["report"] for item in built.record.evidence]
+    assert reports == [f"report {i}" for i in range(1, 6)]  # the newest five
+    assert (built.counts["subtasks"], built.counts["over_limit"], built.counts["dropped"]) == (6, 1, 1)
+    assert built.counts["truncated"] is True
+    assert (built.record.evidence_dropped, built.record.evidence_truncated) == (1, True)
+
+
+async def test_calls_and_ledger_rows_past_their_limits_are_counted_as_left_out(db, agent, monkeypatch):
+    monkeypatch.setattr(evidence, "MAX_CALLS", 2)
+    monkeypatch.setattr(evidence, "MAX_LEDGER_ROWS", 1)
+    decision_id = await _decision(db, agent, session_id="sess-cap")
+    writer, recorder = _recorder(db, agent)
+    for i in range(3):
+        _call(recorder, "sess-cap", "read_file", T0 + timedelta(seconds=1 + i), index=i)
+    for i, tool in enumerate(("record_decision", "list_decisions")):  # bookkeeping: counted, never evidence
+        _call(recorder, "sess-cap", tool, T0 + timedelta(seconds=10 + i), index=10 + i)
+    await writer.drain(10)
+    for i in range(3):
+        await _ledger(db, agent, "sess-cap", "write_file", T0 + timedelta(seconds=1 + i))
+    built = await _build(db, agent, decision_id, T0 + timedelta(minutes=1))
+    assert (built.counts["tool_calls"], built.counts["ledger_rows"], built.counts["bookkeeping"]) == (3, 3, 2)
+    assert built.counts["over_limit"] == 1 + 2
+    assert len(built.record.evidence) == 2 + 1
+    assert built.record.evidence_dropped == 3 and built.record.evidence_truncated is True
+
+
+async def test_rows_within_the_limits_leave_nothing_out(db, agent):
+    decision_id = await _decision(db, agent, session_id="sess-few")
+    for i in range(5):
+        await _subtask(db, agent, "sess-few", T0 + timedelta(seconds=1 + i), f"report {i}")
+    built = await _build(db, agent, decision_id, T0 + timedelta(minutes=1))
+    assert (built.counts["over_limit"], built.counts["dropped"], built.record.evidence_truncated) == (0, 0, False)

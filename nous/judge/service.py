@@ -10,10 +10,11 @@ recorder writes a turn's rows in the background), skips a subject whose row at t
 builds the evidence (in a thread), and then:
 
 - no evidence, or a record that cannot be rendered: a ``skipped`` row (``cannot_tell``, a label says why), no call;
-- otherwise, within the daily limit: one call of the judge under ``asyncio.wait_for`` and one row, ``ok``, ``error``
-  or ``timeout``, with the number of model requests it sent. The limit is ``NOUS_OUTSIDE_JUDGE_DAILY_CALLS`` requests
-  of this judge a UTC day, counted from the table before every call; at the daily limit no further decision is judged
-  that day, and when the count cannot be read none is judged either (counted here, logged once a day).
+- otherwise, within the daily limit: one call of the judge under ``asyncio.wait_for``, told how many requests are
+  left today, and one row, ``ok``, ``error`` or ``timeout``, with the number of model requests it sent. The limit is
+  ``NOUS_OUTSIDE_JUDGE_DAILY_CALLS`` requests of this judge a UTC day, counted from the table before every call; at the
+  daily limit no further decision is judged that day, and when the count cannot be read none is judged either
+  (counted here, logged once a day).
 
 An ``error`` or ``timeout`` row is not final: the next submit of that decision tries again, at most ``MAX_ATTEMPTS``
 times in all (``store``). Everything in the worker is caught: one WARNING with the exception's class name, and an
@@ -261,14 +262,16 @@ class OutsideJudge:
                 skipped = JudgeOutput(status="skipped", verdict="cannot_tell", labels=(found.skip_label,))
                 await self._write(row, skipped)
                 return
-            if not await self._within_cap():
+            left = await self._requests_left()
+            if left is None:
                 return
             started = time.monotonic()
             row["calls"] = 1  # from here a request may have been sent; the judge's own count replaces this
             # The judge bounds its own call; this outer bound, a little later, stops one that does not.
             outer = self._timeout + min(OUTER_GRACE_SECONDS, self._timeout)
             try:
-                output = await asyncio.wait_for(self.judge.grade(found.record, timeout=self._timeout), timeout=outer)
+                judging = self.judge.grade(found.record, timeout=self._timeout, max_calls=left)
+                output = await asyncio.wait_for(judging, timeout=outer)
             except TimeoutError:
                 model = getattr(self.judge, "model", None)
                 output = failed("timeout", model if isinstance(model, str) else None)
@@ -287,8 +290,9 @@ class OutsideJudge:
                     "F118: the error row for %s was not written (%s)", item.subject_id, type(write_exc).__name__
                 )
 
-    async def _within_cap(self) -> bool:
-        """True when a call may be made now. Fails closed: a count that cannot be read allows none."""
+    async def _requests_left(self) -> int | None:
+        """How many requests this judge may still send today (at least one), or None when it may send none. Fails
+        closed: a count that cannot be read allows none."""
         now = datetime.now(UTC)
         try:
             async with self._database.session() as session:
@@ -297,14 +301,14 @@ class OutsideJudge:
             logger.warning("F118: today's judge calls could not be counted (%s); no call", type(exc).__name__)
             used = None
         if used is not None and used < self._daily_calls:
-            return True
+            return self._daily_calls - used
         self._over_cap += 1
         if used is not None and self._cap_logged_on != now.date():
             self._cap_logged_on = now.date()
             logger.info(
                 "F118: the judge reached its daily limit of %d calls; no more verdicts today", self._daily_calls
             )
-        return False
+        return None
 
     async def _write(self, row: dict[str, Any], output: JudgeOutput) -> None:
         values = {

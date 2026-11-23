@@ -4,7 +4,8 @@ The record is rendered as one JSON user message (``evidence.render_record``) and
 ``call_background_llm_structured`` with the instructions of ``instructions.py`` as the system text, labelled
 ``outside_judge``, inside ``asyncio.wait_for``; the record is rendered in a thread. The payload sets no ``temperature``
 and no ``thinking``. Input tokens are counted of every kind (uncached, cache reads, cache writes), and calls are the
-requests sent (two when the model refuses a forced tool choice). The model is
+requests sent (two when the model refuses a forced tool choice, unless ``max_calls`` leaves room for one only: then
+the second is not sent and the answer is an ``error``). The model is
 ``NOUS_OUTSIDE_JUDGE_MODEL``, or ``NOUS_BACKGROUND_MODEL`` when that is empty (a Claude model either way).
 
 The answer is checked, never trusted: a verdict outside the set or not a string is an ``error``, unknown labels are
@@ -98,7 +99,7 @@ class BackgroundModelJudge:
         self._client = client
         self.model = model
 
-    async def grade(self, record: JudgeInput, *, timeout: float) -> JudgeOutput:
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
         try:
             # The second redaction of a full record is CPU work: off the event loop.
             message = await asyncio.to_thread(render_record, record)
@@ -119,6 +120,7 @@ class BackgroundModelJudge:
                     max_tokens=MAX_TOKENS,
                     purpose="outside_judge",
                     usage_out=usage,
+                    max_requests=max_calls,
                 ),
                 timeout=timeout,
             )
