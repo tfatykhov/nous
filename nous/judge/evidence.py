@@ -19,6 +19,10 @@ finished, without its result, so the record is the same however long the judging
 limit are counted as left out. The calls that only record, list or resolve decisions are left out and counted.
 Without a session, or without any other row, there is nothing to judge, and neither is there when the record cannot
 be rendered.
+
+``build_report_evidence`` reads a finished task's record the same way, as it stood when the task was completed: the
+task as it was set and its report (the claim), the task's own calls, ledger rows and child tasks, and the finish
+check's labels as one item. Only a task finished as ``completed`` with a report is judged.
 """
 
 from __future__ import annotations
@@ -53,6 +57,8 @@ LEFT_OUT = "[text left out]"
 NOT_RENDERED = "record_not_rendered"
 # The top-level keys of a rendered record.
 RECORD_KEYS = frozenset({"subject_kind", "written_by_author", "evidence", "evidence_truncated", "evidence_dropped"})
+# The source of the item that holds a finished task's finish check (its verdict labels): kept first under the cap.
+FINISH_CHECK = "finish_check"
 
 
 class RenderError(Exception):
@@ -71,7 +77,7 @@ def _side_effect(item: Mapping[str, Any]) -> bool:
 
 
 def _priority(item: Mapping[str, Any]) -> int:
-    if item.get("is_error"):
+    if item.get("is_error") or item.get("source") == FINISH_CHECK:
         return 0
     return 1 if _side_effect(item) else 2
 
@@ -80,6 +86,11 @@ def _render_item(item: Mapping[str, Any]) -> dict[str, Any]:
     """One raw item as the judge reads it, every string bounded and redacted."""
     source = item.get("source")
     out: dict[str, Any] = {"source": source}
+    if source == FINISH_CHECK:  # the harness's own labels, not the author's
+        out["verdict"] = _bounded(item.get("verdict"), LABEL_CAP)
+        out["failed"] = _bounded(item.get("failed"), LABEL_CAP)
+        out["why"] = _bounded(item.get("why"), LABEL_CAP)
+        return out
     if source == "spawned_task":
         out["status"] = _bounded(item.get("status"), LABEL_CAP)
         out["finish_check"] = _bounded(item.get("finish_check"), LABEL_CAP)
@@ -446,3 +457,197 @@ async def build_decision_evidence(
     counts["truncated"] = record.evidence_truncated
     counts["chars"] = chars
     return DecisionEvidence(record, counts)
+
+
+# ---- a finished task's report ------------------------------------------------------------------------------------
+
+# The calls that only hand in the report, or record, list or resolve decisions: they show nothing about the work.
+REPORT_BOOKKEEPING_TOOLS = BOOKKEEPING_TOOLS | frozenset({"submit_final_report"})
+_REPORT_BOOKKEEPING_SQL = "(" + ", ".join(f"'{name}'" for name in sorted(REPORT_BOOKKEEPING_TOOLS)) + ")"
+# What a finished task's report is graded by its author: the task marked completed.
+REPORT_CLAIM_GRADER = "agent"
+REPORT_CLAIM_GRADE = "completed"
+
+_TASK = text(
+    "SELECT task, success_criteria, output_format, status, final_outcome, report_jsonb, "
+    "metadata ->> 'session_id' AS shared_session, metadata -> 'finish_check' AS finish_check, created_at, "
+    "completed_at FROM heart.subtasks WHERE agent_id = :agent AND id = :id"
+)
+# The task's own rows: its id on the row, or (a row without one) its own session; ``:own`` is NULL for a task in a
+# shared session, whose untagged rows may be other work's. Read as of the completion, like a decision's record.
+_TASK_ROWS = "agent_id = :agent AND (subtask_id = :task OR (subtask_id IS NULL AND session_id = :own))"
+_TASK_CALL_WINDOW = (
+    f"FROM nous_system.tool_call_log WHERE {_TASK_ROWS} AND started_at >= :since "
+    "AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until"
+)
+_TASK_CALL_COUNTS = text(
+    f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_REPORT_BOOKKEEPING_SQL}), "
+    f"count(*) FILTER (WHERE tool_name IN {_REPORT_BOOKKEEPING_SQL}) {_TASK_CALL_WINDOW}"
+)
+_TASK_CALLS = text(
+    "SELECT tool_name, outcome, is_error, input_text, result_preview, result_text, error_text, started_at "
+    f"{_TASK_CALL_WINDOW} AND tool_name NOT IN {_REPORT_BOOKKEEPING_SQL} ORDER BY started_at DESC LIMIT :limit"
+)
+_TASK_LEDGER_WINDOW = (
+    f"FROM nous_system.execution_ledger WHERE {_TASK_ROWS} AND created_at >= :since AND created_at <= :until"
+)
+_TASK_LEDGER_COUNTS = text(
+    f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_REPORT_BOOKKEEPING_SQL}), "
+    f"count(*) FILTER (WHERE tool_name IN {_REPORT_BOOKKEEPING_SQL}) {_TASK_LEDGER_WINDOW}"
+)
+_TASK_LEDGER = text(
+    "SELECT tool_name, status, result_summary, created_at, completed_at "
+    f"{_TASK_LEDGER_WINDOW} AND tool_name NOT IN {_REPORT_BOOKKEEPING_SQL} ORDER BY created_at DESC LIMIT :limit"
+)
+
+
+@dataclass(frozen=True)
+class ReportEvidence:
+    """What was found for one finished task: the bounded record (None: nothing to judge, ``skip_label`` says why), the
+    claim (the report, graded ``completed`` by the agent), when it was made (the task's completion) and the counts
+    kept on the verdict row: those of ``DecisionEvidence``, ``link`` being ``own_session`` or ``shared_session``, and
+    ``finish_check``, the finish check's verdict label (None without one)."""
+
+    record: JudgeInput | None
+    counts: dict[str, Any]
+    claim: Claim
+    claim_at: datetime
+    skip_label: str = "evidence_missing"
+
+
+def _assemble_report(
+    task_id: UUID, subject: dict[str, Any], claim: Claim, items: list[dict[str, Any]], not_read: int
+) -> tuple[JudgeInput, int]:
+    """The record of a report and the length of its rendered text (run in a thread)."""
+    record = assemble("task_report", task_id, subject, claim, items, not_read=not_read)
+    return record, len(render_record(record))
+
+
+def _text_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _finish_check_item(value: Any, at: datetime) -> dict[str, Any] | None:
+    """The finish check record (``metadata.finish_check``) as one evidence item of labels, or None without one."""
+    if not isinstance(value, Mapping) or not isinstance(value.get("verdict"), str):
+        return None
+    failed = value.get("failed")
+    names = [name for name in failed if isinstance(name, str)] if isinstance(failed, list) else []
+    return {
+        "source": FINISH_CHECK,
+        "verdict": value["verdict"],
+        "failed": ", ".join(names) or None,
+        "why": _text_or_none(value.get("why")),
+        "at": at.timestamp(),
+    }
+
+
+async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: UUID) -> ReportEvidence | None:
+    """The record of one finished task's report as it stood when the task was completed, or None when the task is
+    not this agent's task finished as ``completed`` (status and outcome) with a report that has a summary: a failed,
+    cancelled or blocked task is never judged. Read-only, and the same whenever it is read: a call counts once it had
+    ended by the completion, a ledger row or a child task once it had started, and one that finished later is shown
+    as ``NOT_FINISHED`` without its result. The task's own rows are read (``_TASK_ROWS``); the calls that only hand in
+    the report or record decisions are left out and counted; the finish check's labels are one item. Without a call,
+    a ledger row or a child task there is nothing to judge (the finish check alone is not what the task ran), and
+    neither is there when the record cannot be rendered (``NOT_RENDERED``)."""
+    row = (await session.execute(_TASK, {"agent": agent_id, "id": task_id})).one_or_none()
+    if row is None or row.status != "completed" or row.final_outcome != "completed" or row.completed_at is None:
+        return None
+    report = row.report_jsonb if isinstance(row.report_jsonb, dict) else {}
+    summary = report.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    claim = Claim(grader=REPORT_CLAIM_GRADER, grade=REPORT_CLAIM_GRADE, note=summary)
+    claim_at = row.completed_at
+    finish = _finish_check_item(row.finish_check, claim_at)
+    own = None if row.shared_session else f"subtask-{task_id.hex[:8]}"
+    counts: dict[str, Any] = {
+        "link": "own_session" if own else "shared_session",
+        "tool_calls": 0,
+        "ledger_rows": 0,
+        "subtasks": 0,
+        "bookkeeping": 0,
+        "over_limit": 0,
+        "dropped": 0,
+        "chars": 0,
+        "truncated": False,
+        "finish_check": None if finish is None else finish["verdict"],
+    }
+    window = {"agent": agent_id, "task": task_id, "own": own, "since": row.created_at - CLOCK_SLACK, "until": claim_at}
+    calls, calls_bookkeeping = (await session.execute(_TASK_CALL_COUNTS, window)).one()
+    ledger_rows, ledger_bookkeeping = (await session.execute(_TASK_LEDGER_COUNTS, window)).one()
+    children = 0
+    if own is not None:  # a task's children name its own session as their parent
+        children_window = {"agent": agent_id, "session": own, "since": window["since"], "until": claim_at}
+        children = (await session.execute(_SUBTASK_COUNT, children_window)).scalar_one()
+    counts.update(
+        tool_calls=calls,
+        ledger_rows=ledger_rows,
+        subtasks=children,
+        bookkeeping=calls_bookkeeping + ledger_bookkeeping,
+        over_limit=max(0, calls - MAX_CALLS) + max(0, ledger_rows - MAX_LEDGER_ROWS) + max(0, children - MAX_SUBTASKS),
+    )
+    if calls + ledger_rows + children == 0:
+        return ReportEvidence(None, counts, claim, claim_at)
+
+    items: list[dict[str, Any]] = []
+    for call in (await session.execute(_TASK_CALLS, {**window, "limit": MAX_CALLS})).all():
+        items.append(
+            {
+                "source": "tool_call",
+                "tool": call.tool_name,
+                "status": call.outcome,
+                "is_error": bool(call.is_error),
+                "args": call.input_text,
+                "result": call.error_text if call.is_error else (call.result_text or call.result_preview),
+                "at": call.started_at.timestamp(),
+            }
+        )
+    for entry in (await session.execute(_TASK_LEDGER, {**window, "limit": MAX_LEDGER_ROWS})).all():
+        finished = _finished_by(entry.completed_at, claim_at)
+        items.append(
+            {
+                "source": "ledger",
+                "tool": entry.tool_name,
+                "status": entry.status if finished else NOT_FINISHED,
+                "is_error": finished and entry.status == "error",
+                "result": entry.result_summary if finished else None,
+                "at": entry.created_at.timestamp(),
+            }
+        )
+    if children:
+        children_window = {"agent": agent_id, "session": own, "since": window["since"], "until": claim_at}
+        for task in (await session.execute(_SUBTASKS, {**children_window, "limit": MAX_SUBTASKS})).all():
+            finished = _finished_by(task.completed_at, claim_at)
+            items.append(
+                {
+                    "source": "spawned_task",
+                    "status": task.status if finished else NOT_FINISHED,
+                    "finish_check": task.finish_check if finished else None,
+                    "report": task.summary if finished else None,
+                    "at": task.created_at.timestamp(),
+                }
+            )
+    if finish is not None:
+        items.append(finish)
+
+    findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+    stated = report.get("confidence") if report.get("confidence_reported") is True else None
+    subject = {
+        "task": row.task,
+        "success_criteria": row.success_criteria,
+        "output_format": row.output_format,
+        "report_findings": "\n".join(f for f in findings if isinstance(f, str)) or None,
+        "stated_confidence": stated if isinstance(stated, int | float) and not isinstance(stated, bool) else None,
+    }
+    try:
+        record, chars = await asyncio.to_thread(
+            _assemble_report, task_id, subject, claim, items, counts["over_limit"]
+        )
+    except RenderError:
+        return ReportEvidence(None, counts, claim, claim_at, NOT_RENDERED)
+    counts["dropped"] = record.evidence_dropped
+    counts["truncated"] = record.evidence_truncated
+    counts["chars"] = chars
+    return ReportEvidence(record, counts, claim, claim_at)
