@@ -404,9 +404,7 @@ async def sweep_reports(
         "version": judge_version,
         "limit": limit,
     }
-    return [
-        {"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)
-    ]
+    return [{"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)]
 
 
 # ---- the report numbers (GET /dashboard/outside-judge, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED) ---------------------
@@ -468,7 +466,9 @@ def summarize_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 skipped_by_label[label] = skipped_by_label.get(label, 0) + 1
     tokens_in = sum(row["tokens_in"] or 0 for row in called)
     tokens_out = sum(row["tokens_out"] or 0 for row in called)
-    latest = sorted((row for row in ok if row["verdict"] == "not_supported"), key=lambda r: r["judged_at"], reverse=True)
+    latest = sorted(
+        (row for row in ok if row["verdict"] == "not_supported"), key=lambda r: r["judged_at"], reverse=True
+    )
     return {
         "judged": len(ok),
         "by_verdict": by_verdict,

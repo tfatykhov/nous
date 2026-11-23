@@ -156,7 +156,9 @@ async def _rows(db, agent: str) -> list[dict]:
 
 async def _task_row(db, task_id: uuid.UUID) -> str:
     async with db.session() as session:
-        value = await session.scalar(text("SELECT to_jsonb(s)::text FROM heart.subtasks s WHERE id = :id"), {"id": task_id})
+        value = await session.scalar(
+            text("SELECT to_jsonb(s)::text FROM heart.subtasks s WHERE id = :id"), {"id": task_id}
+        )
     return value
 
 

@@ -154,8 +154,9 @@ async def _verdict(
     async with db.session() as session:
         await session.execute(
             text(
-                "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, judge_version, "
-                "status, verdict, claim_at, calls, attempts) VALUES (:a, :k, :s, 'stub', :v, :st, :vd, now(), :c, :at)"
+                "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
+                "judge_version, status, verdict, claim_at, calls, attempts) VALUES (:a, :k, :s, 'stub', :v, :st, :vd, "
+                "now(), :c, :at)"
             ),
             {
                 "a": agent,
@@ -293,8 +294,9 @@ async def test_a_pass_queues_nothing_at_half_the_days_limit(db, agent):
     async with db.session() as session:
         await session.execute(
             text(
-                "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, judge_version, "
-                "status, verdict, claim_at, calls) VALUES (:a, 'decision', :s, 'stub', 'd0', 'ok', 'success', now(), 5)"
+                "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
+                "judge_version, status, verdict, claim_at, calls) VALUES (:a, 'decision', :s, 'stub', 'd0', 'ok', "
+                "'success', now(), 5)"
             ),
             {"a": agent, "s": uuid.uuid4()},
         )
@@ -417,7 +419,9 @@ async def test_the_sweep_never_writes_a_decision_or_a_task(db, agent):
         async with db.session() as session:
             rows = []
             for table in ("brain.decisions", "heart.subtasks", "nous_system.tool_call_log"):
-                result = await session.execute(text(f"SELECT to_jsonb(t) FROM {table} t WHERE agent_id = :a"), {"a": agent})
+                result = await session.execute(
+                    text(f"SELECT to_jsonb(t) FROM {table} t WHERE agent_id = :a"), {"a": agent}
+                )
                 rows.append(sorted(json.dumps(r[0], sort_keys=True) for r in result))
             return rows
 

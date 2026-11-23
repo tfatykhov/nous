@@ -155,7 +155,11 @@ async def test_the_report_is_handed_in_after_the_row_is_persisted():
     spy = SpyService(heart=heart)
     judge_slot.set_current(spy)
     await execute_hardened(
-        _subtask(), OWN_SESSION, runner=_runner([VALID]), heart=heart, settings=_settings(outside_judge_reports_enabled=True)
+        _subtask(),
+        OWN_SESSION,
+        runner=_runner([VALID]),
+        heart=heart,
+        settings=_settings(outside_judge_reports_enabled=True),
     )
     assert spy.persisted_before == [1]
 
@@ -165,7 +169,11 @@ async def test_a_persist_that_fails_hands_nothing_in():
     spy = SpyService(heart=heart)
     judge_slot.set_current(spy)
     await execute_hardened(
-        _subtask(), OWN_SESSION, runner=_runner([VALID]), heart=heart, settings=_settings(outside_judge_reports_enabled=True)
+        _subtask(),
+        OWN_SESSION,
+        runner=_runner([VALID]),
+        heart=heart,
+        settings=_settings(outside_judge_reports_enabled=True),
     )
     assert spy.reports == [] and spy.persisted_before == []
 
@@ -226,7 +234,10 @@ def test_the_executor_loads_only_the_judges_accessor():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    code = "import sys, nous.handlers.subtask_executor\nprint(' '.join(m for m in sys.modules if m.startswith('nous.judge')))"
+    code = (
+        "import sys, nous.handlers.subtask_executor\n"
+        "print(' '.join(m for m in sys.modules if m.startswith('nous.judge')))"
+    )
     loaded = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, cwd=root, timeout=120, check=True
     ).stdout.split()

@@ -146,9 +146,7 @@ class BackgroundModelJudge:
         except Exception as exc:
             logger.warning("F118: the judge call on %s failed (%s)", record.subject_id, type(exc).__name__)
             return failed("error", self.model, **_counts(usage))
-        return parse_output(
-            result, model=self.model, usage=usage, verdicts=self._verdicts, labels=self._label_set
-        )
+        return parse_output(result, model=self.model, usage=usage, verdicts=self._verdicts, labels=self._label_set)
 
 
 class BackgroundModelReportJudge(BackgroundModelJudge):

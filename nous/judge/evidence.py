@@ -642,9 +642,7 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
         "stated_confidence": stated if isinstance(stated, int | float) and not isinstance(stated, bool) else None,
     }
     try:
-        record, chars = await asyncio.to_thread(
-            _assemble_report, task_id, subject, claim, items, counts["over_limit"]
-        )
+        record, chars = await asyncio.to_thread(_assemble_report, task_id, subject, claim, items, counts["over_limit"])
     except RenderError:
         return ReportEvidence(None, counts, claim, claim_at, NOT_RENDERED)
     counts["dropped"] = record.evidence_dropped
