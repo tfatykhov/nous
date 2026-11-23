@@ -1087,8 +1087,25 @@ const OUTCOME_WORDS: Record<string, string> = {
 export const outcomeWord = (outcome: string) => OUTCOME_WORDS[outcome] ?? 'other';
 const WORK_KIND_WORDS: Record<string, string> = { decisions: 'decisions', task: 'task', workflow: 'workflow', other: 'other' };
 export const workKindWord = (kind: string) => WORK_KIND_WORDS[kind] ?? 'other';
-const WORK_LINK_LABELS: Record<string, string> = { decisions: 'Decisions', task: 'Task', workflow: 'Workflow step', other: 'Other' };
-export const workLinkLabel = (kind: string) => WORK_LINK_LABELS[kind] ?? 'Other';
+/** A Work-screen link's name in a sentence: "the task"; numbered ("task 1", "task 2") when a kind repeats. */
+const WORK_LINK_WORDS: Record<string, [string, string]> = {
+  decisions: ['the decisions', 'decisions'], task: ['the task', 'task'], workflow: ['the workflow step', 'workflow step'],
+  other: ['other work', 'other work'],
+};
+export function workLinks(sessions: { id: string; kind: WorkKind }[]): { id: string; label: string }[] {
+  const words = (kind: string) => WORK_LINK_WORDS[kind] ?? WORK_LINK_WORDS.other;
+  const total = new Map<string, number>();
+  for (const { kind } of sessions) total.set(words(kind)[1], (total.get(words(kind)[1]) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  return sessions.map(({ id, kind }) => {
+    const [one, many] = words(kind);
+    const n = (seen.get(many) ?? 0) + 1;
+    seen.set(many, n);
+    return { id, label: (total.get(many) ?? 0) > 1 ? `${many} ${n}` : one };
+  });
+}
+/** What goes before link `i` of `n` in a sentence: nothing, a comma, or " and " before the last. */
+export const linkSeparator = (i: number, n: number) => (i === 0 ? '' : i === n - 1 ? ' and ' : ', ');
 
 const callCount = (calls: ActivityCalls) =>
   calls.capped ? `more than ${formatNumber(calls.total)} tool calls` : `${formatNumber(calls.total)} tool call${calls.total === 1 ? '' : 's'}`;
@@ -1100,16 +1117,19 @@ export function callsText(calls: ActivityCalls): string {
   return `${count[0].toUpperCase()}${count.slice(1)} this session${failed}.`;
 }
 
-export const startedText = (at: string, now: number) => `Started ${ago(at, now)}.`;
+/** When the current task or workflow started, naming which (a wait step's job has no start time in the answer). */
+export const startedText = (kind: ActivityCurrent['kind'], at: string, now: number) =>
+  `The ${kind === 'workflow' ? 'workflow' : 'task'} started ${ago(at, now)}.`;
 export const lastCallText = (at: string, tool: string | null, now: number) =>
   `Last tool call ${ago(at, now)}${tool ? ` (${tool})` : ''}.`;
 export const noCallYetText = (startedAt: string, now: number) => `No tool call yet in this session. It started ${ago(startedAt, now)}.`;
 
-/** Said once the open session has gone `QUIET_MINUTES` without a tool call; '' before. */
-export function quietText(lastCallAt: string, now: number): string {
+/** Said in place of the last-call line once the open session has gone `QUIET_MINUTES` without a tool call; '' before. */
+export function quietText(lastCallAt: string, tool: string | null, now: number): string {
   const quiet = now - Date.parse(lastCallAt);
   if (quiet < QUIET_MINUTES * 60_000) return '';
-  return `No tool call for ${spanText(quiet)}. A long command or a coding job can take this long; a call shows here when it ends.`;
+  const last = tool ? `; the last one was ${tool}` : '';
+  return `No tool call for ${spanText(quiet)}${last}. A long command or a coding job can take this long; a call shows here when it ends.`;
 }
 
 /** Coding jobs the session started ("at least" when the server read only its newest shell calls); '' when none. It
@@ -1120,10 +1140,10 @@ export function jobsText(jobs: ActivityJobs, now: number): string {
   return `Coding jobs started this session: ${jobs.capped ? 'at least ' : ''}${formatNumber(jobs.launched)}.${last}`;
 }
 
-/** The newest session once it has ended, in one line. */
+/** The newest session once it has ended, in one line under the "Last session" heading. */
 export function endedText(session: ActivitySession, calls: ActivityCalls | null, now: number): string {
   const when = session.ended_at ? ` ended ${ago(session.ended_at, now)}` : ' ended';
-  return `Last session (${session.n})${when}${calls ? ` after ${callCount(calls)}` : ''}.`;
+  return `Session ${session.n}${when}${calls ? ` after ${callCount(calls)}` : ''}.`;
 }
 
 // The page's sections fold. The viewer's choice is kept in this browser (one choice for every goal); the page works

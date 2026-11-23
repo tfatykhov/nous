@@ -3,6 +3,9 @@ import { render, screen, waitFor, cleanup, within } from '@testing-library/svelt
 import GoalActivity from './GoalActivity.svelte';
 import { NOW, activityAnswer } from '../../lib/testing/goalFixtures';
 import { routeHref } from '../../lib/router';
+import { parseBlocks, styleBlocks } from '../../lib/testing/css';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { GoalActivity as Answer } from '../../lib/goals';
 
 // What a goal is doing now: the panel over GET /goals/{ref}/activity. It reads when it is shown, when the goal
@@ -71,7 +74,7 @@ describe('what the panel says', () => {
     render(GoalActivity, props());
     const box = await waitFor(() => panel()!);
     await within(box).findByText('Working on a task: Merge the duplicate pairs');
-    expect(within(box).getByText('Started 10 minutes ago.')).toBeTruthy();
+    expect(within(box).getByText('The task started 10 minutes ago.')).toBeTruthy();
     expect(within(box).getByText('Last tool call 2 minutes ago (bash).')).toBeTruthy();
     expect(within(box).getByText('31 tool calls this session, 2 failed.')).toBeTruthy();
     const rows = within(box).getAllByRole('listitem');
@@ -95,13 +98,19 @@ describe('what the panel says', () => {
     })]];
     render(GoalActivity, props());
     expect(await screen.findByText('Waiting for a coding job (job-20261115-112000-ab12cd34) to finish.')).toBeTruthy();
+    // The start time is the workflow's, and says so: the answer has no launch time of the job waited for.
+    expect(screen.getByText('The workflow started 40 minutes ago.')).toBeTruthy();
+    expect(screen.queryByText(/^Started /)).toBeNull();
     expect(screen.getByText('Coding jobs started this session: 1. The last one 40 minutes ago.')).toBeTruthy();
   });
 
-  it('a long quiet says why, and an open session with no call yet says when it started', async () => {
+  it('a long quiet says why in place of the last-call line, and an open session with no call yet says when it started', async () => {
     replies = [[200, activityAnswer({ last_call_at: '2026-11-15T11:18:00+00:00' })]];
     render(GoalActivity, props());
-    expect(await screen.findByText(/^No tool call for 42 minutes\. A long command or a coding job can take this long/)).toBeTruthy();
+    expect(await screen.findByText(
+      'No tool call for 42 minutes; the last one was bash. A long command or a coding job can take this long; a call shows here when it ends.',
+    )).toBeTruthy();
+    expect(screen.queryByText(/^Last tool call/)).toBeNull();
     cleanup();
     replies = [[200, activityAnswer({ last_call_at: null, calls: { total: 0, errors: 0, capped: false }, recent: [], work_sessions: [] })]];
     render(GoalActivity, props());
@@ -126,22 +135,46 @@ describe('what the panel says', () => {
       phase: 'none', current: null, running_count: 0, jobs: null, recent: [],
     })]];
     render(GoalActivity, props({ goal: { ...GOAL, open_session: null } }));
-    expect(await screen.findByText('Last session (4) ended 3 hours ago after 31 tool calls.')).toBeTruthy();
+    expect(await screen.findByText('Session 4 ended 3 hours ago after 31 tool calls.')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 3, name: 'Last session' })).toBeTruthy();
     expect(screen.queryByRole('list')).toBeNull();
     expect(screen.queryByText(/^Coding jobs/)).toBeNull();
     expect(screen.getAllByRole('link').length).toBe(2);
   });
 
-  it('each link opens that session on the Work screen', async () => {
+  it('each link opens that session on the Work screen, and the links are separated in words', async () => {
     render(GoalActivity, props());
     const box = await waitFor(() => panel()!);
     await within(box).findByText('See this session on the Work screen:', { exact: false });
     const links = within(box).getAllByRole('link');
     expect(links.map((a) => [a.textContent?.trim(), a.getAttribute('href')])).toEqual([
-      ['Task', routeHref('work', ['s', 'subtask-1a2b3c4d'])],
-      ['Decisions', routeHref('work', ['s', 'intent-00000000-0000-4000-8000-0000000000bb'])],
+      ['the task', routeHref('work', ['s', 'subtask-1a2b3c4d'])],
+      ['the decisions', routeHref('work', ['s', 'intent-00000000-0000-4000-8000-0000000000bb'])],
     ]);
+    expect(links[0].parentElement?.textContent).toBe('See this session on the Work screen: the task and the decisions.');
+    cleanup();
+    replies = [[200, activityAnswer({ work_sessions: [
+      { id: 'subtask-1', kind: 'task' }, { id: 'dag-1', kind: 'workflow' }, { id: 'subtask-2', kind: 'task' }, { id: 'intent-1', kind: 'decisions' },
+    ] })]];
+    render(GoalActivity, props());
+    const line = (await screen.findByText('See this session on the Work screen:', { exact: false })) as HTMLElement;
+    expect(line.textContent).toBe('See this session on the Work screen: task 1, the workflow step, task 2 and the decisions.');
+    expect(within(line).getAllByRole('link').map((a) => a.textContent)).toEqual(['task 1', 'the workflow step', 'task 2', 'the decisions']);
+  });
+
+  it('a long tool name wraps in its own column; on a phone it takes a line of its own, above the time, outcome and kind', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'GoalActivity.svelte'), 'utf-8'));
+    const at = css.indexOf('@media (max-width: 768px)');
+    expect(at).toBeGreaterThan(-1);
+    const wide = parseBlocks(css.slice(0, at));
+    // Desktop: the rows share the list's columns, so the outcome sits just after the widest tool name.
+    expect(wide.get('.calls')).toMatchObject({ display: 'grid' });
+    expect(wide.get('.calls > li')).toMatchObject({ 'grid-template-columns': 'subgrid', 'grid-column': '1 / -1' });
+    expect(wide.get('.tool')).toMatchObject({ 'overflow-wrap': 'anywhere', 'min-width': '0' });
+    const phone = parseBlocks(css.slice(at));
+    expect(phone.get('.calls')).toMatchObject({ display: 'block' });
+    expect(phone.get('.calls > li')).toMatchObject({ display: 'flex', 'flex-wrap': 'wrap' });
+    expect(phone.get('.calls > li > .tool')).toMatchObject({ order: '-1', 'flex-basis': '100%' });
   });
 
   it('a failed read with an earlier answer keeps it and says so; with none it says it could not read', async () => {
@@ -256,7 +289,7 @@ describe('when the panel reads', () => {
     expect(activityReads()).toBe(1);
     hold.answer([200, activityAnswer()]);
     await waitFor(() => expect(activityReads()).toBe(2));
-    expect(await screen.findByText('Last session (4) ended 1 minute ago after 31 tool calls.')).toBeTruthy();
+    expect(await screen.findByText('Session 4 ended 1 minute ago after 31 tool calls.')).toBeTruthy();
   });
 
   it('another goal: the old read is given up and its late answer never shown', async () => {

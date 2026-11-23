@@ -608,8 +608,20 @@ describe('what a goal is doing now, and the folding page', () => {
     for (const [outcome, word] of Object.entries(words)) expect(goals.outcomeWord(outcome)).toBe(word);
     expect(goals.outcomeWord('something-new')).toBe('other');
     expect(goals.workKindWord('decisions')).toBe('decisions');
-    expect(goals.workLinkLabel('workflow')).toBe('Workflow step');
-    expect(goals.workLinkLabel('something-new')).toBe('Other');
+  });
+
+  it('the links to the Work screen are named in words; a kind that repeats is numbered', () => {
+    const links = (...kinds: string[]) => goals.workLinks(kinds.map((kind, i) => ({ id: `s${i}`, kind: kind as goals.WorkKind })));
+    expect(links('task', 'decisions')).toEqual([{ id: 's0', label: 'the task' }, { id: 's1', label: 'the decisions' }]);
+    expect(links('workflow', 'something-new').map((l) => l.label)).toEqual(['the workflow step', 'other work']);
+    expect(links('task', 'workflow', 'task', 'decisions').map((l) => l.label)).toEqual(['task 1', 'the workflow step', 'task 2', 'the decisions']);
+    expect(links()).toEqual([]);
+  });
+
+  it('the links are separated in words: a comma, and "and" before the last', () => {
+    expect([1, 2, 3].map((n) => Array.from({ length: n }, (_, i) => goals.linkSeparator(i, n)))).toEqual([
+      [''], ['', ' and '], ['', ', ', ' and '],
+    ]);
   });
 
   it('counts in words, singular and plural, and "more than" when the read was capped', () => {
@@ -624,29 +636,33 @@ describe('what a goal is doing now, and the folding page', () => {
     expect(goals.jobsText({ launched: 0, last_launch_at: null, capped: false }, NOW)).toBe('');
   });
 
-  it('the times say how long ago, from the page clock', () => {
-    expect(goals.startedText(at(12), NOW)).toBe('Started 12 minutes ago.');
+  it('the times say how long ago, from the page clock, and what started', () => {
+    expect(goals.startedText('task', at(12), NOW)).toBe('The task started 12 minutes ago.');
+    expect(goals.startedText('workflow', at(19), NOW)).toBe('The workflow started 19 minutes ago.');
     expect(goals.lastCallText(at(4), 'bash', NOW)).toBe('Last tool call 4 minutes ago (bash).');
     expect(goals.lastCallText(at(4), null, NOW)).toBe('Last tool call 4 minutes ago.');
     expect(goals.noCallYetText(at(3), NOW)).toBe('No tool call yet in this session. It started 3 minutes ago.');
   });
 
-  it('the quiet note shows from ten minutes without a call, not at nine', () => {
-    expect(goals.quietText(at(9), NOW)).toBe('');
-    expect(goals.quietText(at(10), NOW)).toBe(
-      'No tool call for 10 minutes. A long command or a coding job can take this long; a call shows here when it ends.',
+  it('the quiet note shows from ten minutes without a call, not at nine, and names the last tool', () => {
+    expect(goals.quietText(at(9), 'bash', NOW)).toBe('');
+    expect(goals.quietText(at(10), 'bash', NOW)).toBe(
+      'No tool call for 10 minutes; the last one was bash. A long command or a coding job can take this long; a call shows here when it ends.',
     );
-    expect(goals.quietText(at(42), NOW)).toMatch(/^No tool call for 42 minutes\./);
+    expect(goals.quietText(at(42), null, NOW)).toBe(
+      'No tool call for 42 minutes. A long command or a coding job can take this long; a call shows here when it ends.',
+    );
   });
 
-  it('an ended session is one line, with its calls when the log has them', () => {
+  it('an ended session is one line, with its calls when the log has them, and does not repeat the title', () => {
     const session = { n: 4, open: false, started_at: at(240), ended_at: at(180) };
-    expect(goals.endedText(session, { total: 31, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 31 tool calls.');
-    expect(goals.endedText(session, { total: 1, errors: 0, capped: false }, NOW)).toBe('Last session (4) ended 3 hours ago after 1 tool call.');
+    expect(goals.endedText(session, { total: 31, errors: 0, capped: false }, NOW)).toBe('Session 4 ended 3 hours ago after 31 tool calls.');
+    expect(goals.endedText(session, { total: 1, errors: 0, capped: false }, NOW)).toBe('Session 4 ended 3 hours ago after 1 tool call.');
     expect(goals.endedText(session, { total: 2000, errors: 0, capped: true }, NOW)).toBe(
-      'Last session (4) ended 3 hours ago after more than 2,000 tool calls.',
+      'Session 4 ended 3 hours ago after more than 2,000 tool calls.',
     );
-    expect(goals.endedText(session, null, NOW)).toBe('Last session (4) ended 3 hours ago.');
+    expect(goals.endedText(session, null, NOW)).toBe('Session 4 ended 3 hours ago.');
+    expect(goals.endedText({ ...session, ended_at: null }, null, NOW)).toBe('Session 4 ended.');
   });
 
   it('the fixed sentences', () => {
