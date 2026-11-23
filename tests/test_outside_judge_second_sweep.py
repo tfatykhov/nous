@@ -27,9 +27,10 @@ from test_outside_judge_sweep import FAST, NOW, StubJudge, _decision, _pass, _se
 
 from nous.config import Settings
 from nous.judge import evidence, jev_judge, second_settings, store
+from nous.judge import service as service_module
 from nous.judge.jev_judge import JevJudge
 from nous.judge.second_settings import SecondJudgeManager
-from nous.judge.service import DECISION, SWEEP_BATCH, JudgeSet, OutsideJudge
+from nous.judge.service import DECISION, SWEEP_BATCH, JudgeSet, OutsideJudge, call_bound
 
 pytestmark = pytest.mark.postgres_only
 
@@ -140,6 +141,37 @@ def _pending(service: OutsideJudge) -> set[uuid.UUID]:
     return {subject_id for _kind, subject_id in service._pending}
 
 
+async def _many_calls(db, agent: str, decision_id: uuid.UUID, reviewed_at: datetime, count: int = 40) -> None:
+    """``count`` more tool calls with long inputs and results in the session of a decision made by ``_decision``."""
+    async with db.session() as session:
+        for index in range(1, count + 1):
+            await session.execute(
+                text(
+                    "INSERT INTO nous_system.tool_call_log (agent_id, session_id, call_index, work_kind, tool_name, "
+                    "tool_name_called, outcome, input_text, result_preview, started_at) VALUES (:a, :s, :i, "
+                    "'conversation', 'bash', 'bash', 'ok', :input, :result, :t)"
+                ),
+                {
+                    "a": agent,
+                    "s": f"sess-{decision_id.hex[:8]}",
+                    "i": index,
+                    "input": json.dumps({"command": f"copy part {index} of the backup " * 20}),
+                    "result": f"copied part {index} of the nightly backup to the new disk. " * 30,
+                    "t": reviewed_at - timedelta(minutes=4) + timedelta(seconds=index),
+                },
+            )
+        await session.commit()
+
+
+async def _calls_counted(db, agent: str) -> int:
+    """The requests the table counts for this agent (every judge, every day)."""
+    async with db.session() as session:
+        found = await session.scalar(
+            text("SELECT COALESCE(SUM(calls), 0) FROM nous_system.judge_verdicts WHERE agent_id = :a"), {"a": agent}
+        )
+    return int(found)
+
+
 # ---- what the second judge's pass takes -----------------------------------------------------------------------------
 
 
@@ -214,8 +246,10 @@ async def test_the_second_judges_pass_holds_at_half_of_its_own_limit_counted_fro
         await second.close()
     await _calls_today(db, agent, "jev", 50)
     held, _j = _second(db, agent, daily_calls=100)
-    assert await held.sweep_once() == 0 and held.sweep_numbers()["held_at_half_limit"] == 1 and held.idle
-    await held.close()
+    try:
+        assert await held.sweep_once() == 0 and held.sweep_numbers()["held_at_half_limit"] == 1 and held.idle
+    finally:
+        await held.close()
     small = f"{agent}-small"
     await _decision(db, small, "a2ui")
     await _calls_today(db, small, "jev", 5)
@@ -346,7 +380,11 @@ async def test_the_real_second_judge_sends_an_owner_graded_decision_with_a_null_
         sent.append(request)
         return httpx.Response(200, json=ANSWER)
 
-    await _decision(db, agent, "a2ui", outcome="failure", note="the backup did not move")
+    reviewed = NOW - timedelta(hours=1)
+    decision_id = await _decision(
+        db, agent, "a2ui", outcome="failure", reviewed_at=reviewed, note="the backup did not move"
+    )
+    await _many_calls(db, agent, decision_id, reviewed)  # far more evidence than the record's bound
     jev = JevJudge(TEST_KEY, MODEL, transport=httpx.MockTransport(answer))
     second, _j = _second(db, agent, jev)
     second.start()
@@ -356,12 +394,13 @@ async def test_the_real_second_judge_sends_an_owner_graded_decision_with_a_null_
         await second.close()
     [request] = sent
     body = json.loads(request.content)
-    assert body["state"]["written_by_author"]["claim"] is None
+    state = body["state"]
+    assert state["written_by_author"]["claim"] is None
     assert "the backup did not move" not in request.content.decode("utf-8")
     assert body["questions"] == jev_judge.questions()
-    # The record is the bounded one: the body is at most the record's bound, the questions and the model's name.
-    questions = json.dumps(body["questions"], separators=(",", ":"))
-    assert len(request.content) <= evidence.EVIDENCE_MAX_CHARS + len(questions) + len(MODEL) + 64
+    # The swept record is cut to the same bound as a live one: items left out, the record within EVIDENCE_MAX_CHARS.
+    assert state["evidence_truncated"] is True and state["evidence_dropped"] > 0
+    assert len(json.dumps(state, ensure_ascii=False)) <= evidence.EVIDENCE_MAX_CHARS
     [row] = await _rows(db, agent)
     assert (row["judge_version"], row["status"], row["against_grader"]) == (VERSION, "ok", "a2ui")
 
@@ -431,11 +470,13 @@ async def test_a_closed_second_judge_takes_nothing_and_the_first_still_takes_dec
     second, _j = _second(db, agent)
     both = JudgeSet(first, second)
     second.start()
-    await second.close()
-    assert await second.sweep_once() == 0 and second.idle
-    assert both.submit_decision(decision_id, grade="success", note=None, grader="agent", resolved_at=NOW) is True
-    assert _pending(first) == {decision_id} and second.runtime()["dropped"] == 1
-    await first.close()
+    try:
+        await second.close()
+        assert await second.sweep_once() == 0 and second.idle
+        assert both.submit_decision(decision_id, grade="success", note=None, grader="agent", resolved_at=NOW) is True
+        assert _pending(first) == {decision_id} and second.runtime()["dropped"] == 1
+    finally:
+        await both.close()
 
 
 async def test_a_provider_failure_writes_an_error_row_for_the_second_judge_only(db, agent):
@@ -466,6 +507,9 @@ class Managed:
         self.manager, self.judges, self.primary = manager, judges, primary
         self.built: list[OutsideJudge] = []
         self.sent: list[httpx.Request] = []
+        # The provider answers while this is set; a test clears it to hold the requests that arrive.
+        self.answering = asyncio.Event()
+        self.answering.set()
 
 
 @pytest_asyncio.fixture
@@ -504,8 +548,9 @@ async def managed(db, agent, monkeypatch):
                 await session.commit()
         env: Managed
 
-        def answer(request: httpx.Request) -> httpx.Response:
+        async def answer(request: httpx.Request) -> httpx.Response:
             env.sent.append(request)
+            await env.answering.wait()
             return httpx.Response(200, json=ANSWER)
 
         manager = SecondJudgeManager(
@@ -527,6 +572,7 @@ async def managed(db, agent, monkeypatch):
 
     yield build
     for env in made:
+        env.answering.set()
         await env.manager.close()
         if env.judges is not None:
             await env.judges.close()
@@ -636,3 +682,179 @@ async def test_a_decision_swept_across_a_swap_is_sent_once_and_ends_as_one_row(d
         ).all()
     assert [tuple(row) for row in rows] == [("jev", VERSION, "ok")]
     assert len(env.sent) == 1
+
+
+# ---- closing with work in flight ------------------------------------------------------------------------------------
+
+
+async def test_a_close_while_the_pass_is_inside_a_query_stops_it_at_once_and_queues_nothing(
+    db, agent, monkeypatch, caplog
+):
+    monkeypatch.setattr(service_module, "SWEEP_FIRST_DELAY_SECONDS", 0.0)
+    decision_id = await _decision(db, agent, "a2ui")
+    reading = asyncio.Event()
+    real = store.sweep_decisions
+
+    async def slow_for_the_second(session, agent_id, *, judge_name, **kwargs):
+        if judge_name == "jev":
+            reading.set()
+            await session.execute(text("SELECT pg_sleep(30)"))
+        return await real(session, agent_id, judge_name=judge_name, **kwargs)
+
+    monkeypatch.setattr(store, "sweep_decisions", slow_for_the_second)
+    first, first_judge, _r = _service(db, agent)
+    second, judge = _second(db, agent)
+    second.start()
+    try:
+        await asyncio.wait_for(reading.wait(), 5)
+        started = asyncio.get_running_loop().time()
+        with caplog.at_level(logging.WARNING, logger="nous.judge.service"):
+            await second.close()
+        assert asyncio.get_running_loop().time() - started < 5.0
+        assert second._sweeper.done() and second.idle and judge.records == []
+        assert second.runtime()["dropped"] == 0 and second.runtime()["queued"] == 0
+        # The cancellation can come back from the session's cleanup as a database error: then the cut pass is counted
+        # as failed, with one WARNING naming the class only.
+        warnings = [
+            r.getMessage() for r in caplog.records if r.name == "nous.judge.service" and r.levelno >= logging.WARNING
+        ]
+        assert len(warnings) == second.sweep_numbers()["failed"] <= 1
+        assert all(message.startswith("F118: a sweep pass failed (") for message in warnings)
+        # The sessions still serve, and the first judge's pass is untouched (run before its own loop starts).
+        assert await first.sweep_once() == 1
+        first.start()
+        await _until(lambda: first.idle)
+        assert [record.subject_id for record in first_judge.records] == [decision_id]
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_a_swap_while_the_old_judges_pass_is_reading_closes_it_cleanly(db, agent, managed, monkeypatch):
+    monkeypatch.setattr(service_module, "SWEEP_FIRST_DELAY_SECONDS", 0.0)
+    reading, release = asyncio.Event(), asyncio.Event()
+    real = store.sweep_decisions
+
+    async def held_once_for_the_second(session, agent_id, *, judge_name, **kwargs):
+        if judge_name == "jev" and not reading.is_set():
+            reading.set()
+            await release.wait()
+        return await real(session, agent_id, judge_name=judge_name, **kwargs)
+
+    monkeypatch.setattr(store, "sweep_decisions", held_once_for_the_second)
+    await _decision(db, agent, "a2ui")
+    env = await managed(row={"enabled": True}, settle=(60.0, 60.0))
+    [old] = env.built
+    await asyncio.wait_for(reading.wait(), 5)
+    try:
+        answer = await env.manager.patch({"model": "jev-1.15.0"}, confirmed=None, actor="owner")
+    finally:
+        release.set()
+    assert answer.status == 200
+    [_old, new] = env.built
+    assert old._closed and old._sweeper.done() and old.idle and old.runtime()["dropped"] == 0
+    assert not new._sweeper.done() and not env.primary._sweeper.done()
+    assert env.sent == []
+
+
+async def test_after_swaps_and_a_shutdown_no_judge_task_of_this_test_is_left(managed):
+    before = {task for task in asyncio.all_tasks() if task.get_name().startswith("outside-judge")}
+    env = await managed(row={"enabled": True})
+    for model in ("jev-1.15.0", "jev-1.16.0", "jev-1.17.0"):
+        assert (await env.manager.patch({"model": model}, confirmed=None, actor="owner")).status == 200
+    await env.manager.close()
+    await env.judges.close()
+    await asyncio.sleep(0)
+    left = {
+        task for task in asyncio.all_tasks() if task.get_name().startswith("outside-judge") and not task.done()
+    } - before
+    assert left == set()
+
+
+async def test_a_request_in_flight_when_the_judge_is_replaced_ends_with_its_row_and_is_not_sent_again(
+    db, agent, managed, monkeypatch
+):
+    """The old judge's close waits out a request it has sent (the judge's own timeout and grace), so the request
+    ends with its row: it is counted in the day's calls and attempts, and the new judge's pass does not send the
+    decision again. The times are shortened, the close's general wait kept below the judge's timeout as 5 s is below
+    Jev's 10 s."""
+    monkeypatch.setattr(service_module, "CLOSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(jev_judge, "TIMEOUT_SECONDS", 1.0)
+    decision_id = await _decision(db, agent, "a2ui")
+    env = await managed(row={"enabled": True})
+    [old] = env.built
+    assert old._close_timeout == call_bound(1.0)
+    env.answering.clear()  # the provider has the request and does not answer
+    assert await old.sweep_once() == 1
+    await _until(lambda: len(env.sent) == 1)
+    # A lower limit keeps the name and version: the new judge looks for the same row.
+    lowered = await env.manager.patch({"daily_calls": 50}, confirmed=None, actor="owner")
+    assert lowered.status == 200
+    [_old, new] = env.built
+    assert await new.sweep_once() == 0  # the failed attempt waits SWEEP_RETRY_AFTER before it is tried again
+    async with db.session() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT status, calls, attempts FROM nous_system.judge_verdicts "
+                    "WHERE agent_id = :a AND subject_id = :s"
+                ),
+                {"a": agent, "s": decision_id},
+            )
+        ).all()
+    assert [tuple(row) for row in rows] == [("timeout", 1, 1)]
+    assert len(env.sent) == 1 == await _calls_counted(db, agent)
+
+
+async def test_at_shutdown_a_request_the_second_judge_has_sent_ends_with_its_row(db, agent, monkeypatch):
+    monkeypatch.setattr(service_module, "CLOSE_TIMEOUT_SECONDS", 0.05)
+    await _decision(db, agent, "a2ui")
+    sent: list[httpx.Request] = []
+    answering = asyncio.Event()
+
+    async def held(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        await answering.wait()
+        return httpx.Response(200, json=ANSWER)
+
+    jev = JevJudge(TEST_KEY, MODEL, transport=httpx.MockTransport(held))
+    first, _d, _r = _service(db, agent)
+    # As main.py builds it: the judge's own timeout (shortened here) and close waiting out a request in flight.
+    second = OutsideJudge(
+        db,
+        _settings(agent),
+        jev,
+        settle_seconds=0.0,
+        timeout_seconds=1.0,
+        daily_calls=100,
+        sweep=True,
+        close_timeout=call_bound(1.0),
+    )
+    both = JudgeSet(first, second)
+    first.start()
+    second.start()
+    try:
+        assert await second.sweep_once() == 1
+        await _until(lambda: len(sent) == 1)
+        await both.close()  # as main.py shuts down: each judge waits its own time
+        assert first._close_timeout == 0.05  # the first judge's wait is not changed
+    finally:
+        answering.set()
+        await both.close()
+    assert [(row["judge_name"], row["status"]) for row in await _rows(db, agent)] == [("jev", "timeout")]
+    assert len(sent) == 1 == await _calls_counted(db, agent)
+
+
+async def test_the_judge_sets_close_lets_each_judge_wait_its_own_time_unless_told():
+    closed: list[tuple[str, float | None]] = []
+
+    class Recording:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def close(self, timeout: float | None = None) -> None:
+            closed.append((self.name, timeout))
+
+    await JudgeSet(Recording("first"), Recording("second")).close()
+    await JudgeSet(Recording("first"), Recording("second")).close(0)
+    assert closed == [("first", None), ("second", None), ("first", 0), ("second", 0)]

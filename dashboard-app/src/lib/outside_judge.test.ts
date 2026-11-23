@@ -86,9 +86,9 @@ describe('the other words', () => {
   it('says that a change applies at once and what waits in line is dropped from it', () => {
     expect(HELP).toBe('A change applies at once. Decisions waiting in line for Jev when you save are dropped from the line.');
   });
-  it('says which decisions Jev grades: those that have a grade, live or earlier', () => {
+  it('says what Jev is without naming which decisions are sent (the confirmation says that)', () => {
     expect(INTRO).toBe(
-      "Jev, a model of the company TypeSafe, grades Nous's decisions once they have a grade, beside Nous's own judge. " +
+      "Jev, a model of the company TypeSafe, gives a second opinion on Nous's decisions, beside Nous's own judge. " +
         'Its grades are kept for comparison and change nothing.',
     );
   });

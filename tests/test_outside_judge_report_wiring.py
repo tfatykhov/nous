@@ -22,8 +22,9 @@ import nous.main as main
 from nous import judge as judge_slot
 from nous.config import Settings
 from nous.judge import slot
+from nous.judge.jev_judge import TIMEOUT_SECONDS
 from nous.judge.model_judge import BackgroundModelJudge, BackgroundModelReportJudge
-from nous.judge.service import OutsideJudge
+from nous.judge.service import CLOSE_TIMEOUT_SECONDS, OutsideJudge, call_bound
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -62,6 +63,7 @@ def test_with_reports_off_the_judge_is_built_as_before(monkeypatch):
     )
     assert isinstance(built, OutsideJudge) and isinstance(built.judge, BackgroundModelJudge)
     assert built.report_judge is None and built.sweep_numbers() is None
+    assert built._close_timeout == CLOSE_TIMEOUT_SECONDS  # the first judge's close waits as before
 
 
 def test_with_reports_on_the_first_judge_gets_the_report_judge_and_the_sweep(monkeypatch):
@@ -110,6 +112,8 @@ def test_the_second_judge_gets_no_report_judge_and_its_own_sweep_with_the_settin
     assert second.report_judge is None  # no report
     # Its own sweep of decisions with the setting on (built, not started: the numbers say whether it is on).
     assert (second.sweep_numbers() is not None) is reports
+    # Its close waits out a request it has sent, so the request ends with its row.
+    assert second._close_timeout == call_bound(TIMEOUT_SECONDS) > CLOSE_TIMEOUT_SECONDS
     assert second.submit_report(uuid.uuid4(), claimed_at=datetime.now(UTC)) is False
     assert second.runtime()["dropped"] == 0 and second.idle  # nothing queued, nothing counted
 

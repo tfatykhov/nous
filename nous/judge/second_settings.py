@@ -21,11 +21,13 @@ backups, not the running process.
 that would start the sending, or raise the daily limit while it sends, needs the owner's yes to the sentence that names
 the limit after it, sent back as that number), registers a new key, writes the row and commits, then builds and
 starts the new second judge (when it sends), swaps it into the ``JudgeSet`` in one assignment and closes the old one,
-whose queued decisions are dropped. The second judge's hourly pass (with ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``, the
-setting of the first judge's) starts with it and stops when it is replaced or closed: a new judge's pass counts from
-zero, and its first pass runs two minutes after its start. The change runs in a task the manager holds, so a caller
-that goes away does not stop it, and its answer comes after the old judge has closed. The first judge is never
-replaced, closed or read here. Nothing here logs a key, a request body or an exception's text: class names only.
+whose queued decisions are dropped; a request the old one has sent is waited for up to its own timeout and grace
+(``service.call_bound``), so it ends with its row and is counted. The second judge's hourly pass (with
+``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``, the setting of the first judge's) starts with it and stops when it is replaced
+or closed: a new judge's pass counts from zero, and its first pass runs two minutes after its start. The change runs
+in a task the manager holds, so a caller that goes away does not stop it, and its answer comes after the old judge has
+closed. The first judge is never replaced, closed or read here. Nothing here logs a key, a request body or an
+exception's text: class names only.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ from nous.cognitive.ledger_store import forget_own_secret, register_own_secret
 from nous.judge import jev_judge, store
 from nous.judge.evidence import EVIDENCE_MAX_CHARS
 from nous.judge.jev_judge import JevJudge
-from nous.judge.service import SWEEP_BATCH, OutsideJudge
+from nous.judge.service import SWEEP_BATCH, OutsideJudge, call_bound
 from nous.mcp_client.secrets import AadFields, KeyFile, SecretBox, SecretUnavailable, aad_fields
 
 logger = logging.getLogger(__name__)
@@ -89,11 +91,12 @@ CONFIRM_TEXT = (
 )
 # The sentence's added part when the hourly pass is on (NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED); it starts with a space.
 HOURLY_TEXT = (
-    " Earlier decisions are sent too: about once an hour, and two minutes after a start or a saved change, up to "
-    "{batch} that this model of Jev has not graded yet, from those Nous graded in the last {agent_days} days and those "
-    "graded by the owner, the review route or an automatic check in the last {days} days. Decisions graded by the "
-    "owner, the review route or an automatic check are sent without the grade and its note. A copy whose request "
-    "failed is sent again, at most {attempts} times in all."
+    " Decisions are also sent by an hourly pass: about once an hour, and two minutes after a start or a saved change, "
+    "up to {batch} that Jev has not graded yet with this model and its current instructions, from those Nous graded "
+    "in the last {agent_days} days and those graded by the owner, the review route or an automatic check in the last "
+    "{days} days. With a new model or new instructions they are sent again. Decisions graded by the owner, the review "
+    "route or an automatic check are sent without the grade and its note. A copy whose request failed is sent again, "
+    "at most {attempts} times for one model and one set of instructions."
 )
 
 _sleep = asyncio.sleep  # the retry's wait; tests replace it
@@ -501,6 +504,7 @@ class SecondJudgeManager:
             timeout_seconds=jev_judge.TIMEOUT_SECONDS,
             daily_calls=config.daily_calls,
             sweep=self._hourly(),
+            close_timeout=call_bound(jev_judge.TIMEOUT_SECONDS),
         )
 
     def _hold(self, key: str) -> None:

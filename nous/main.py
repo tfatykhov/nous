@@ -718,7 +718,7 @@ def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:
     is on; the caller starts it. None, with one WARNING, when ``TYPESAFE_API_KEY`` is empty. Its key and model are read
     by the provider (``jev_judge.make_jev_judge``), its limit here."""
     from nous.judge.jev_judge import NAME, TIMEOUT_SECONDS, register_jev_judge
-    from nous.judge.service import OutsideJudge
+    from nous.judge.service import OutsideJudge, call_bound
     from nous.judge.slot import PROVIDERS
 
     register_jev_judge()
@@ -735,6 +735,7 @@ def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:
         timeout_seconds=TIMEOUT_SECONDS,
         daily_calls=settings.outside_judge_daily_calls,
         sweep=bool(settings.outside_judge_reports_enabled),
+        close_timeout=call_bound(TIMEOUT_SECONDS),  # at shutdown a request it has sent ends with its row
     )
 
 

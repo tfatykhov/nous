@@ -179,7 +179,7 @@ describe('the status and the rows', () => {
     expect(section.textContent).toContain('A version like jev-1.14.0');
     expect(screen.getByTestId('jev-key').textContent).toBe('A key is saved (3 May)');
     expect(section.textContent).toContain('A change applies at once. Decisions waiting in line for Jev when you save are dropped from the line.');
-    expect(section.textContent).toContain("grades Nous's decisions once they have a grade, beside Nous's own judge.");
+    expect(section.textContent).toContain("gives a second opinion on Nous's decisions, beside Nous's own judge.");
     expect(screen.getByRole('button', { name: 'Replace key' })).toBeTruthy();
     expect(section.textContent).not.toMatch(/undefined|null|NaN/);
   });

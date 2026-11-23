@@ -80,7 +80,7 @@ class StandIn:
 
     def __init__(self, config: Any) -> None:
         self.config = config
-        self.judge = SimpleNamespace(name="jev", version=f"jq-2:{config.model}", model=config.model)
+        self.judge = SimpleNamespace(name="jev", version=f"jq-3:{config.model}", model=config.model)
         self.daily_calls = config.daily_calls
         self.closed = False
 

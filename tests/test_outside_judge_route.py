@@ -448,7 +448,7 @@ async def test_the_route_names_the_running_judge_and_its_queue(tmp_path, db, age
 # ---- two judges -----------------------------------------------------------------------------------------------------
 
 FIRST = ("background_model", "dj-2")
-SECOND = ("jev", "jq-2:jev-1.14.0")
+SECOND = ("jev", "jq-3:jev-1.14.0")
 
 
 async def _seed_verdicts(db, agent: str, rows: list[dict[str, Any]]) -> None:

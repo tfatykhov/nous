@@ -97,7 +97,7 @@ class StandIn:
 
     def __init__(self, config: Any, events: list[str]) -> None:
         self.config = config
-        self.judge = SimpleNamespace(name="jev", version=f"jq-2:{config.model}", model=config.model)
+        self.judge = SimpleNamespace(name="jev", version=f"jq-3:{config.model}", model=config.model)
         self.daily_calls = config.daily_calls
         self.events = events
         self.started = False
@@ -421,7 +421,7 @@ async def test_the_sentence_names_the_hourly_pass_exactly_when_the_reports_setti
     assert env.manager.state()["confirm_text"] == sentence
     asked = await env.manager.patch({"on": True}, confirmed=None, actor="owner")
     assert (asked.status, asked.body["error"], asked.body["confirm_daily_calls"]) == (409, sentence, YES)
-    assert ("Earlier decisions are sent too" in sentence) is reports
+    assert ("Decisions are also sent by an hourly pass" in sentence) is reports
     accepted = await env.manager.patch({"on": True}, confirmed=YES, actor="owner")
     assert accepted.status == 200 and accepted.body["confirm_text"] == sentence
 

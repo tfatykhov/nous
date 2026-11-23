@@ -21,7 +21,9 @@ times in all (``store``). Everything in the worker is caught: one WARNING with t
 ``error`` row when one can be written. A cancellation of one judging that does not come from ``close`` ends that
 judging, writes nothing and leaves the worker running; a worker that ended anyway is started again by the next
 submit. ``close`` stops taking work, waits ``CLOSE_TIMEOUT_SECONDS`` for the subject in flight, then cancels the
-rest. The worker reads the decision and the session's records and writes only ``nous_system.judge_verdicts``.
+rest; a service built with its own ``close_timeout`` (the second judge's: ``call_bound`` of its timeout) waits that
+long instead, so a request it has sent ends with its row. The worker reads the decision and the session's records and
+writes only ``nous_system.judge_verdicts``.
 
 ``JudgeSet`` puts two such services side by side, a second judge on the same decisions: a submit hands both the same
 claim, and neither one's failure, time or limit changes the other's.
@@ -93,6 +95,11 @@ class _Item:
     @property
     def key(self) -> tuple[str, UUID]:
         return self.kind, self.subject_id
+
+
+def call_bound(timeout_seconds: float) -> float:
+    """The longest one judging's call may take: the judge's own timeout and the grace after it (``_judge_one``)."""
+    return timeout_seconds + min(OUTER_GRACE_SECONDS, timeout_seconds)
 
 
 def _calls_reported(output: Any) -> int:
@@ -171,8 +178,11 @@ class OutsideJudge:
         daily_calls: int | None = None,
         report_judge: Judge | None = None,
         sweep: bool | None = None,
+        close_timeout: float | None = None,
     ) -> None:
         self._database = database
+        # How long close waits for the subject being judged (None: CLOSE_TIMEOUT_SECONDS).
+        self._close_timeout = CLOSE_TIMEOUT_SECONDS if close_timeout is None else close_timeout
         self._agent_id = settings.agent_id
         self._daily_calls = settings.outside_judge_daily_calls if daily_calls is None else daily_calls
         self.judge = judge
@@ -296,9 +306,10 @@ class OutsideJudge:
         if self._sweep_on and self._sweeper is None and not self._closed:
             self._sweeper = asyncio.get_running_loop().create_task(self._sweep_loop(), name="outside-judge-sweep")
 
-    async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
-        """Stop taking work, wait up to ``timeout`` for the subject being judged, then cancel the rest (a cancelled
-        subject writes nothing). Subjects still queued are dropped."""
+    async def close(self, timeout: float | None = None) -> None:
+        """Stop taking work, wait up to ``timeout`` (None: this service's ``close_timeout``) for the subject being
+        judged, then cancel the rest (a cancelled subject writes nothing). Subjects still queued are dropped."""
+        timeout = self._close_timeout if timeout is None else timeout
         self._closed = True
         if self._sweeper is not None:
             self._sweeper.cancel()
@@ -379,7 +390,7 @@ class OutsideJudge:
             started = time.monotonic()
             row["calls"] = 1  # from here a request may have been sent; the judge's own count replaces this
             # The judge bounds its own call; this outer bound, a little later, stops one that does not.
-            outer = self._timeout + min(OUTER_GRACE_SECONDS, self._timeout)
+            outer = call_bound(self._timeout)
             try:
                 judging = judge.grade(found.record, timeout=self._timeout, max_calls=left)
                 output = await asyncio.wait_for(judging, timeout=outer)
@@ -615,10 +626,14 @@ class JudgeSet:
         second = self.second  # read once
         return None if second is None else _sweep_numbers_of(second)
 
-    async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
-        """Close every judge at once (``OutsideJudge.close``); one that raises does not keep another open."""
+    async def close(self, timeout: float | None = None) -> None:
+        """Close every judge at once (``OutsideJudge.close``), each waiting ``timeout`` or, when None, its own time;
+        one that raises does not keep another open."""
         services = [service for service in (self.primary, self.second) if service is not None]
-        closing = await asyncio.gather(*(service.close(timeout) for service in services), return_exceptions=True)
+        closing = await asyncio.gather(
+            *(service.close() if timeout is None else service.close(timeout) for service in services),
+            return_exceptions=True,
+        )
         for result in closing:
             if isinstance(result, Exception):
                 logger.warning("F118: a judge did not close cleanly (%s)", type(result).__name__)
