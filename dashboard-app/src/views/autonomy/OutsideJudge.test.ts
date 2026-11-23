@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import OutsideJudge from './OutsideJudge.svelte';
 import type { Disagreement, JudgeData, SweepRuntime } from '../../lib/outside_judge_numbers';
+import { parseBlocks, styleBlocks } from '../../lib/testing/css';
 
 // F118: the panel "The outside judge". The fetch stand-in answers each read with the next of `replies`, else
 // `fallback`. A reply is a status and a body, a network error, a read that waits until its signal aborts, or a read
@@ -432,5 +435,14 @@ describe('text, not markup', () => {
     expect(item.querySelector('.item-title')?.textContent).toBe('<b>bold</b>');
     expect(item.querySelector('.reason')?.textContent).toBe('<b>bold</b>');
     expect(section.querySelector('b')).toBeNull();
+  });
+});
+
+describe('on a phone', () => {
+  it('the grader names wrap in a narrow column, so the numbers beside it stay in view while the table scrolls', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'OutsideJudge.svelte'), 'utf-8'));
+    const at = css.indexOf('@media (max-width: 640px)');
+    expect(at).toBeGreaterThan(-1);
+    expect(parseBlocks(css.slice(at)).get('.stats tbody th')).toMatchObject({ 'white-space': 'normal', width: '8rem' });
   });
 });

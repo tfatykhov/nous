@@ -302,5 +302,7 @@
   .muted { color: var(--muted); }
   @media (max-width: 640px) {
     .tiles > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+    /* The grader's name stays in view while the numbers scroll: it wraps in a narrow column instead of filling the box. */
+    .stats tbody th { white-space: normal; width: 8rem; min-width: 8rem; }
   }
 </style>
