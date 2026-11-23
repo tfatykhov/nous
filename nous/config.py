@@ -1077,6 +1077,13 @@ class Settings(BaseSettings):
             "stays as empty as it is today."
         ),
     )
+    # F118 outside judge (nous/judge/): a decision the agent resolved as success, partial or failure is judged later,
+    # in a background queue, from its record and the tool calls that were run; the verdict is stored beside the
+    # agent's own grade in nous_system.judge_verdicts and changes nothing else. off: nothing is built. An empty model
+    # is NOUS_BACKGROUND_MODEL; any other must be a Claude model. The cap counts model calls per UTC day (0: none).
+    outside_judge_mode: Literal["off", "shadow"] = "off"
+    outside_judge_model: str = ""
+    outside_judge_daily_calls: int = Field(default=100, ge=0, le=5000)
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",
@@ -3294,6 +3301,29 @@ class Settings(BaseSettings):
         if not isinstance(v, str) or not v.strip().startswith("claude-"):
             raise ValueError(f"promise_gate_classifier_model must be a Claude model (claude-...), got {v!r}")
         return v.strip()
+
+    @field_validator("outside_judge_mode", mode="before")
+    @classmethod
+    def _empty_outside_judge_mode(cls, v: object) -> object:
+        """F118: an empty value is off. Any value other than off or shadow is refused at start."""
+        return "off" if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("outside_judge_model", mode="before")
+    @classmethod
+    def _validate_outside_judge_model(cls, v: object) -> object:
+        """F118: an empty value is the background model; anything that is not a Claude model is refused (the judge
+        sends its redacted record to Anthropic only)."""
+        if isinstance(v, str) and not v.strip():
+            return ""
+        if not isinstance(v, str) or not v.strip().startswith("claude-"):
+            raise ValueError(f"outside_judge_model must be a Claude model (claude-...) or empty, got {v!r}")
+        return v.strip()
+
+    @field_validator("outside_judge_daily_calls", mode="before")
+    @classmethod
+    def _empty_outside_judge_daily_calls(cls, v: object) -> object:
+        """F118: an empty value is the default cap."""
+        return 100 if isinstance(v, str) and not v.strip() else v
 
     @field_validator("recall_deep_max_items", mode="before")
     @classmethod

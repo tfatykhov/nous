@@ -34,6 +34,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from nous import cancel_provenance
+from nous import judge as outside_judge  # F118: the running judge's accessor only (nous/judge/__init__.py)
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
@@ -42,7 +43,7 @@ from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build,
 from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
-from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
+from nous.brain.schemas import GRADED_OUTCOMES, NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
 from nous.handlers.tool_notes import ToolNoteStore, is_tool_notes_procedure, render_notes
 from nous.heart.exemplars import parse_label
@@ -1623,6 +1624,31 @@ async def ingest_document_text(
         return {"code": "exception", "error": f"Error ingesting document: {e}"}
 
 
+def _submit_to_outside_judge(
+    items: list[dict[str, Any]], results: list[dict[str, Any]], *, is_background: bool
+) -> None:
+    """F118: hand each decision this call resolved as success, partial or failure in an interactive turn to the
+    outside judge, when one runs (``nous.judge.current()``), with its outcome, its stored note and one time for the
+    call. A noise or superseded item, a refused or failed item and a background turn hand nothing. Synchronous: it
+    never awaits, never raises and never changes the reply."""
+    service = outside_judge.current()
+    if service is None or is_background:
+        return
+    try:
+        resolved_at = datetime.now(UTC)
+        for item, result in zip(items, results):
+            if result.get("ok") and item.get("outcome") in GRADED_OUTCOMES:
+                service.submit_decision(
+                    item["decision_id"],
+                    grade=item["outcome"],
+                    note=item["result"],
+                    grader="agent",
+                    resolved_at=resolved_at,
+                )
+    except Exception as exc:
+        logger.warning("F118: a resolved decision was not handed to the outside judge (%s)", type(exc).__name__)
+
+
 # ---------------------------------------------------------------------------
 # Nous memory tool closures
 # ---------------------------------------------------------------------------
@@ -2747,6 +2773,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 text = f"Resolved {ok}/{len(results)}" + (":\n" + "\n".join(f"- {d}" for d in done) if done else ".")
             if failed:
                 text += "\nFailures:\n" + "\n".join(f"- {r['decision_id']}: {r['error']}" for r in failed)
+            _submit_to_outside_judge(items, results, is_background=_is_background)
             return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
         except Exception as e:
             logger.exception("resolve_decisions tool failed")

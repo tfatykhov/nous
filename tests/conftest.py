@@ -114,6 +114,16 @@ def _no_tool_guard():
     tool_guard.install(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_outside_judge():
+    """F118: the running outside judge is process-wide. Start and end every test without one."""
+    from nous import judge
+
+    judge.set_current(None)
+    yield
+    judge.set_current(None)
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------

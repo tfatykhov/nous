@@ -2340,6 +2340,58 @@ def create_app(
             logger.error("Dashboard memory write health error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_outside_judge(request: Request) -> JSONResponse:
+        """GET /dashboard/outside-judge — F118: the outside judge's verdicts beside the grades they were compared
+        with, its cost and its queue, for the running judge's name and version. Read-only; ``days`` 1 to 90, default
+        14. Owner-guarded: the disagreements carry the judge's one sentence. With the judge off: 200
+        {"enabled": false} and no session."""
+        if settings.outside_judge_mode == "off":
+            return JSONResponse({"enabled": False})
+        from nous import judge as judge_slot
+        from nous.judge import store as judge_store
+        from nous.judge.instructions import INSTRUCTION_VERSION
+        from nous.judge.model_judge import NAME as BUILT_IN_JUDGE
+
+        try:
+            days = judge_store.parse_days(request.query_params.get("days"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        service = judge_slot.current()
+        judge = getattr(service, "judge", None)
+        name = getattr(judge, "name", BUILT_IN_JUDGE)
+        version = getattr(judge, "version", INSTRUCTION_VERSION)
+        model = getattr(judge, "model", None)
+        try:
+            async with database.session() as session:
+                numbers = await judge_store.get_numbers(
+                    session,
+                    settings.agent_id,
+                    days=days,
+                    judge_name=name,
+                    judge_version=version,
+                    cap=settings.outside_judge_daily_calls,
+                )
+        except Exception as e:
+            logger.error("Dashboard outside judge error (%s)", type(e).__name__)
+            return JSONResponse({"error": "the judge's numbers could not be read"}, status_code=500)
+        runtime = (
+            service.runtime()
+            if service is not None
+            else {"queued": 0, "dropped": 0, "over_cap": 0, "worker_alive": False}
+        )
+        return JSONResponse(
+            {
+                "enabled": True,
+                "mode": settings.outside_judge_mode,
+                "judge": name,
+                "version": version,
+                "model": model if isinstance(model, str) else None,
+                "days": days,
+                **numbers,
+                "runtime": runtime,
+            }
+        )
+
     async def dashboard_work_sessions(request: Request) -> JSONResponse:
         """GET /dashboard/work/sessions — F108: the Work list, the sessions of the last ``days`` days (default 7)
         latest activity first, with their tools and flags. Read-only. With the tool-call log off: 200
@@ -4100,6 +4152,8 @@ def create_app(
             methods=["POST"],
         ),
         Route("/dashboard/memory-write-health", dashboard_memory_write_health),
+        # F118: the outside judge's numbers (its disagreements carry the judge's sentence)
+        owner_guard.route("/dashboard/outside-judge", dashboard_outside_judge, methods=["GET"]),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         # F035.6: Consolidation audit diff dashboard — detail (path param) MUST

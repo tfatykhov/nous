@@ -540,6 +540,7 @@ async def test_reader_denied_reply_text(db, reader_role, reader_settings):
         "select tool from nous_system.tool_guard",
         "select tool from brain.goal_tool_grants",
         "select evidence from heart.pending_resolutions",
+        "select verdict from nous_system.judge_verdicts",
         "select embedding from heart.facts",
         "select search_tsv from brain.decisions",
         "select * from heart.facts",

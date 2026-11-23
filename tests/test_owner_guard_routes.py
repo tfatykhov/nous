@@ -312,6 +312,8 @@ REST_ROUTE_SET = {
     ("GET", "/dashboard/work/calls/{call_id}/result"),
     ("GET", "/dashboard/model-calls/{call_id}/blocks/{part}/{ord}"),
     ("GET", "/dashboard/execution/{entry_id}"),
+    # F118: the outside judge's numbers, with the judge's sentence on each disagreement
+    ("GET", "/dashboard/outside-judge"),
     ("GET", "/context/log/{id}/payload"),
     ("GET", "/context/log/{id}/sections"),
     # Companion devices: the owner opens a pairing, lists and revokes (nous/api/companion_devices.py)
@@ -436,6 +438,8 @@ GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
     "/dashboard/work/calls/abc/result": (400, {"error": "call id must be a UUID"}),
     "/dashboard/model-calls/abc/blocks/system/0": (400, {"error": "call id must be a UUID"}),
     "/dashboard/execution/abc": (500, None),
+    # With the judge off (the default) it answers without a session: the stand-in database has none.
+    "/dashboard/outside-judge": (200, {"enabled": False}),
     "/context/log/abc/payload": (404, {"error": "Not enabled"}),
     "/context/log/abc/sections": (404, {"error": "Not enabled"}),
 }
