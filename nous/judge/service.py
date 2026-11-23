@@ -22,6 +22,9 @@ times in all (``store``). Everything in the worker is caught: one WARNING with t
 judging, writes nothing and leaves the worker running; a worker that ended anyway is started again by the next
 submit. ``close`` stops taking work, waits ``CLOSE_TIMEOUT_SECONDS`` for the subject in flight, then cancels the
 rest. The worker reads the decision and the session's records and writes only ``nous_system.judge_verdicts``.
+
+``JudgeSet`` puts two such services side by side, a second judge on the same decisions: a submit hands both the same
+claim, and neither one's failure, time or limit changes the other's.
 """
 
 from __future__ import annotations
@@ -122,10 +125,11 @@ class OutsideJudge:
         settle_seconds: float = SETTLE_SECONDS,
         timeout_seconds: float = JUDGE_TIMEOUT_SECONDS,
         queue_max: int = QUEUE_MAX,
+        daily_calls: int | None = None,
     ) -> None:
         self._database = database
         self._agent_id = settings.agent_id
-        self._daily_calls = settings.outside_judge_daily_calls
+        self._daily_calls = settings.outside_judge_daily_calls if daily_calls is None else daily_calls
         self.judge = judge
         self._settle = settle_seconds
         self._timeout = timeout_seconds
@@ -180,6 +184,11 @@ class OutsideJudge:
             "over_cap": self._over_cap,
             "worker_alive": self._worker is not None and not self._worker.done(),
         }
+
+    @property
+    def daily_calls(self) -> int:
+        """The most requests this judge may send a UTC day (``NOUS_OUTSIDE_JUDGE_DAILY_CALLS`` unless given)."""
+        return self._daily_calls
 
     @property
     def idle(self) -> bool:
@@ -324,3 +333,59 @@ class OutsideJudge:
         }
         async with self._database.session() as session:
             await store.insert_verdict(session, values)
+
+
+class JudgeSet:
+    """The first judge and, when there is one, a second judge on the same decisions (``NOUS_OUTSIDE_JUDGE_SECOND``),
+    each an ``OutsideJudge`` with its own queue, worker, timeout, daily limit and rows. It reads as the first judge
+    (``judge``, and ``runtime`` with the second's under the key ``second`` when there is one); ``second`` is the second
+    judge's service or None. A service is started before it is put in the set; ``replace_second`` swaps the second
+    judge and leaves starting the new one and closing the old one to its caller."""
+
+    def __init__(self, primary: Any, second: Any | None = None) -> None:
+        self.primary = primary
+        self.second = second
+
+    @property
+    def judge(self) -> Judge:
+        """The first judge."""
+        return self.primary.judge
+
+    def replace_second(self, new: Any | None) -> Any | None:
+        """Make ``new`` (a started service, or None) the second judge and return the one it replaces. Starts and
+        closes nothing: the caller closes the old one."""
+        old, self.second = self.second, new
+        return old
+
+    def submit_decision(self, decision_id: Any, *, grade: Any, note: Any, grader: Any, resolved_at: Any) -> bool:
+        """Hand the same claim and time to each judge, each on its own (one that raises takes nothing from the
+        other). The first judge's answer: True when it queued the decision. Never raises and never waits."""
+        claim = {"grade": grade, "note": note, "grader": grader, "resolved_at": resolved_at}
+        second = self.second  # read once, before either judge is called
+        queued = _handed(self.primary, decision_id, claim)
+        if second is not None:
+            _handed(second, decision_id, claim)
+        return queued
+
+    def runtime(self) -> dict[str, Any]:
+        """The first judge's runtime, with the second judge's under ``second`` when there is one."""
+        second = self.second
+        runtime = self.primary.runtime()
+        return runtime if second is None else {**runtime, "second": second.runtime()}
+
+    async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
+        """Close every judge at once (``OutsideJudge.close``); one that raises does not keep another open."""
+        services = [service for service in (self.primary, self.second) if service is not None]
+        closing = await asyncio.gather(*(service.close(timeout) for service in services), return_exceptions=True)
+        for result in closing:
+            if isinstance(result, Exception):
+                logger.warning("F118: a judge did not close cleanly (%s)", type(result).__name__)
+
+
+def _handed(service: Any, decision_id: Any, claim: dict[str, Any]) -> bool:
+    """Submit one claim to one judge's service: True when it queued it. Never raises."""
+    try:
+        return service.submit_decision(decision_id, **claim) is True
+    except Exception as exc:
+        logger.warning("F118: a judge did not take a decision (%s)", type(exc).__name__)
+        return False

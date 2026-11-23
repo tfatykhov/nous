@@ -2344,7 +2344,8 @@ def create_app(
         """GET /dashboard/outside-judge — F118: the outside judge's verdicts beside the grades they were compared
         with, its cost and its queue, for the running judge's name and version. Read-only; ``days`` 1 to 90, default
         14. Owner-guarded: the disagreements carry the judge's one sentence. With the judge off: 200
-        {"enabled": false} and no session."""
+        {"enabled": false} and no session. With a second judge running beside the first, ``second`` holds its own
+        numbers and ``between_judges`` how the two judges' verdicts on the same claims compare."""
         if settings.outside_judge_mode == "off":
             return JSONResponse({"enabled": False})
         from nous import judge as judge_slot
@@ -2361,6 +2362,9 @@ def create_app(
         name = getattr(judge, "name", BUILT_IN_JUDGE)
         version = getattr(judge, "version", INSTRUCTION_VERSION)
         model = getattr(judge, "model", None)
+        # A second judge runs beside the first (NOUS_OUTSIDE_JUDGE_SECOND): its own numbers, under its own daily
+        # limit, and how the two compare. Read once: it can be replaced while this request runs.
+        second_service = getattr(service, "second", None)
         try:
             async with database.session() as session:
                 numbers = await judge_store.get_numbers(
@@ -2374,6 +2378,41 @@ def create_app(
         except Exception as e:
             logger.error("Dashboard outside judge error (%s)", type(e).__name__)
             return JSONResponse({"error": "the judge's numbers could not be read"}, status_code=500)
+        # The second judge's blocks are left out when they cannot be read; the first judge's numbers are still given.
+        second_blocks: dict[str, Any] = {}
+        if second_service is not None:
+            second_judge = second_service.judge
+            try:
+                async with database.session() as session:
+                    second_numbers = await judge_store.get_numbers(
+                        session,
+                        settings.agent_id,
+                        days=days,
+                        judge_name=second_judge.name,
+                        judge_version=second_judge.version,
+                        cap=second_service.daily_calls,
+                    )
+                    between = await judge_store.pair_numbers(
+                        session,
+                        settings.agent_id,
+                        days=days,
+                        first=(name, version),
+                        second=(second_judge.name, second_judge.version),
+                    )
+                second_model = getattr(second_judge, "model", None)
+                second_blocks = {
+                    "second": {
+                        "judge": second_judge.name,
+                        "version": second_judge.version,
+                        "model": second_model if isinstance(second_model, str) else None,
+                        **second_numbers,
+                    },
+                    "between_judges": between,
+                }
+            except Exception as e:
+                logger.warning(
+                    "Dashboard outside judge: the second judge's numbers were not read (%s)", type(e).__name__
+                )
         runtime = (
             service.runtime()
             if service is not None
@@ -2389,6 +2428,7 @@ def create_app(
                 "days": days,
                 **numbers,
                 "runtime": runtime,
+                **second_blocks,
             }
         )
 

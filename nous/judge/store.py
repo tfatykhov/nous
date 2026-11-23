@@ -212,3 +212,99 @@ async def get_numbers(
     numbers = summarize(rows)
     numbers["cost"]["today"] = {"calls": await calls_today(session, agent_id, now, judge_name), "cap": cap}
     return numbers
+
+
+# ---- two judges on the same decisions ------------------------------------------------------------------------------
+
+PAIR_DISAGREEMENTS_MAX = 20
+
+# Both judges' ``ok`` rows on one subject (the unique key leaves at most one row per subject and judge version), both
+# judged in the window; whether they were given the same claim (the same ``claim_at``) and read the same evidence
+# counts.
+_PAIR_ROWS = text(
+    "SELECT a.subject_id, a.claim_at, a.against_grader, a.against_grade, a.verdict AS first_verdict, "
+    "b.verdict AS second_verdict, a.confidence AS first_confidence, b.confidence AS second_confidence, "
+    "a.labels AS first_labels, b.labels AS second_labels, a.claim_at = b.claim_at AS same_claim, "
+    "a.evidence = b.evidence AS same_evidence "
+    "FROM nous_system.judge_verdicts a JOIN nous_system.judge_verdicts b ON b.agent_id = a.agent_id "
+    "AND b.subject_kind = a.subject_kind AND b.subject_id = a.subject_id "
+    "WHERE a.agent_id = :agent AND a.subject_kind = 'decision' AND a.judge_name = :first_name "
+    "AND a.judge_version = :first_version AND b.judge_name = :second_name AND b.judge_version = :second_version "
+    "AND a.status = 'ok' AND b.status = 'ok' AND a.judged_at >= :since AND b.judged_at >= :since"
+)
+
+
+def summarize_pairs(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """How two judges' verdicts compare (rows with the columns of ``_PAIR_ROWS``).
+
+    A pair is both judges' ``ok`` verdicts on the same claim of a subject (the same ``claim_at``); a subject whose two
+    verdicts were given on different claims is counted in ``other_claim`` only. ``agree`` counts pairs with the same
+    verdict, neither ``cannot_tell``; ``either_cannot_tell`` the pairs where one or both said ``cannot_tell``;
+    ``agree_rate`` is ``agree`` over the pairs without ``cannot_tell``. ``matrix`` counts the pairs by the first judge's
+    verdict, then the second's. ``evidence_differs`` counts pairs whose two evidence counts differ (each judge builds
+    its record itself). The latest 20 pairs with different verdicts, neither ``cannot_tell``, are listed, latest claim
+    first, with ids, grades, both verdicts, confidences and labels."""
+    pairs = [row for row in rows if row["same_claim"]]
+    matrix: dict[str, dict[str, int]] = {}
+    agree = either_cannot_tell = 0
+    for row in pairs:
+        first, second = row["first_verdict"], row["second_verdict"]
+        matrix.setdefault(first, {})
+        matrix[first][second] = matrix[first].get(second, 0) + 1
+        if "cannot_tell" in (first, second):
+            either_cannot_tell += 1
+        elif first == second:
+            agree += 1
+    graded = len(pairs) - either_cannot_tell
+    ordered = sorted(pairs, key=lambda row: (row["claim_at"], str(row["subject_id"])), reverse=True)
+    disagreements = [
+        {
+            "subject_id": str(row["subject_id"]),
+            "claim_at": row["claim_at"].isoformat(),
+            "against_grader": row["against_grader"],
+            "against_grade": row["against_grade"],
+            "first_verdict": row["first_verdict"],
+            "second_verdict": row["second_verdict"],
+            "first_confidence": row["first_confidence"],
+            "second_confidence": row["second_confidence"],
+            "first_labels": list(row["first_labels"] or []),
+            "second_labels": list(row["second_labels"] or []),
+            "evidence_differs": not row["same_evidence"],
+        }
+        for row in ordered
+        if "cannot_tell" not in (row["first_verdict"], row["second_verdict"])
+        and row["first_verdict"] != row["second_verdict"]
+    ][:PAIR_DISAGREEMENTS_MAX]
+    return {
+        "pairs": len(pairs),
+        "agree": agree,
+        "either_cannot_tell": either_cannot_tell,
+        "agree_rate": round(agree / graded, 4) if graded else None,
+        "matrix": matrix,
+        "evidence_differs": sum(1 for row in pairs if not row["same_evidence"]),
+        "other_claim": len(rows) - len(pairs),
+        "disagreements": disagreements,
+    }
+
+
+async def pair_numbers(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    days: int,
+    first: tuple[str, str],
+    second: tuple[str, str],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """``summarize_pairs`` over this agent's decision verdicts of two judges (each a name and a version) from the last
+    ``days`` days."""
+    now = now or datetime.now(UTC)
+    params = {
+        "agent": agent_id,
+        "first_name": first[0],
+        "first_version": first[1],
+        "second_name": second[0],
+        "second_version": second[1],
+        "since": now - timedelta(days=days),
+    }
+    return summarize_pairs([dict(row._mapping) for row in await session.execute(_PAIR_ROWS, params)])

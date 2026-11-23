@@ -115,8 +115,9 @@ def _lineage_env(build: bool, gh_repo: str = "") -> dict[str, str]:
 
 def _agent_env() -> dict[str, str]:
     """The environment of an ordinary (non-lineage) bash: this process's, without the variables the agent must
-    never read (F111: the owner's secret for the commitment close routes, should it be set here by mistake)."""
-    return {k: v for k, v in os.environ.items() if k != OWNER_SECRET_ENV}
+    never read (F111: the owner's secret for the commitment close routes, should it be set here by mistake; F118: a
+    key only the judge uses is not passed to commands)."""
+    return {k: v for k, v in os.environ.items() if k not in (OWNER_SECRET_ENV, "TYPESAFE_API_KEY")}
 
 
 def _mcp_response(text: str) -> dict[str, Any]:

@@ -369,6 +369,12 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a model client: a fresh httpx client per request, fetching the page or skill file a URL names for "
         "web_fetch and learn_skill, from an address that passed the public-address check",
     ),
+    ("nous/judge/jev_judge.py", "JevJudge._send", "client.stream"): (
+        1,
+        "not Nous's model client: a fresh httpx client per request posting the second outside judge's record to "
+        "TypeSafe's System One API (F118); it is not in nous_system.model_call_log, and the judge's verdict rows "
+        "hold its calls and tokens",
+    ),
 }
 
 _Site = tuple[str, str, str]

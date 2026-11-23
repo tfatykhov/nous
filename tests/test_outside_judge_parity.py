@@ -462,3 +462,112 @@ def test_the_hook_is_synchronous_and_resolve_decisions_does_not_await_it():
     assert "await _submit_to_outside_judge" not in body
     # It runs once the reply's text is final, right before the reply is returned.
     assert body.index("_submit_to_outside_judge(") > body.index('text += "\\nFailures:\\n"')
+
+
+# ---- two judges -----------------------------------------------------------------------------------------------------
+
+JEV_KEY = "ts-parity-" + "P4" * 16
+
+
+@pytest.fixture
+def no_real_request(monkeypatch):
+    """The second judge answers through a fake transport; a request through a real one fails the test."""
+    import httpx
+
+    async def refuse(self: Any, request: Any) -> Any:
+        raise AssertionError(f"a real request was attempted to {request.url.host}")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+
+
+def _jev(behaviour: str) -> Any:
+    """The second judge over a fake provider that answers, fails or does not answer."""
+    import httpx
+
+    from nous.judge.jev_judge import JevJudge
+
+    async def provider(request: httpx.Request) -> httpx.Response:
+        if behaviour == "raise":
+            raise RuntimeError("the provider broke")
+        if behaviour == "hang":
+            await asyncio.sleep(3600)
+        answer = {
+            "model": "jev-1.14.0",
+            "answers": {
+                "verdict": {"type": "choice", "choice": "success", "confidence": 0.7},
+                "sets_verdict": {"type": "noul", "noul": 0.9},
+            },
+            "usage": {"input_tokens": 3000, "output_tokens": 2},
+        }
+        return httpx.Response(200, json=answer)
+
+    return JevJudge(JEV_KEY, "jev-1.14.0", transport=httpx.MockTransport(provider))
+
+
+def _two_judges(db, env: dict, behaviour: str, settle: float) -> Any:
+    from nous.judge.service import JudgeSet
+
+    timing = {"settle_seconds": settle, "timeout_seconds": 0.3}
+    primary = OutsideJudge(db, env["settings"], StubJudge("ok"), **timing)
+    primary.start()
+    if behaviour == "submit_raises":
+        return JudgeSet(primary, RaisingService())
+    second = OutsideJudge(db, env["settings"], _jev(behaviour), **timing)
+    second.start()
+    return JudgeSet(primary, second)
+
+
+async def _close_both(both: Any) -> None:
+    for service in (both.primary, both.second):
+        if isinstance(service, OutsideJudge):
+            await asyncio.wait_for(_until_idle(service), 10)
+            await service.close()
+
+
+@pytest.mark.parametrize("behaviour", ["ok", "raise", "hang", "submit_raises"])
+@pytest.mark.parametrize("branch", list(BRANCHES))
+async def test_with_two_judges_every_branch_gives_the_golden_reply_and_the_same_review(
+    db, env, no_real_request, branch, behaviour
+):
+    off = await _run_branch(db, env, branch)
+    both = _two_judges(db, env, behaviour, settle=0.0)
+    judge_slot.set_current(both)
+    try:
+        shadow = await _run_branch(db, env, branch)
+        assert _short(shadow["reply"], shadow) == _golden(branch) == _short(off["reply"], off)
+        assert shadow["review"] == off["review"]
+    finally:
+        await _close_both(both)
+
+
+@pytest.mark.parametrize("behaviour", ["ok", "raise", "hang"])
+async def test_with_two_judges_the_decision_row_the_events_and_the_calibration_do_not_move(
+    db, env, no_real_request, behaviour
+):
+    brain, bus = env["brain"], env["bus"]
+    both = _two_judges(db, env, behaviour, settle=1.0)
+    judge_slot.set_current(both)
+    try:
+        run = await _run_branch(db, env, "batch")
+        ids = run["ids"]
+        rows, events = await _decision_rows(db, ids), list(bus.events)
+        calibration = (await brain.get_calibration()).model_dump()
+        assert await _verdict_rows(db, env["agent"]) == 0  # neither judge has run yet
+        await asyncio.wait_for(_until_idle(both.primary), 10)
+        await asyncio.wait_for(_until_idle(both.second), 10)
+        assert both.primary.judge.calls == 2  # the success and the partial item
+        async with db.session() as session:
+            stored = (
+                await session.execute(
+                    text("SELECT judge_name, status FROM nous_system.judge_verdicts WHERE agent_id = :a"),
+                    {"a": env["agent"]},
+                )
+            ).all()
+        expected = {"ok": "ok", "raise": "error", "hang": "timeout"}[behaviour]
+        assert sorted(tuple(row) for row in stored) == [("jev", expected)] * 2 + [("stub", "ok")] * 2
+        assert await _decision_rows(db, ids) == rows
+        assert bus.events == events
+        assert len([e for e in events if e[0] == "decision_reviewed"]) == 4
+        assert (await brain.get_calibration()).model_dump() == calibration
+    finally:
+        await _close_both(both)

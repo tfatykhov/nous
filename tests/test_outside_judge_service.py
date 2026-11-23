@@ -29,6 +29,17 @@ pytestmark = pytest.mark.postgres_only
 FAST = {"settle_seconds": 0.0, "timeout_seconds": 2.0}
 
 
+@pytest.fixture(autouse=True)
+def _no_request_leaves_the_process(monkeypatch):
+    """The second judge's tests use a fake transport: a request through a real one fails the test."""
+    import httpx
+
+    async def refuse(self, request):
+        raise AssertionError(f"a real request was attempted to {request.url.host}")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
+
+
 class StubJudge:
     """A judge that answers, raises or hangs, and records what it was given."""
 
@@ -804,3 +815,323 @@ async def test_with_one_request_left_a_model_that_rejects_forcing_gets_exactly_o
     [row] = await _rows(db, agent)
     assert (row["status"], row["calls"], row["attempts"]) == ("error", 1, 1)  # tried again on a later resolve
     assert service.runtime()["over_cap"] == 1
+
+
+# ---- two judges side by side (JudgeSet) ----------------------------------------------------------------------------
+
+
+class SecondStub(StubJudge):
+    name = "second"
+
+
+def _pair(db, agent: str, first: StubJudge, second: StubJudge, **over) -> service_module.JudgeSet:
+    settings = _settings(agent, **over)
+    return service_module.JudgeSet(
+        OutsideJudge(db, settings, first, **FAST), OutsideJudge(db, settings, second, **FAST)
+    )
+
+
+async def _drain_both(both: service_module.JudgeSet, seconds: float = 10.0) -> None:
+    await _until(lambda: both.primary.idle and both.second.idle, seconds)
+
+
+def _start(both: service_module.JudgeSet) -> None:
+    both.primary.start()
+    both.second.start()
+
+
+def test_a_judge_set_submits_synchronously():
+    assert not inspect.iscoroutinefunction(service_module.JudgeSet.submit_decision)
+
+
+async def test_a_judge_set_reads_as_the_first_judge_and_holds_the_second(db, agent):
+    first, second = StubJudge(), SecondStub()
+    both = _pair(db, agent, first, second)
+    assert both.judge is first and both.second.judge is second and both.primary.judge is first
+
+
+async def test_a_judge_set_queues_on_both_and_returns_the_first_judges_answer(db, agent):
+    settings = _settings(agent)
+    # Not started: nothing is taken. The first judge's queue holds one subject.
+    both = service_module.JudgeSet(
+        OutsideJudge(db, settings, StubJudge(), queue_max=1, **FAST), OutsideJudge(db, settings, SecondStub(), **FAST)
+    )
+    assert _submit(both, uuid.uuid4()) is True
+    assert (both.primary.runtime()["queued"], both.second.runtime()["queued"]) == (1, 1)
+    # The first judge's queue is full: its answer is returned, and the second still takes the subject.
+    assert _submit(both, uuid.uuid4()) is False
+    assert (both.primary.runtime()["queued"], both.second.runtime()["queued"]) == (1, 2)
+    await both.close()
+
+
+class RaisingSubmit:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def submit_decision(self, *args, **kwargs) -> bool:
+        self.calls += 1
+        raise RuntimeError("submit broke")
+
+    def runtime(self) -> dict:
+        return {}
+
+    async def close(self, timeout: float = 0.0) -> None:
+        raise RuntimeError("close broke")
+
+
+async def test_a_second_judge_whose_submit_raises_does_not_stop_the_first(db, agent, caplog):
+    primary = OutsideJudge(db, _settings(agent), StubJudge(), **FAST)
+    broken = RaisingSubmit()
+    both = service_module.JudgeSet(primary, broken)
+    with caplog.at_level(logging.WARNING, logger="nous.judge.service"):
+        assert _submit(both, uuid.uuid4()) is True
+    assert primary.runtime()["queued"] == 1 and broken.calls == 1
+    [line] = [r.getMessage() for r in caplog.records if r.name == "nous.judge.service"]
+    assert "RuntimeError" in line and "broke" not in line
+    await primary.close()
+
+
+async def test_a_first_judge_whose_submit_raises_still_hands_the_claim_to_the_second(db, agent):
+    second = OutsideJudge(db, _settings(agent), SecondStub(), **FAST)
+    both = service_module.JudgeSet(RaisingSubmit(), second)
+    assert _submit(both, uuid.uuid4()) is False
+    assert second.runtime()["queued"] == 1
+    await second.close()
+
+
+async def test_two_judges_write_two_rows_on_the_same_claim(db, agent):
+    first, second = StubJudge(), SecondStub(verdict="success")
+    both = _pair(db, agent, first, second)
+    _start(both)
+    decision_id = await _decision(db, agent)
+    resolved_at = datetime.now(UTC)
+    assert _submit(both, decision_id, resolved_at=resolved_at) is True
+    await _drain_both(both)
+    await both.close()
+    assert len(first.records) == len(second.records) == 1
+    assert first.records[0] == second.records[0]  # each built the same record
+    rows = sorted(await _rows(db, agent), key=lambda r: r["judge_name"])
+    assert [(r["judge_name"], r["verdict"], r["claim_at"], r["against_grade"]) for r in rows] == [
+        ("second", "success", resolved_at, "success"),
+        ("stub", "failure", resolved_at, "success"),
+    ]
+    assert rows[0]["evidence"] == rows[1]["evidence"]
+
+
+async def test_a_second_judge_that_hangs_leaves_the_first_judges_row_as_it_would_be_alone(db, agent):
+    decision_id = await _decision(db, agent)
+    alone_agent = f"{agent}-alone"
+    alone = OutsideJudge(db, _settings(alone_agent), StubJudge(), **FAST)
+    hanging = SecondStub("hang")
+    settings = _settings(agent)
+    both = service_module.JudgeSet(
+        OutsideJudge(db, settings, StubJudge(), **FAST),
+        # It ignores its timeout: the service stops it at 2 s plus the grace, long after the first judge's row.
+        OutsideJudge(db, settings, hanging, settle_seconds=0.0, timeout_seconds=2.0),
+    )
+    try:
+        _start(both)
+        _submit(both, decision_id)
+        await _until(lambda: both.primary.idle and both.second.busy)
+        [first_row] = await _rows(db, agent)  # written while the second judge still waits
+        assert first_row["judge_name"] == "stub"
+        await _drain_both(both)
+        await both.close()
+        # The same decision judged by the first judge alone (another agent's copy) gives the same row.
+        copy_id = await _decision(db, alone_agent)
+        alone.start()
+        _submit(alone, copy_id)
+        await _drain(alone)
+        await alone.close()
+        [alone_row] = await _rows(db, alone_agent)
+    finally:
+        async with db.session() as session:
+            for table in ("brain.decisions", "nous_system.tool_call_log", "nous_system.judge_verdicts"):
+                await session.execute(text(f"DELETE FROM {table} WHERE agent_id = :a"), {"a": alone_agent})
+            await session.commit()
+    rows = {r["judge_name"]: r for r in await _rows(db, agent)}
+    assert rows["second"]["status"] == "timeout" and rows["second"]["labels"] == ["judge_error"]
+    same = ("status", "verdict", "confidence", "labels", "reason", "model", "tokens_in", "tokens_out", "calls")
+    assert {k: rows["stub"][k] for k in same} == {k: alone_row[k] for k in same}
+    assert rows["stub"] == first_row
+
+
+async def test_a_second_judge_that_raises_gives_its_own_error_row_and_the_first_is_ok(db, agent):
+    both = _pair(db, agent, StubJudge(), SecondStub("raise"))
+    _start(both)
+    _submit(both, await _decision(db, agent))
+    await _drain_both(both)
+    await both.close()
+    rows = {r["judge_name"]: (r["status"], r["verdict"]) for r in await _rows(db, agent)}
+    assert rows == {"stub": ("ok", "failure"), "second": ("error", "cannot_tell")}
+
+
+@pytest.mark.parametrize("spent", ["first", "second"])
+async def test_each_judge_has_its_own_daily_limit(db, agent, spent):
+    first, second = StubJudge(), SecondStub()
+    name = first.name if spent == "first" else second.name
+    await _verdict_rows(db, agent, [(name, "ok", 1, datetime.now(UTC))])  # that judge's one call of the day is spent
+    both = _pair(db, agent, first, second, outside_judge_daily_calls=1)
+    _start(both)
+    _submit(both, await _decision(db, agent))
+    await _drain_both(both)
+    await both.close()
+    spent_judge, other_judge = (first, second) if spent == "first" else (second, first)
+    spent_service, other_service = (both.primary, both.second) if spent == "first" else (both.second, both.primary)
+    assert spent_judge.records == [] and spent_service.runtime()["over_cap"] == 1
+    assert len(other_judge.records) == 1 and other_service.runtime()["over_cap"] == 0
+
+
+async def test_the_runtime_of_a_judge_set_is_the_first_judges_with_the_seconds_under_its_own_key(db, agent):
+    both = _pair(db, agent, StubJudge(), SecondStub())
+    both.primary.start()
+    _submit(both, uuid.uuid4())
+    assert both.runtime() == {
+        "queued": both.primary.runtime()["queued"],
+        "dropped": 0,
+        "over_cap": 0,
+        "worker_alive": True,
+        "second": {"queued": 1, "dropped": 0, "over_cap": 0, "worker_alive": False},
+    }
+    await both.close()
+
+
+async def test_close_closes_both_even_when_one_raises(db, agent, caplog):
+    second = OutsideJudge(db, _settings(agent), SecondStub(), **FAST)
+    second.start()
+    both = service_module.JudgeSet(RaisingSubmit(), second)
+    with caplog.at_level(logging.WARNING, logger="nous.judge.service"):
+        await both.close()
+    assert second.runtime()["worker_alive"] is False and _submit(second, uuid.uuid4()) is False
+    assert [r for r in caplog.records if "RuntimeError" in r.getMessage() and "broke" not in r.getMessage()]
+
+
+async def test_a_judge_set_without_a_second_judge_is_the_first_judge_alone(db, agent):
+    primary = OutsideJudge(db, _settings(agent), StubJudge(), **FAST)
+    alone = service_module.JudgeSet(primary, None)
+    assert alone.second is None and alone.judge is primary.judge
+    assert _submit(alone, uuid.uuid4()) is True and primary.runtime()["queued"] == 1
+    assert alone.runtime() == primary.runtime() == {"queued": 1, "dropped": 0, "over_cap": 0, "worker_alive": False}
+    primary.start()
+    await alone.close()
+    assert primary.runtime()["worker_alive"] is False and _submit(alone, uuid.uuid4()) is False
+
+
+def test_replacing_the_second_judge_is_synchronous():
+    assert not inspect.iscoroutinefunction(service_module.JudgeSet.replace_second)
+
+
+async def test_replacing_the_second_judge_starts_and_closes_nothing_and_returns_the_old_one(db, agent):
+    settings = _settings(agent)
+    primary = OutsideJudge(db, settings, StubJudge(), **FAST)
+    old, new = OutsideJudge(db, settings, SecondStub(), **FAST), OutsideJudge(db, settings, SecondStub(), **FAST)
+    old.start()
+    both = service_module.JudgeSet(primary, old)
+    assert both.replace_second(new) is old
+    assert both.second is new and both.primary is primary
+    assert old.runtime()["worker_alive"] is True and new.runtime()["worker_alive"] is False  # the caller's to do
+    _submit(both, uuid.uuid4())
+    assert (old.runtime()["queued"], new.runtime()["queued"]) == (0, 1)
+    assert both.replace_second(None) is new and both.second is None
+    assert set(both.runtime()) == {"queued", "dropped", "over_cap", "worker_alive"}
+    for service in (primary, old, new):
+        await service.close()
+
+
+async def test_a_submit_reads_the_second_judge_once(db, agent):
+    settings = _settings(agent)
+    second = OutsideJudge(db, settings, SecondStub(), **FAST)
+
+    class ReplacesWhileSubmitting:
+        def submit_decision(self, *args, **kwargs) -> bool:
+            both.replace_second(None)  # the second judge is taken away while this submit runs
+            return True
+
+    both = service_module.JudgeSet(ReplacesWhileSubmitting(), second)
+    assert _submit(both, uuid.uuid4()) is True
+    assert second.runtime()["queued"] == 1 and both.second is None
+    await second.close()
+
+
+def test_the_daily_limit_is_the_setting_unless_one_is_given():
+    settings = Settings(_env_file=None, agent_id="test-f118-limit", outside_judge_daily_calls=7)
+    assert OutsideJudge(None, settings, StubJudge()).daily_calls == 7
+    given = OutsideJudge(None, settings, StubJudge(), daily_calls=2)
+    assert given.daily_calls == 2
+    with pytest.raises(AttributeError):
+        given.daily_calls = 5
+
+
+async def test_a_given_daily_limit_is_the_one_a_service_keeps(db, agent):
+    stub = StubJudge()
+    service = OutsideJudge(db, _settings(agent, outside_judge_daily_calls=100), stub, daily_calls=1, **FAST)
+    service.start()
+    for _ in range(2):
+        _submit(service, await _decision(db, agent))
+        await _drain(service)
+    await service.close()
+    assert len(stub.records) == 1 and service.runtime()["over_cap"] == 1
+    assert stub.max_calls == [1]
+
+
+# ---- the second judge through the service -------------------------------------------------------------------------
+
+
+JEV_KEY = "ts-svc-" + "Q9" * 16
+
+
+def _jev(handler) -> object:
+    import httpx
+
+    from nous.judge.jev_judge import JevJudge
+
+    return JevJudge(JEV_KEY, "jev-1.14.0", transport=httpx.MockTransport(handler))
+
+
+async def test_the_second_judges_answer_is_stored_under_its_name_and_version(db, agent):
+    import httpx
+
+    answer = {
+        "model": "jev-1.14.0",
+        "answers": {
+            "verdict": {"type": "choice", "choice": "partial", "confidence": 0.64},
+            "sets_verdict": {"type": "noul", "noul": 0.91},
+        },
+        "usage": {"input_tokens": 3900, "output_tokens": 2},
+    }
+    service = OutsideJudge(db, _settings(agent), _jev(lambda request: httpx.Response(200, json=answer)), **FAST)
+    service.start()
+    _submit(service, await _decision(db, agent))
+    await _drain(service)
+    await service.close()
+    [row] = await _rows(db, agent)
+    assert {k: row[k] for k in ("judge_name", "judge_version", "model", "status", "verdict", "labels", "reason")} == {
+        "judge_name": "jev",
+        "judge_version": "jq-2:jev-1.14.0",
+        "model": "jev-1.14.0",
+        "status": "ok",
+        "verdict": "partial",
+        "labels": ["asks_for_verdict"],
+        "reason": None,
+    }
+    assert (row["tokens_in"], row["tokens_out"], row["calls"]) == (3900, 2, 1)
+    assert abs(row["confidence"] - 0.64) < 1e-6
+
+
+async def test_the_key_is_in_no_row_and_no_log_record_when_the_request_fails_with_it(db, agent, caplog):
+    def fails(request):
+        raise RuntimeError(f"refused {request.headers['authorization']}")
+
+    service = OutsideJudge(db, _settings(agent), _jev(fails), **FAST)
+    service.start()
+    with caplog.at_level(logging.DEBUG):
+        _submit(service, await _decision(db, agent))
+        await _drain(service)
+    await service.close()
+    whole_rows = text("SELECT to_jsonb(v)::text FROM nous_system.judge_verdicts v WHERE agent_id = :a")
+    async with db.session() as session:
+        rows = (await session.execute(whole_rows, {"a": agent})).scalars().all()
+    assert len(rows) == 1 and '"status": "error"' in rows[0]
+    assert JEV_KEY not in rows[0]
+    logged = "\n".join(f"{r.getMessage()} {r.args!r} {r.exc_text or ''}" for r in caplog.records)
+    assert JEV_KEY not in logged and "RuntimeError" in logged

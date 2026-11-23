@@ -940,6 +940,21 @@ async def test_the_agents_bash_never_inherits_the_owner_secret(monkeypatch, tmp_
     assert "[absent] [kept]" in text and OWNER_SECRET not in text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="bash tool runs cmd.exe on Windows; ${VAR:-absent} is not expanded")
+async def test_the_agents_bash_never_inherits_the_outside_judges_key(monkeypatch, tmp_path):
+    """F118: a key only the outside judge uses is not passed to the commands the agent runs."""
+    from nous.api.builtin_tools import bash_tool
+
+    judge_key = "judge-key-value-for-test"
+    monkeypatch.setenv("TYPESAFE_API_KEY", judge_key)
+    monkeypatch.setenv("NOUS_OTHER_VALUE_FOR_TEST", "kept")
+    out = await bash_tool(
+        'echo "[${TYPESAFE_API_KEY:-absent}] [$NOUS_OTHER_VALUE_FOR_TEST]"', _workspace_dir=str(tmp_path)
+    )
+    text = out["content"][0]["text"]
+    assert "[absent] [kept]" in text and judge_key not in text
+
+
 # ---- F111 PR B1: Minor 11, the stage-2 scheduler and the dead-man line --------------------------------------------
 
 
