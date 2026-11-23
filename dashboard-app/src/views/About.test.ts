@@ -77,7 +77,7 @@ describe('About', () => {
     ]) {
       expect(rowValue(label).textContent, label).toBe(value);
     }
-    expect(screen.queryByText('The database did not answer')).toBeNull();
+    expect(screen.queryByText('The database could not be read')).toBeNull();
     expect(urls).toEqual(['/dashboard/about']);
   });
 
@@ -110,14 +110,24 @@ describe('About', () => {
     expect(rowValue('Build').textContent).toBe('Built Nov 23 14:02 UTC');
   });
 
-  it('says the database did not answer when its part is missing', async () => {
+  it('says the database could not be read when its part is missing', async () => {
     answers = [[200, { ...ANSWER, schema: { latest: null }, database: { server: null, pgvector: null } }]];
     render(About);
-    expect(await screen.findByText('The database did not answer')).toBeTruthy();
+    expect(await screen.findByText('The database could not be read')).toBeTruthy();
     for (const label of ['PostgreSQL', 'pgvector', 'Database schema']) {
       expect(rowValue(label).textContent, label).toBe('Not available');
     }
     expect(rowValue('Version').textContent).toBe('1.3.0');
+  });
+
+  it('a database read without pgvector shows only that row as not available', async () => {
+    answers = [[200, { ...ANSWER, database: { server: '17.2', pgvector: null } }]];
+    render(About);
+    await screen.findByText('1.3.0');
+    expect(rowValue('pgvector').textContent).toBe('Not available');
+    expect(rowValue('PostgreSQL').textContent).toBe('17.2');
+    expect(rowValue('Database schema').textContent).toBe('Migration 122');
+    expect(screen.queryByText('The database could not be read')).toBeNull();
   });
 
   it('a failed read offers to try again, and trying again reads once more', async () => {
@@ -141,7 +151,7 @@ describe('About', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('has no refresh and no staleness badge: nothing on it changes while it is open', async () => {
+  it('has no refresh and no staleness badge: it reads once on mount, and again only after a failed read', async () => {
     render(About);
     await screen.findByText('1.3.0');
     expect(screen.queryAllByRole('button')).toEqual([]);

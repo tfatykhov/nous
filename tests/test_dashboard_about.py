@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import json
 import time
 import tomllib
 from collections.abc import AsyncIterator
@@ -36,7 +35,7 @@ NESTED_KEYS = {
     "agent": ["id", "name"],
     "models": ["background", "critic", "embeddings", "heartbeat", "main"],
 }
-LATEST_SQL = "SELECT max(version::int) FROM nous_system.schema_migrations WHERE version ~ '^[0-9]{1,9}$'"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _settings(tmp_path: Path, **kw: Any) -> Settings:
@@ -79,6 +78,13 @@ def _assert_keys(answer: dict[str, Any]) -> None:
         assert sorted(answer[key]) == nested, key
 
 
+def _leaves(value: Any) -> list[str]:
+    """Every value of the answer as text, nested ones included."""
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _leaves(item)]
+    return [str(value)]
+
+
 @pytest.mark.postgres_only
 async def test_the_answer_has_exactly_its_keys_with_a_real_database(db, tmp_path: Path) -> None:
     response = await _about(db, _settings(tmp_path))
@@ -91,14 +97,15 @@ async def test_the_answer_has_exactly_its_keys_with_a_real_database(db, tmp_path
 
 
 @pytest.mark.postgres_only
-async def test_the_database_values_are_the_databases_own(db, tmp_path: Path) -> None:
+async def test_the_server_and_pgvector_versions_are_the_databases_own(db, tmp_path: Path) -> None:
+    # The schema number is proved by the next test, which writes its own rows.
     answer = (await _about(db, _settings(tmp_path))).json()
     async with db.session() as session:
-        latest = (await session.execute(text(LATEST_SQL))).scalar()
         server = (await session.execute(text("SHOW server_version"))).scalar()
-    assert answer["schema"] == {"latest": latest}
-    assert answer["database"]["server"] == server.split(" ", 1)[0]
-    assert isinstance(answer["database"]["pgvector"], str) and answer["database"]["pgvector"]
+        pgvector_sql = text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+        pgvector = (await session.execute(pgvector_sql)).scalar()
+    assert pgvector, "the test database has the vector extension"
+    assert answer["database"] == {"server": server.split(" ", 1)[0], "pgvector": pgvector}
 
 
 @pytest.mark.postgres_only
@@ -127,7 +134,7 @@ async def test_the_version_is_the_packages(tmp_path: Path) -> None:
 
 
 def test_the_package_version_and_pyproject_agree() -> None:
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["version"] == nous.__version__
 
 
@@ -181,9 +188,10 @@ async def test_the_answer_carries_no_other_setting_value(tmp_path: Path) -> None
         sentinels["workspace_dir"],
     )
     assert (settings.owner_route_secret_sha256, settings.mcp_client_ui_secret_sha256) == (OWNER_DIGEST, proxy_digest)
-    body = json.dumps((await _about(_Unreadable(), settings)).json())
-    for value in [*sentinels.values(), OWNER_DIGEST, OWNER_VALUE]:
-        assert value not in body
+    leaves = _leaves((await _about(_Unreadable(), settings)).json())
+    assert "Nous" in leaves  # the walk reaches the values
+    for value in [*sentinels.values(), "about-sentinel-workspace", OWNER_DIGEST, OWNER_VALUE]:
+        assert not any(value in leaf for leaf in leaves), value
 
 
 async def test_without_the_owners_secret_the_answer_is_refused(tmp_path: Path) -> None:
@@ -217,3 +225,11 @@ def test_the_build_settings_are_empty_by_default_and_read_from_the_environment(
     monkeypatch.setenv("NOUS_BUILD_TIME", "2026-11-23T14:02:05Z")
     settings = Settings(_env_file=None)
     assert (settings.build_commit, settings.build_time) == ("2b97aa31", "2026-11-23T14:02:05Z")
+
+
+def test_compose_passes_both_build_values_to_the_app() -> None:
+    # A deployment's compose lists the environment explicitly: without these lines the Build row never shows.
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    service = compose.split("\n  nous:\n", 1)[1].split("\n  nous-", 1)[0]
+    assert "      - NOUS_BUILD_COMMIT=${NOUS_BUILD_COMMIT:-}\n" in service
+    assert "      - NOUS_BUILD_TIME=${NOUS_BUILD_TIME:-}\n" in service

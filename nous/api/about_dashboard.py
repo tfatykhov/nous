@@ -2,9 +2,9 @@
 
 The answer has a fixed set of keys, each built from a named value: the package version, the two optional build values a
 deployment sets (``NOUS_BUILD_COMMIT``, ``NOUS_BUILD_TIME``, each shown only when it has the expected shape), when the
-app was built at start, the Python version, the agent's id and name, the configured model names, and from the database
-its version, the pgvector version and the highest numeric migration applied. When the database cannot be read, its
-three values are null and the rest is answered as usual.
+REST app was loaded at start, the Python version, the agent's id and name, the configured model names, and from the
+database its version, the pgvector version and the highest numeric migration applied. When the database cannot be
+read, its three values are null and the rest is answered as usual.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ from nous.config import Settings
 
 logger = logging.getLogger(__name__)
 
-# When the app was built at start (rest.py imports this module inside build_app).
+# Taken when this module is first imported: rest.py imports it at the top, and main.py imports rest.py inside
+# build_app, just before create_app.
 _STARTED_AT = datetime.now(UTC)
 _STARTED_MONO = time.monotonic()
 

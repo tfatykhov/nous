@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import * as about from './about';
 import {
-  ABOUT_PATH, CARDS, DB_DID_NOT_ANSWER, FAILED, LABELS, LINKS, LOADING, MODELS_HEADING, MODEL_ROWS, NEW_TAB,
+  ABOUT_PATH, CARDS, DB_NOT_READ, FAILED, LABELS, LINKS, LOADING, MODELS_HEADING, MODEL_ROWS, NEW_TAB,
   NOT_AVAILABLE, RELEASES_URL, SOURCE_URL, SUBTITLE, TRY_AGAIN,
-  buildLine, buildPieces, databaseDown, runningSince, schemaLine,
+  buildPieces, databaseUnread, runningSince, schemaLine,
 } from './about';
+
+/** The Build row as the screen reads it. */
+const buildText = (build: about.AboutAnswer['build']) => buildPieces(build)?.map((p) => p.text).join('') ?? null;
 
 describe('about: the words', () => {
   it('pins every sentence the owner reads', () => {
@@ -14,7 +17,7 @@ describe('about: the words', () => {
     expect(FAILED).toBe('This page could not be loaded.');
     expect(TRY_AGAIN).toBe('Try again');
     expect(NOT_AVAILABLE).toBe('Not available');
-    expect(DB_DID_NOT_ANSWER).toBe('The database did not answer');
+    expect(DB_NOT_READ).toBe('The database could not be read');
     expect(NEW_TAB).toBe('Opens in a new tab');
     expect(CARDS).toEqual({ nous: 'Nous', agent: 'Agent', runningOn: 'Running on', links: 'Links' });
     expect(LABELS).toEqual({
@@ -40,7 +43,7 @@ describe('about: the words', () => {
   it('no constant holds a colour, an arrow or an emoji', () => {
     const text = JSON.stringify(Object.values(about).filter((v) => typeof v !== 'function'));
     expect(text).not.toMatch(/#[0-9a-f]{3,8}\b/i);
-    expect(text).not.toMatch(/[←-⇿■-◿☀-➿]|[\u{1F300}-\u{1FAFF}]/u);
+    expect(text).not.toMatch(/[\u2190-\u21FF\u25A0-\u25FF\u2600-\u27BF]|[\u{1F300}-\u{1FAFF}]/u);
   });
 });
 
@@ -52,8 +55,8 @@ describe('about: the formatters', () => {
     [{ commit: null, time: null }, null],
     [{ commit: null, time: 'not a time' }, null],
     [{ commit: '2b97aa31c0de', time: 'not a time' }, 'Commit 2b97aa31c0de'],
-  ])('the build line of %j is %j', (build, line) => {
-    expect(buildLine(build)).toBe(line);
+  ])('the build row of %j reads %j', (build, line) => {
+    expect(buildText(build)).toBe(line);
   });
 
   it('sets the commit apart, and only the commit', () => {
@@ -81,9 +84,9 @@ describe('about: the formatters', () => {
     expect(schemaLine({ latest: null })).toBe('Not available');
   });
 
-  it('calls the database down only when all three of its values are missing', () => {
-    expect(databaseDown({ schema: { latest: null }, database: { server: null, pgvector: null } })).toBe(true);
-    expect(databaseDown({ schema: { latest: 122 }, database: { server: '17.2', pgvector: '0.8.0' } })).toBe(false);
-    expect(databaseDown({ schema: { latest: null }, database: { server: '17.2', pgvector: null } })).toBe(false);
+  it('calls the database unread only when all three of its values are missing', () => {
+    expect(databaseUnread({ schema: { latest: null }, database: { server: null, pgvector: null } })).toBe(true);
+    expect(databaseUnread({ schema: { latest: 122 }, database: { server: '17.2', pgvector: '0.8.0' } })).toBe(false);
+    expect(databaseUnread({ schema: { latest: null }, database: { server: '17.2', pgvector: null } })).toBe(false);
   });
 });

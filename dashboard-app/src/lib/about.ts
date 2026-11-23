@@ -32,7 +32,7 @@ export const LOADING = 'Loading…';
 export const FAILED = 'This page could not be loaded.';
 export const TRY_AGAIN = 'Try again';
 export const NOT_AVAILABLE = 'Not available';
-export const DB_DID_NOT_ANSWER = 'The database did not answer';
+export const DB_NOT_READ = 'The database could not be read';
 export const NEW_TAB = 'Opens in a new tab';
 
 export const CARDS = { nous: 'Nous', agent: 'Agent', runningOn: 'Running on', links: 'Links' };
@@ -62,19 +62,14 @@ function shownTime(iso: string | null): string | null {
   return text === fmtUtc(null) ? null : text;
 }
 
-/** The Build row in pieces, the commit apart (`mono`) so the screen sets it in the code font; null when neither the
- * commit nor a time it can show is known. */
+/** The Build row, "Commit 2b97aa31c0de, built Nov 23 14:02 UTC" or either half alone, in pieces: the commit apart
+ * (`mono`) so the screen sets it in the code font. Null when neither the commit nor a time it can show is known. */
 export function buildPieces(build: AboutAnswer['build']): { text: string; mono: boolean }[] | null {
   const built = shownTime(build.time);
   if (!build.commit && !built) return null;
   const pieces = build.commit ? [{ text: 'Commit ', mono: false }, { text: build.commit, mono: true }] : [];
   if (built) pieces.push({ text: build.commit ? `, built ${built}` : `Built ${built}`, mono: false });
   return pieces;
-}
-
-/** "Commit 2b97aa31c0de, built Nov 23 14:02 UTC", either half alone, or null when neither is known. */
-export function buildLine(build: AboutAnswer['build']): string | null {
-  return buildPieces(build)?.map((p) => p.text).join('') ?? null;
 }
 
 /** "Nov 23 14:02 UTC, up 3 days". */
@@ -87,7 +82,7 @@ export function schemaLine(schema: AboutAnswer['schema']): string {
   return schema.latest === null ? NOT_AVAILABLE : `Migration ${schema.latest}`;
 }
 
-/** The whole database part failed: no schema, no server version, no pgvector version. */
-export function databaseDown(a: Pick<AboutAnswer, 'schema' | 'database'>): boolean {
+/** The database part could not be read: no schema, no server version, no pgvector version. */
+export function databaseUnread(a: Pick<AboutAnswer, 'schema' | 'database'>): boolean {
   return a.schema.latest === null && a.database.server === null && a.database.pgvector === null;
 }

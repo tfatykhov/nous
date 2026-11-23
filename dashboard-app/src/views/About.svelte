@@ -4,12 +4,12 @@
   import { Badge } from '../lib/ui/badge';
   import { Button } from '../lib/ui/button';
   import {
-    ABOUT_PATH, CARDS, DB_DID_NOT_ANSWER, FAILED, LABELS, LINKS, LOADING, MODELS_HEADING, MODEL_ROWS, NEW_TAB,
-    NOT_AVAILABLE, SUBTITLE, TRY_AGAIN, buildPieces, databaseDown, runningSince, schemaLine, type AboutAnswer,
+    ABOUT_PATH, CARDS, DB_NOT_READ, FAILED, LABELS, LINKS, LOADING, MODELS_HEADING, MODEL_ROWS, NEW_TAB,
+    NOT_AVAILABLE, SUBTITLE, TRY_AGAIN, buildPieces, databaseUnread, runningSince, schemaLine, type AboutAnswer,
   } from '../lib/about';
 
-  // What this Nous is and where it runs. Nothing here changes while the page is open: one read on mount, and another
-  // only when the owner asks after a failed one.
+  // What this Nous is and where it runs. The page reads once on mount, and again only when the owner asks after a
+  // failed read.
   let answer = $state<AboutAnswer | null>(null);
   let loading = $state(true);
   let failed = $state(false);
@@ -79,8 +79,8 @@
 
     <section class="card" aria-labelledby="about-running-on">
       <h2 id="about-running-on">{CARDS.runningOn}</h2>
-      {#if databaseDown(a)}
-        <p class="down"><Badge variant="warn">{DB_DID_NOT_ANSWER}</Badge></p>
+      {#if databaseUnread(a)}
+        <p class="unread"><Badge variant="warn">{DB_NOT_READ}</Badge></p>
       {/if}
       <dl>
         {@render row(LABELS.python, a.python)}
@@ -139,7 +139,7 @@
   dd { margin: 0; font-size: 0.875rem; color: var(--text); overflow-wrap: anywhere; }
   .mono { font-family: var(--font-mono); font-size: 0.875rem; }
 
-  .down { margin: 0 0 0.5rem; }
+  .unread { margin: 0 0 0.5rem; }
 
   .links { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
   .links li { display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.75rem; }
