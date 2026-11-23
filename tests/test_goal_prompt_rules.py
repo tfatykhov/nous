@@ -253,8 +253,8 @@ async def test_a_result_that_finishes_later_is_read_in_a_later_follow_up_turn(en
     assert await claim(env, root.id, **waits) is None  # not while the turn that reads a is deciding
 
 
-# ---- "The Limits of a follow-up turn show what is left of spawned work, follow-up turns and tokens, and whether more
-# ---- work can be started"
+# ---- "The Limits of a follow-up turn show what has been used of the limits on spawned work, follow-up turns and
+# ---- tokens, and whether more work can be started"
 
 
 def _limits_prompt(*, blocked: bool) -> str:

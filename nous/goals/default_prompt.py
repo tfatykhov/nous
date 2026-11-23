@@ -9,8 +9,10 @@ Each sentence of the built-in text rests on a rule of the harness that ``tests/t
 
 Every reader tries the same texts in the same order (``rungs``): the text loaded, the built-in text, none. A builder
 moves down when the text does not fit (``charter``); the first task's start moves down when the censor gate refuses
-the task and a censor that refuses matches the text (``GoalDriver._gated_task``); a follow-up turn moves down when
-such a censor matches the text (``GoalChain.turn_context``, read only: ``refusing_patterns`` and ``refused``).
+the task and the pattern of a censor that refuses matches the text (``GoalDriver._gated_task``); a follow-up turn
+moves down when such a pattern matches the text (``GoalChain.turn_context``, read only: ``refusing_patterns`` and
+``refused``). This is the censor check's keyword match on the text alone: a refusal of the whole task or turn for
+anything else (the semantic match, or a pattern that spans other text) is the task's or the turn's own.
 """
 
 from __future__ import annotations

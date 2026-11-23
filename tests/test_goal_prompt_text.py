@@ -25,7 +25,18 @@ from nous.goals.charter import (
     build_session_task,
     render_goal_block,
 )
-from nous.goals.default_prompt import DEFAULT_GOAL_PROMPT, HEADING, MAX_CHARS, bodies, effective, rungs, section
+from nous.goals.default_prompt import (
+    DEFAULT_GOAL_PROMPT,
+    HEADING,
+    MAX_CHARS,
+    bodies,
+    effective,
+    refused,
+    refusing_patterns,
+    rungs,
+    section,
+)
+from nous.heart.censors import _safe_regex_match
 from nous.identity.manager import goal_prompt_has_text, normalize_goal_prompt
 
 FULL = ("Work in small steps and say what each one showed. " * 40)[:MAX_CHARS]  # a saved text at the limit
@@ -145,6 +156,40 @@ def test_a_text_shows_nothing_without_a_character_that_is_not_white_space_a_cont
 @pytest.mark.parametrize("text", ["a", "\u200ba", "\u00e9", "\U0001f600"])
 def test_a_text_with_such_a_character_shows_something(text):
     assert goal_prompt_has_text(text)
+
+
+# ---- which censors refuse a goal prompt (read only) -----------------------------------------------------------------
+
+
+def _heart(*censors: tuple[str, str]) -> SimpleNamespace:
+    async def list_censors():
+        return [SimpleNamespace(action=action, trigger_pattern=pattern) for action, pattern in censors]
+
+    return SimpleNamespace(list_censors=list_censors)
+
+
+async def test_only_the_patterns_of_censors_that_refuse_or_abort_are_read():
+    heart = _heart(("refuse", "fold every"), ("abort", "drop the archive"), ("steer", "work in small steps"))
+    assert await refusing_patterns(heart) == ["fold every", "drop the archive"]
+
+
+async def test_a_failed_read_of_the_censors_gives_no_patterns():
+    async def unreadable():
+        raise ConnectionError("the database is not reachable")
+
+    assert await refusing_patterns(SimpleNamespace(list_censors=unreadable)) == []
+
+
+def test_a_pattern_matches_in_any_case_as_the_censor_checks_keyword_match_does():
+    pattern, text = "fold every folder", "- FOLD Every Folder twice before merging."
+    assert refused(text, [pattern]) and _safe_regex_match(pattern, text)
+    assert not refused("- Merge one folder at a time.", [pattern])
+
+
+def test_a_malformed_pattern_is_skipped_and_the_others_still_count():
+    assert not refused("Work small.", ["([unclosed"])
+    assert refused("Work small.", ["([unclosed", "work SMALL"])
+    assert not refused(None, [".*"])  # no goal prompt is never refused
 
 
 # ---- the texts a builder tries ------------------------------------------------------------------------------------

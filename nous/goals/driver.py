@@ -843,10 +843,12 @@ class GoalDriver:
         and its spend) through the censor gate that every spawned task goes through. A steering censor appends its
         guidance; the task is then built again with that guidance's length kept free, so the stored task stays
         within ``charter.MAX_TASK_CHARS`` and the guidance stays whole. The task carries the goal prompt
-        (``default_prompt.load``). When the gate refuses the task and a censor that refuses matches the goal prompt
-        it carries, the task is built with the next of ``default_prompt.rungs`` (the built-in text, then none) and
-        gated again, unless that build is the same task; so neither the owner's text nor the built-in one stops a
-        goal from starting, and a refusal for anything else is gated once."""
+        (``default_prompt.load``). When the gate refuses the task and the pattern of a censor that refuses matches
+        the goal prompt it carries (``default_prompt.refused``, the keyword match on the goal prompt alone), the task
+        is built with the next of ``default_prompt.rungs`` (the built-in text, then none) and gated again, unless that
+        build is the same task. So a censor's keyword match on the goal prompt alone does not stop a goal from
+        starting; any other refusal (the semantic match, or a pattern that spans other text) is the task's own and is
+        gated once."""
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)

@@ -146,9 +146,10 @@ class GoalChain:
 
     async def _goal_prompt(self, goal_id: UUID) -> str | None:
         """The goal prompt of this turn's goal block: the first of ``default_prompt.rungs`` (the loaded text, the
-        built-in text, none) that no censor that refuses matches, read without side effects. The turn's prompt then
-        goes through the censor check every turn does: a refusal there is the turn's own, never the goal prompt's.
-        Neither read raises: a failed one gives the built-in text, or keeps the text."""
+        built-in text, none) that the pattern of no censor that refuses matches (``default_prompt.refused``, the
+        keyword match on the goal prompt alone), read without side effects. The turn's prompt then goes through the
+        censor check every turn does; a refusal there (the semantic match, or a pattern that spans other text) is the
+        turn's own. Neither read raises: a failed one gives the built-in text, or keeps the text."""
         prompt = await default_prompt.load(self._db, self._agent_id)
         if self._heart is None:
             return prompt
