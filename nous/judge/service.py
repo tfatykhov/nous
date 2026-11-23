@@ -22,8 +22,9 @@ times in all (``store``). Everything in the worker is caught: one WARNING with t
 judging, writes nothing and leaves the worker running; a worker that ended anyway is started again by the next
 submit. ``close`` stops taking work, waits ``CLOSE_TIMEOUT_SECONDS`` for the subject in flight, then cancels the
 rest; a service built with its own ``close_timeout`` (the second judge's: ``call_bound`` of its timeout) waits that
-long instead, so a request it has sent ends with its row. The worker reads the decision and the session's records and
-writes only ``nous_system.judge_verdicts``.
+long instead, so a request it has sent ends with its row. A judging that has not sent its request when close begins
+sends none and writes nothing. The worker reads the decision and the session's records and writes only
+``nous_system.judge_verdicts``.
 
 ``JudgeSet`` puts two such services side by side, a second judge on the same decisions: a submit hands both the same
 claim, and neither one's failure, time or limit changes the other's.
@@ -387,6 +388,8 @@ class OutsideJudge:
             left = await self._requests_left(name, item.kind)
             if left is None:
                 return
+            if self._closed:  # no request is started once close has begun; one already sent has close's full wait
+                return
             started = time.monotonic()
             row["calls"] = 1  # from here a request may have been sent; the judge's own count replaces this
             # The judge bounds its own call; this outer bound, a little later, stops one that does not.
@@ -470,6 +473,8 @@ class OutsideJudge:
         await asyncio.sleep(SWEEP_FIRST_DELAY_SECONDS)
         while not self._closed:
             await self.sweep_once()
+            if self._closed:  # a pass cut by close ends the loop, also when its cancellation came back as an error
+                return
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
     async def sweep_once(self, now: datetime | None = None) -> int:
@@ -481,7 +486,8 @@ class OutsideJudge:
         graded. Nothing is queued once today's calls of the judge reach half its daily limit, so the day's own
         subjects keep the other half; nor when that count cannot be read; a subject whose last attempt failed within
         ``store.SWEEP_RETRY_AFTER`` waits. A subject already queued is passed over. It reads ``brain.decisions`` and
-        ``heart.subtasks`` and writes neither. Never raises: a failure is one WARNING with the class name, counted."""
+        ``heart.subtasks`` and writes neither. Never raises: a failure is one WARNING with the class name, counted (a
+        pass cut by ``close`` is neither)."""
         now = now or datetime.now(UTC)
         counts = self._sweep_counts
         counts["passes"] += 1
@@ -515,6 +521,8 @@ class OutsideJudge:
                     )
             return self._queue_swept(decisions, reports)
         except Exception as exc:
+            if self._closed:  # cut by close: not a failure
+                return 0
             counts["failed"] += 1
             logger.warning("F118: a sweep pass failed (%s)", type(exc).__name__)
             return 0

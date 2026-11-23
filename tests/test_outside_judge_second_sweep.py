@@ -713,13 +713,9 @@ async def test_a_close_while_the_pass_is_inside_a_query_stops_it_at_once_and_que
         assert asyncio.get_running_loop().time() - started < 5.0
         assert second._sweeper.done() and second.idle and judge.records == []
         assert second.runtime()["dropped"] == 0 and second.runtime()["queued"] == 0
-        # The cancellation can come back from the session's cleanup as a database error: then the cut pass is counted
-        # as failed, with one WARNING naming the class only.
-        warnings = [
-            r.getMessage() for r in caplog.records if r.name == "nous.judge.service" and r.levelno >= logging.WARNING
-        ]
-        assert len(warnings) == second.sweep_numbers()["failed"] <= 1
-        assert all(message.startswith("F118: a sweep pass failed (") for message in warnings)
+        # A pass cut by close is not a failure, however its cancellation comes back.
+        assert second.sweep_numbers()["failed"] == 0
+        assert [r for r in caplog.records if r.name == "nous.judge.service" and r.levelno >= logging.WARNING] == []
         # The sessions still serve, and the first judge's pass is untouched (run before its own loop starts).
         assert await first.sweep_once() == 1
         first.start()
@@ -728,6 +724,85 @@ async def test_a_close_while_the_pass_is_inside_a_query_stops_it_at_once_and_que
     finally:
         await first.close()
         await second.close()
+
+
+@pytest.mark.parametrize("which", ["first", "second"])
+async def test_a_close_returns_at_once_when_the_cut_pass_comes_back_as_an_error(db, agent, monkeypatch, caplog, which):
+    """The cancellation of a pass that close cuts comes back as an ordinary error (as a database driver may raise it):
+    the pass is not counted as failed, the loop ends instead of waiting out the hour's interval, and close returns.
+    The same loop runs in both judges' services."""
+    monkeypatch.setattr(service_module, "SWEEP_FIRST_DELAY_SECONDS", 0.0)  # the interval stays the real hour
+    reading = asyncio.Event()
+
+    async def cut_comes_back_as_an_error(session, agent_id, **kwargs):
+        reading.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            raise RuntimeError("the connection was closed in the middle of the read") from None
+
+    monkeypatch.setattr(store, "sweep_decisions", cut_comes_back_as_an_error)
+    await _decision(db, agent, "a2ui")
+    service = _service(db, agent)[0] if which == "first" else _second(db, agent)[0]
+    service.start()
+    try:
+        await asyncio.wait_for(reading.wait(), 5)
+        with caplog.at_level(logging.WARNING, logger="nous.judge.service"):
+            await asyncio.wait_for(service.close(), 3)
+        assert service._sweeper.done() and service.idle and service.sweep_numbers()["failed"] == 0
+        assert [r for r in caplog.records if r.name == "nous.judge.service" and r.levelno >= logging.WARNING] == []
+    finally:
+        if not service._sweeper.done():
+            service._sweeper.cancel()
+            await asyncio.gather(service._sweeper, return_exceptions=True)
+
+
+async def test_a_judging_that_has_not_sent_when_close_begins_sends_nothing_and_the_next_pass_takes_it(
+    db, agent, monkeypatch
+):
+    decision_id = await _decision(db, agent, "a2ui")
+    sent: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json=ANSWER)
+
+    building, go_on = asyncio.Event(), asyncio.Event()
+    real = evidence.build_decision_evidence
+
+    async def held_build(*args, **kwargs):
+        building.set()
+        await go_on.wait()  # the reads before the request are slow
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(evidence, "build_decision_evidence", held_build)
+
+    def jev() -> JevJudge:
+        return JevJudge(TEST_KEY, MODEL, transport=httpx.MockTransport(answer))
+
+    old, _j = _second(db, agent, jev())
+    old.start()
+    try:
+        assert await old.sweep_once() == 1
+        await asyncio.wait_for(building.wait(), 5)
+        closing = asyncio.ensure_future(old.close())
+        await _until(lambda: old._closed)
+        go_on.set()  # the judging reaches its request only after close has begun
+        await asyncio.wait_for(closing, 5)
+    finally:
+        go_on.set()
+        await old.close()
+    assert sent == [] and await _rows(db, agent) == [] and await _calls_counted(db, agent) == 0
+    # The decision has no row, so the next pass (a new judge after a swap or a restart) takes it and sends it once.
+    new, _j = _second(db, agent, jev())
+    new.start()
+    try:
+        assert await _pass(new) == 1
+    finally:
+        await new.close()
+    assert len(sent) == 1 and [(row["subject_id"], row["status"]) for row in await _rows(db, agent)] == [
+        (decision_id, "ok")
+    ]
 
 
 async def test_a_swap_while_the_old_judges_pass_is_reading_closes_it_cleanly(db, agent, managed, monkeypatch):
