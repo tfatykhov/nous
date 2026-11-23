@@ -151,12 +151,13 @@ async def _verdict(
 ) -> None:
     values = {"status": "ok", "verdict": "success" if kind == "decision" else "supported", "attempts": 1, "calls": 1}
     values.update(over)
+    judged_at = values.get("judged_at") or datetime.now(UTC)
     async with db.session() as session:
         await session.execute(
             text(
                 "INSERT INTO nous_system.judge_verdicts (agent_id, subject_kind, subject_id, judge_name, "
-                "judge_version, status, verdict, claim_at, calls, attempts) VALUES (:a, :k, :s, 'stub', :v, :st, :vd, "
-                "now(), :c, :at)"
+                "judge_version, status, verdict, claim_at, calls, attempts, judged_at) VALUES (:a, :k, :s, 'stub', "
+                ":v, :st, :vd, now(), :c, :at, :j)"
             ),
             {
                 "a": agent,
@@ -167,6 +168,7 @@ async def _verdict(
                 "vd": values["verdict"],
                 "c": values["calls"],
                 "at": values["attempts"],
+                "j": judged_at,
             },
         )
         await session.commit()
@@ -276,9 +278,12 @@ async def test_a_subject_with_a_final_row_is_not_taken_and_a_failed_one_is_until
     other_version = await _decision(db, agent, "a2ui")
     await _verdict(db, agent, other_version, version="d0")
     retried = await _decision(db, agent, "a2ui")
-    await _verdict(db, agent, retried, status="error", verdict="cannot_tell", attempts=2)
+    # A failed row is taken again once its last attempt is 6 hours old.
+    await _verdict(db, agent, retried, status="error", verdict="cannot_tell", attempts=2, judged_at=NOW - timedelta(hours=7))
+    waiting = await _decision(db, agent, "a2ui")
+    await _verdict(db, agent, waiting, status="timeout", verdict="cannot_tell", attempts=1, judged_at=NOW - timedelta(hours=5))
     spent = await _decision(db, agent, "a2ui")
-    await _verdict(db, agent, spent, status="timeout", verdict="cannot_tell", attempts=3)
+    await _verdict(db, agent, spent, status="timeout", verdict="cannot_tell", attempts=3, judged_at=NOW - timedelta(days=1))
     report_done = await _task(db, agent)
     await _verdict(db, agent, report_done, kind="task_report", version="r1")
     service, decisions, _r = _service(db, agent)
@@ -286,6 +291,33 @@ async def test_a_subject_with_a_final_row_is_not_taken_and_a_failed_one_is_until
     assert await _pass(service) == 2
     await service.close()
     assert {record.subject_id for record in decisions.records} == {other_version, retried}
+
+
+class FailingJudge(StubJudge):
+    async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
+        self.records.append(record)
+        return JudgeOutput(status="error", verdict="cannot_tell", calls=1)
+
+
+async def test_hourly_passes_during_an_outage_do_not_spend_the_attempts(db, agent):
+    decision_id = await _decision(db, agent, "a2ui")
+    failing = FailingJudge()
+    service = OutsideJudge(db, _settings(agent), failing, report_judge=StubJudge(version="r1"), **FAST)
+    service.start()
+    start = datetime.now(UTC)
+    for hour in range(3):  # three hourly passes while the judge fails
+        await service.sweep_once(now=start + timedelta(hours=hour))
+        await _until(lambda: service.idle)
+    async with db.session() as session:
+        attempts = await session.scalar(
+            text("SELECT attempts FROM nous_system.judge_verdicts WHERE agent_id = :a AND subject_id = :s"),
+            {"a": agent, "s": decision_id},
+        )
+    assert attempts == 1 < store.MAX_ATTEMPTS and len(failing.records) == 1
+    await service.sweep_once(now=start + timedelta(hours=7))  # six hours after the last attempt: tried again
+    await _until(lambda: service.idle)
+    await service.close()
+    assert len(failing.records) == 2
 
 
 async def test_a_pass_queues_nothing_at_half_the_days_limit(db, agent):

@@ -343,6 +343,11 @@ STATED_CONFIDENCE_NOTE = "Low confidence ("
 
 # A verdict row the judge will not try again (the rule of ``_JUDGED``).
 _FINAL_ROW = f"(v.status NOT IN {RETRIED_STATUSES!r} OR v.attempts >= {MAX_ATTEMPTS})"
+# How long after a failed or timed-out attempt the sweep waits before it queues the subject again, so hourly passes
+# during an outage do not spend a subject's attempts.
+SWEEP_RETRY_AFTER = timedelta(hours=6)
+# A row that keeps the sweep from queueing its subject: final, or failed within ``SWEEP_RETRY_AFTER``.
+_SWEEP_HELD = f"({_FINAL_ROW} OR v.judged_at >= :retry_after)"
 _SWEEP_DECISIONS = text(
     "SELECT d.id, d.reviewer, d.outcome, d.outcome_result, d.reviewed_at FROM brain.decisions d "
     "WHERE d.agent_id = :agent AND d.outcome IN ('success', 'partial', 'failure') "
@@ -350,7 +355,7 @@ _SWEEP_DECISIONS = text(
     "AND (d.reviewer IN :graders OR (d.reviewer = :agent_grader AND d.reviewed_at >= :agent_since)) "
     "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = d.agent_id "
     "AND v.subject_kind = 'decision' AND v.subject_id = d.id AND v.judge_name = :name "
-    f"AND v.judge_version = :version AND {_FINAL_ROW}) "
+    f"AND v.judge_version = :version AND {_SWEEP_HELD}) "
     "ORDER BY CASE WHEN d.reviewer IN :owners THEN 0 WHEN d.reviewer = :agent_grader THEN 1 ELSE 2 END, "
     "d.reviewed_at DESC, d.id LIMIT :limit"
 ).bindparams(bindparam("graders", expanding=True), bindparam("owners", expanding=True))
@@ -360,7 +365,7 @@ _SWEEP_REPORTS = text(
     "AND COALESCE(s.report_jsonb ->> 'summary', '') <> '' "
     "AND NOT EXISTS (SELECT 1 FROM nous_system.judge_verdicts v WHERE v.agent_id = s.agent_id "
     "AND v.subject_kind = 'task_report' AND v.subject_id = s.id AND v.judge_name = :name "
-    f"AND v.judge_version = :version AND {_FINAL_ROW}) "
+    f"AND v.judge_version = :version AND {_SWEEP_HELD}) "
     "ORDER BY s.completed_at DESC, s.id LIMIT :limit"
 )
 
@@ -377,7 +382,8 @@ async def sweep_decisions(
     session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
 ) -> list[dict[str, Any]]:
     """Up to ``limit`` of this agent's decisions graded success, partial or failure (not the abandoned mark) without a
-    final row at this judge name and version, in the sweep's order: graded by the owner in the last 30 days, by the
+    final row at this judge name and version (nor a failed one tried within ``SWEEP_RETRY_AFTER``), in the sweep's
+    order: graded by the owner in the last 30 days, by the
     agent in an interactive turn in the last 7, by a fixed signal in the last 30; newest first in each. Each is a dict
     of ``id``, ``grader`` (``grader_of``), ``grade``, ``note`` and ``graded_at``. Read-only."""
     params = {
@@ -389,6 +395,7 @@ async def sweep_decisions(
         "agent_grader": AGENT_GRADER,
         "name": judge_name,
         "version": judge_version,
+        "retry_after": now - SWEEP_RETRY_AFTER,
         "limit": limit,
     }
     return [
@@ -407,12 +414,14 @@ async def sweep_reports(
     session: AsyncSession, agent_id: str, *, judge_name: str, judge_version: str, now: datetime, limit: int
 ) -> list[dict[str, Any]]:
     """Up to ``limit`` of this agent's tasks finished as completed with a report in the last 2 days, without a final
-    row at this judge name and version, newest first: dicts of ``id`` and ``completed_at``. Read-only."""
+    row at this judge name and version (nor a failed one tried within ``SWEEP_RETRY_AFTER``), newest first: dicts of
+    ``id`` and ``completed_at``. Read-only."""
     params = {
         "agent": agent_id,
         "since": now - timedelta(days=SWEEP_REPORT_DAYS),
         "name": judge_name,
         "version": judge_version,
+        "retry_after": now - SWEEP_RETRY_AFTER,
         "limit": limit,
     }
     return [{"id": row.id, "completed_at": row.completed_at} for row in await session.execute(_SWEEP_REPORTS, params)]
