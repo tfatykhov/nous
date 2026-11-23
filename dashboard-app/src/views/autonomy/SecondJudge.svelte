@@ -10,9 +10,10 @@
   } from '../../lib/outside_judge';
 
   // F118 PR 3: the second judge's settings. One GET when the screen opens: with the setting off on the server
-  // ({enabled: false}) nothing is drawn and nothing more is asked. Each change is sent at once; one that needs the
-  // owner's yes is refused with the server's sentence and the daily limit it names, shown in a box, and sent again with
-  // that number only on "Yes".
+  // ({enabled: false}), or a first read that fails, nothing is drawn and nothing more is asked. While the server has not
+  // read its saved settings (loaded: false) the card asks again every 30 s, and stops once it has. Each change is sent
+  // at once; one that needs the owner's yes is refused with the server's sentence and the daily limit it names, shown
+  // in a box, and sent again with that number only on "Yes".
   // The API key is bound to `keyText` alone, cleared when its call returns, on Cancel, and when the box closes.
 
   type Kind = 'change' | 'key' | 'remove';
@@ -20,8 +21,10 @@
   type Send = (confirmed: number | null) => Promise<SecondState>;
   interface Pending { kind: Kind; text: string; calls: number; send: Send }
 
+  const REREAD_MS = 30_000;
+
   let card = $state<SecondState | null>(null);
-  let off = $state(false);
+  let seen = false; // a read has said enabled: true
   let failed = $state(false);
   let busy = $state(false);
   let note = $state<{ text: string; ok: boolean } | null>(null);
@@ -41,17 +44,34 @@
     limitText = String(next.daily_calls.value);
   }
 
+  let mounted = true;
+  let reading: AbortController | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  async function load() {
+    timer = null;
+    reading = new AbortController();
+    try {
+      const answer = await readSecond(reading.signal);
+      if (!mounted) return;
+      if (answer.enabled === false) return; // off on the server: nothing drawn, nothing more asked
+      seen = true;
+      failed = false;
+      show(answer);
+    } catch {
+      if (!mounted || !seen) return; // a first read that fails draws nothing and asks no more
+      failed = true;
+    }
+    if (card && !card.loaded) timer = setTimeout(() => void load(), REREAD_MS);
+  }
+
   onMount(() => {
-    const ac = new AbortController();
-    readSecond(ac.signal)
-      .then((answer) => {
-        if (answer.enabled === false) off = true;
-        else show(answer);
-      })
-      .catch(() => {
-        if (!ac.signal.aborted) failed = true;
-      });
-    return () => ac.abort();
+    void load();
+    return () => {
+      mounted = false;
+      reading?.abort();
+      if (timer) clearTimeout(timer);
+    };
   });
 
   async function focusConfirm() {
@@ -150,6 +170,7 @@
       <span class="status-pill {PILL[statusTone(s)]}" data-testid="jev-status">{statusText(s)}</span>
     </div>
     <p class="small muted intro">{INTRO}</p>
+    {#if failed}<p class="note note-err" role="alert">{LOAD_FAILED}</p>{/if}
     {#if s.loaded}
       <div class="rows">
         <div class="row">
@@ -245,11 +266,6 @@
       {#if note}<p class="note" class:note-err={!note.ok} role={note.ok ? 'status' : 'alert'}>{note.text}</p>{/if}
       <p class="small muted help">{HELP}</p>
     {/if}
-  </section>
-{:else if failed && !off}
-  <section class="panel" aria-labelledby="jev-title">
-    <div class="panel-head"><h2 id="jev-title">{TITLE}</h2></div>
-    <p class="small muted" role="status">{LOAD_FAILED}</p>
   </section>
 {/if}
 

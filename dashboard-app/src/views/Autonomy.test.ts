@@ -740,16 +740,18 @@ describe('Autonomy: a second opinion on decisions', () => {
     expect(card.textContent).toContain('A key is saved (3 May)');
   });
 
-  it('a card that cannot be read leaves the rest of the page', async () => {
+  it('a card whose first read fails draws nothing and leaves the rest of the page', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       if (url.startsWith('/dashboard/outside-judge/second')) throw new TypeError('network');
       if (url.startsWith('/dashboard/loop-numbers')) return { ok: true, status: 200, json: async () => loopBody } as Response;
       return { ok: true, status: 200, json: async () => body } as Response;
     }));
     render(Autonomy);
-    expect(await screen.findByText('These settings could not be read. Reload the page to try again.')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'What a finished job costs' })).toBeTruthy();
     expect(screen.getByText('Scorer running')).toBeTruthy();
-    expect(screen.getByRole('heading', { name: 'What a finished job costs' })).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('heading', { name: 'A second opinion on decisions' })).toBeNull();
+    expect(screen.queryByText('These settings could not be read. Reload the page to try again.')).toBeNull();
   });
 });
 

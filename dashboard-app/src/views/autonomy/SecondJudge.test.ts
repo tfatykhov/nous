@@ -3,8 +3,9 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 import SecondJudge from './SecondJudge.svelte';
 import type { SecondState } from '../../lib/outside_judge';
 
-// F118 PR 3: the card "A second opinion on decisions". The fetch stand-in answers the GET with `first` and each change
-// with the next of `replies` (else the state). Dates are fixed UTC strings: no test depends on the clock.
+// F118 PR 3: the card "A second opinion on decisions". The fetch stand-in answers the first GET with `first` (status
+// `getStatus`), each later GET with the next of `later` (else `first`), and each change with the next of `replies`
+// (else the state). Dates are fixed UTC strings, and the re-reads run on fake timers: no test depends on the clock.
 
 const KEY = 'ts-typed-' + 'K'.repeat(24);
 const SENTENCE = 'Send a copy of each decision Nous resolves to TypeSafe (api.typesafe.ai), an outside company? At most 100 copies a day.';
@@ -29,6 +30,8 @@ const SAVED_KEY = { source: 'stored' as const, set_at: '2026-05-03T12:00:00Z', p
 
 interface Reply { status: number; body: unknown }
 let first: unknown = STATE();
+let later: unknown[] = [];
+let getStatus = 200;
 let replies: Reply[] = [];
 let sent: { method: string; url: string; body: unknown }[] = [];
 let failLoad = false;
@@ -36,14 +39,19 @@ let failLoad = false;
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
     const method = init.method ?? 'GET';
+    const readsBefore = sent.filter((s) => s.method === 'GET').length;
     sent.push({ method, url, body: init.body === undefined ? undefined : JSON.parse(String(init.body)) });
     if (method === 'GET' && failLoad) throw new TypeError('network');
-    const reply = method === 'GET' ? { status: 200, body: first } : replies.shift() ?? { status: 200, body: first };
+    let reply: Reply;
+    if (method !== 'GET') reply = replies.shift() ?? { status: 200, body: first };
+    else if (readsBefore === 0) reply = { status: getStatus, body: getStatus < 400 ? first : { error: 'forbidden' } };
+    else reply = { status: 200, body: later.length ? later.shift() : first };
     return { ok: reply.status < 400, status: reply.status, text: async () => JSON.stringify(reply.body) } as Response;
   }));
 }
 const needsConfirm = (calls = 100, text = SENTENCE): Reply =>
   ({ status: 409, body: { error: text, needs_confirm: true, confirm_daily_calls: calls } });
+const reads = () => sent.filter((s) => s.method === 'GET').length;
 const changes = () => sent.filter((s) => s.method !== 'GET');
 /** Render the card and find its panel. */
 const card = async () => {
@@ -53,7 +61,7 @@ const card = async () => {
 const within = (box: HTMLElement) => ({ cancel: Array.from(box.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Cancel')! });
 const keyInput = () => document.getElementById('jev-key-input') as HTMLInputElement | null;
 
-beforeEach(() => { first = STATE(); replies = []; sent = []; failLoad = false; install(); });
+beforeEach(() => { first = STATE(); later = []; getStatus = 200; replies = []; sent = []; failLoad = false; install(); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('loading', () => {
@@ -66,11 +74,21 @@ describe('loading', () => {
     expect(sent).toEqual([{ method: 'GET', url: '/dashboard/outside-judge/second', body: undefined }]);
   });
 
-  it('a failed load says so in its own panel and asks no more', async () => {
-    failLoad = true;
-    render(SecondJudge);
-    expect(await screen.findByText('These settings could not be read. Reload the page to try again.')).toBeTruthy();
-    expect(sent).toHaveLength(1);
+  it.each([
+    ['a refused first read', () => { getStatus = 403; }],
+    ['a first read that fails', () => { failLoad = true; }],
+  ])('%s draws nothing and asks no more', async (_name, arrange) => {
+    arrange();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { container } = render(SecondJudge);
+      await waitFor(() => expect(sent).toHaveLength(1));
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(container.textContent?.trim()).toBe('');
+      expect(sent).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('while the saved settings could not be read it shows the status and no control', async () => {
@@ -78,6 +96,62 @@ describe('loading', () => {
     const section = await card();
     expect(screen.getByTestId('jev-status').textContent).toBe('Waiting for the saved settings');
     expect(section.querySelectorAll('button, input')).toHaveLength(0);
+  });
+
+  it('while the saved settings could not be read it asks again every 30 s, and stops once they are read', async () => {
+    first = STATE({ loaded: false });
+    later = [STATE({ loaded: false }), STATE()];
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await card();
+      expect(reads()).toBe(1);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(reads()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await waitFor(() => expect(reads()).toBe(2));
+      expect(screen.getByTestId('jev-status').textContent).toBe('Waiting for the saved settings');
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => expect(screen.getByTestId('jev-status').textContent).toBe('Off'));
+      expect(reads()).toBe(3);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(reads()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['loaded', STATE()],
+    ['off on the server', { enabled: false }],
+  ])('%s, it never asks again', async (_name, answer) => {
+    first = answer;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(SecondJudge);
+      await waitFor(() => expect(reads()).toBe(1));
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(reads()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a read again that fails, after one that said the settings are on, says so in the card and goes on asking', async () => {
+    first = STATE({ loaded: false });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await card();
+      failLoad = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect((await screen.findByRole('alert')).textContent).toBe('These settings could not be read. Reload the page to try again.');
+      failLoad = false;
+      later = [STATE()];
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => expect(screen.getByTestId('jev-status').textContent).toBe('Off'));
+      expect(screen.queryByRole('alert')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
