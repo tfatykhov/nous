@@ -18,7 +18,8 @@ the judge that used it has closed. As for the MCP credentials, the sealing prote
 backups, not the running process.
 
 ``SecondJudgeManager`` applies a change at once: under one lock, it checks the change and the confirmation (a write
-that would start the sending needs ``confirm_send``), registers a new key, writes the row and commits, then builds and
+that would start the sending, or raise the daily limit while it sends, needs the owner's yes to the sentence that names
+the limit after it, sent back as that number), registers a new key, writes the row and commits, then builds and
 starts the new second judge (when it sends), swaps it into the ``JudgeSet`` in one assignment and closes the old one,
 whose queued decisions are dropped. The change runs in a task the manager holds, so a caller that goes away does not
 stop it, and its answer comes after the old judge has closed. The first judge is never replaced, closed or read here.
@@ -477,8 +478,9 @@ class SecondJudgeManager:
 
     # ---- changes ---------------------------------------------------------------------------------------------------
 
-    async def patch(self, changes: dict[str, Any], *, confirm: bool, actor: str) -> Answer:
-        """Set the switch (``on``), the model and the daily limit; a None model or limit is the server's."""
+    async def patch(self, changes: dict[str, Any], *, confirmed: int | None, actor: str) -> Answer:
+        """Set the switch (``on``), the model and the daily limit; a None model or limit is the server's.
+        ``confirmed``: the daily limit named by the confirmation the owner accepted (``_change``)."""
         refused = self._refused_now(removal=False)
         if refused is not None:
             return refused
@@ -501,9 +503,9 @@ class SecondJudgeManager:
             if calls is not None and (isinstance(calls, bool) or not isinstance(calls, int) or not 0 <= calls <= most):
                 return _refusal(400, calls_rule(most))
             values["daily_calls"] = calls
-        return await self._run(lambda: self._change(values, confirm=confirm, actor=actor))
+        return await self._run(lambda: self._change(values, confirmed=confirmed, actor=actor))
 
-    async def put_key(self, key: str, *, confirm: bool, actor: str) -> Answer:
+    async def put_key(self, key: str, *, confirmed: int | None, actor: str) -> Answer:
         """Save the key (sealed); nothing is sent to the provider."""
         refused = self._refused_now(removal=False)
         if refused is not None:
@@ -513,14 +515,14 @@ class SecondJudgeManager:
             return _refusal(400, KEY_RULE)
         if self._key_file.box() is None:
             return _refusal(409, NO_KEY_FILE_TEXT)
-        return await self._run(lambda: self._change({}, key=key, confirm=confirm, actor=actor))
+        return await self._run(lambda: self._change({}, key=key, confirmed=confirmed, actor=actor))
 
-    async def remove_key(self, *, confirm: bool, actor: str) -> Answer:
+    async def remove_key(self, *, confirmed: int | None, actor: str) -> Answer:
         """Remove the stored key (allowed with the mode off too)."""
         refused = self._refused_now(removal=True)
         if refused is not None:
             return refused
-        return await self._run(lambda: self._change(dict.fromkeys(KEY_COLUMNS), confirm=confirm, actor=actor))
+        return await self._run(lambda: self._change(dict.fromkeys(KEY_COLUMNS), confirmed=confirmed, actor=actor))
 
     def _refused_now(self, *, removal: bool) -> Answer | None:
         if self._closed:
@@ -552,7 +554,21 @@ class SecondJudgeManager:
             logger.warning("F118: a change of the second judge's settings failed (%s)", type(exc).__name__)
             return _refusal(500, FAILED)
 
-    async def _change(self, values: dict[str, Any], *, key: str | None = None, confirm: bool, actor: str) -> Answer:
+    def _needs_confirmation(self, after: SecondConfig, confirmed: int | None) -> bool:
+        """Whether a change that gives ``after`` needs the owner's yes and does not have it. It does when the second
+        judge would send after it and either was not sending before or would send more a day than before (a raise,
+        also to the server's value). The yes counts only for the number its sentence named: ``confirmed`` must be
+        the daily limit after the change (a bool is not a number)."""
+        if self.locked_off or not sends(after):
+            return False
+        if sends(self._live) and after.daily_calls <= self._live.daily_calls:
+            return False
+        accepted = isinstance(confirmed, int) and not isinstance(confirmed, bool) and confirmed == after.daily_calls
+        return not accepted
+
+    async def _change(
+        self, values: dict[str, Any], *, key: str | None = None, confirmed: int | None, actor: str
+    ) -> Answer:
         """One change, the lock held: the confirmation, a new key registered, the row written and committed, then
         applied. ``key``: a new key to seal (its sealed columns become the values)."""
         row = self._row or StoredRow()
@@ -569,8 +585,10 @@ class SecondJudgeManager:
         if unchanged:
             return Answer(200, {**self.state(), "changed": False})
         after = resolve(self._settings, proposed, opened, problem)
-        if not self.locked_off and not sends(self._live) and sends(after) and not confirm:
-            return _refusal(409, confirm_text(after.daily_calls), needs_confirm=True)
+        if self._needs_confirmation(after, confirmed):
+            return _refusal(
+                409, confirm_text(after.daily_calls), needs_confirm=True, confirm_daily_calls=after.daily_calls
+            )
         if key is not None:
             box = self._key_file.box()
             if box is None:

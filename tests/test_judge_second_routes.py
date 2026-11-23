@@ -326,6 +326,8 @@ async def test_the_read_answers_each_value_and_where_it_comes_from(served):
         ("PATCH", PATH, {"daily_calls": "5"}, "Not accepted: daily_calls."),
         ("PATCH", PATH, {"model": 1}, "Not accepted: model."),
         ("PATCH", PATH, {"confirm_send": 1}, "Not accepted: confirm_send."),
+        ("PATCH", PATH, {"on": True, "confirm_daily_calls": 5.0}, "Not accepted: confirm_daily_calls."),
+        ("PATCH", PATH, {"on": True, "confirm_daily_calls": True}, "Not accepted: confirm_daily_calls."),
         ("PATCH", PATH, {}, "Nothing to change."),
         ("PATCH", PATH, {"confirm_send": True}, "Nothing to change."),
         ("PATCH", PATH, {"model": "jev-latest"}, second_settings.MODEL_RULE),
@@ -379,9 +381,21 @@ async def test_saving_the_key_needs_the_confirmation_when_it_starts_the_sending_
     assert on.status_code == 200 and on.json()["running"] is False
     refused = await server.send("PUT", f"{PATH}/key", {"key": KEY})
     assert refused.status_code == 409
-    assert refused.json() == {"error": second_settings.confirm_text(100), "needs_confirm": True}
+    assert refused.json() == {
+        "error": second_settings.confirm_text(100),
+        "needs_confirm": True,
+        "confirm_daily_calls": 100,
+    }
+    # A yes that carries only the boolean, or another number, is asked again.
+    for bare in (
+        {"confirm_send": True},
+        {"confirm_send": True, "confirm_daily_calls": 99},
+        {"confirm_daily_calls": 100},
+    ):
+        again = await server.send("PUT", f"{PATH}/key", {"key": KEY, **bare})
+        assert (again.status_code, again.json()) == (409, refused.json())
     assert await server.row() is not None and not (await server.row()).has_key
-    saved = await server.send("PUT", f"{PATH}/key", {"key": KEY, "confirm_send": True})
+    saved = await server.send("PUT", f"{PATH}/key", {"key": KEY, "confirm_send": True, "confirm_daily_calls": 100})
     assert saved.status_code == 200 and saved.json()["running"] is True and saved.json()["changed"] is True
     assert saved.json()["key"]["source"] == "stored" and saved.json()["key"]["set_at"]
     for answer in (refused, saved, await server.send("GET", PATH)):
@@ -394,7 +408,7 @@ async def test_saving_the_key_needs_the_confirmation_when_it_starts_the_sending_
 async def test_a_patch_keeps_the_key_and_a_removal_stops_the_sending(served):
     server = await served(outside_judge_daily_calls=5)
     await server.send("PUT", f"{PATH}/key", {"key": KEY})
-    started = await server.send("PATCH", PATH, {"on": True, "confirm_send": True})
+    started = await server.send("PATCH", PATH, {"on": True, "confirm_send": True, "confirm_daily_calls": 5})
     assert started.json()["running"] is True
     changed = await server.send("PATCH", PATH, {"model": "jev-1.15.0"})
     assert changed.status_code == 200 and changed.json()["model"] == {"value": "jev-1.15.0", "source": "stored"}
@@ -423,7 +437,7 @@ async def test_the_key_is_in_no_answer_no_log_record_no_environment_and_no_colum
     for method, path, body in [
         ("PUT", f"{PATH}/key", {"key": KEY}),
         ("PATCH", PATH, {"on": True}),
-        ("PATCH", PATH, {"on": True, "confirm_send": True}),
+        ("PATCH", PATH, {"on": True, "confirm_send": True, "confirm_daily_calls": 100}),
         ("POST", f"{PATH}/check", {}),
         ("PUT", f"{PATH}/key", {"key": f" {KEY_2} ", "confirm_send": True}),
         ("PUT", f"{PATH}/key", {"key": KEY + " x"}),

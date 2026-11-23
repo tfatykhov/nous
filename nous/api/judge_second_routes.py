@@ -2,10 +2,14 @@
 screen (``NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED``).
 
 ``GET /dashboard/outside-judge/second``: the settings in effect and where each comes from, whether a key is saved and
-when (never the key, its length or any part of it). ``PATCH`` the same path: ``{on?, model?, daily_calls?,
-confirm_send?}`` (a null model or limit is the server's value). ``PUT /dashboard/outside-judge/second/key``: ``{key,
-confirm_send?}``. ``DELETE`` that path: ``{}`` or ``{confirm_send}``. ``POST /dashboard/outside-judge/second/check``:
-``{}``, one request with a fixed record; the answer is ``ok``, ``refused`` or ``unreachable`` and nothing else.
+when (never the key, its length or any part of it). ``PATCH`` the same path: ``{on?, model?, daily_calls?}`` (a null
+model or limit is the server's value). ``PUT /dashboard/outside-judge/second/key``: ``{key}``. ``DELETE`` that path:
+``{}``. ``POST /dashboard/outside-judge/second/check``: ``{}``, one request with a fixed record; the answer is ``ok``,
+``refused`` or ``unreachable`` and nothing else.
+
+A change that needs the owner's yes is answered 409 with the sentence, ``needs_confirm`` and the daily limit it names
+(``confirm_daily_calls``); the same change sent again with ``confirm_send: true`` and that number is the yes. A yes
+without the number, or with another number (the limit changed meanwhile), is answered 409 again with the new sentence.
 
 Every route requires the owner's or the proxy's secret (``nous/api/owner_guard.py``), checked before the body is read;
 the actor of a change is the proof the guard accepted. A body is at most ``BODY_MAX_BYTES``, a JSON object whose
@@ -48,26 +52,33 @@ class _Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SettingsChange(_Body):
+class _Confirmable(_Body):
+    """A change that may need the owner's yes: ``confirm_send`` and the daily limit the accepted sentence named."""
+
+    confirm_send: StrictBool = False
+    confirm_daily_calls: StrictInt | None = None
+
+    def confirmed(self) -> int | None:
+        """The limit the owner said yes to, or None when the body carries no yes."""
+        return self.confirm_daily_calls if self.confirm_send else None
+
+
+class SettingsChange(_Confirmable):
     """``PATCH``: the fields to change. A null ``model`` or ``daily_calls`` is the server's value."""
 
     on: StrictBool = None  # type: ignore[assignment]  # absent unless given: a null is refused
     model: StrictStr | None = None
     daily_calls: StrictInt | None = None
-    confirm_send: StrictBool = False
 
 
-class KeyChange(_Body):
-    """``PUT .../key``: the key, and the confirmation when saving it starts the sending."""
+class KeyChange(_Confirmable):
+    """``PUT .../key``: the key, and the yes when saving it starts the sending."""
 
     key: StrictStr
-    confirm_send: StrictBool = False
 
 
-class KeyRemoval(_Body):
-    """``DELETE .../key``: empty, or the confirmation when the removal hands over to the server's key."""
-
-    confirm_send: StrictBool = False
+class KeyRemoval(_Confirmable):
+    """``DELETE .../key``: empty, or the yes when the removal hands over to the server's key."""
 
 
 class NoBody(_Body):
@@ -156,8 +167,8 @@ def build_judge_second_routes(*, settings: Any, manager: Any, guard: OwnerGuard)
         """PATCH /dashboard/outside-judge/second"""
 
         async def call(found: Any, body: SettingsChange, who: str) -> Any:
-            changes = {name: getattr(body, name) for name in body.model_fields_set if name != "confirm_send"}
-            return await found.patch(changes, confirm=body.confirm_send, actor=who)
+            changes = {name: getattr(body, name) for name in body.model_fields_set if not name.startswith("confirm_")}
+            return await found.patch(changes, confirmed=body.confirmed(), actor=who)
 
         return await change(request, SettingsChange, call)
 
@@ -165,7 +176,7 @@ def build_judge_second_routes(*, settings: Any, manager: Any, guard: OwnerGuard)
         """PUT /dashboard/outside-judge/second/key"""
 
         async def call(found: Any, body: KeyChange, who: str) -> Any:
-            return await found.put_key(body.key, confirm=body.confirm_send, actor=who)
+            return await found.put_key(body.key, confirmed=body.confirmed(), actor=who)
 
         return await change(request, KeyChange, call)
 
@@ -173,7 +184,7 @@ def build_judge_second_routes(*, settings: Any, manager: Any, guard: OwnerGuard)
         """DELETE /dashboard/outside-judge/second/key"""
 
         async def call(found: Any, body: KeyRemoval, who: str) -> Any:
-            return await found.remove_key(confirm=body.confirm_send, actor=who)
+            return await found.remove_key(confirmed=body.confirmed(), actor=who)
 
         return await change(request, KeyRemoval, call)
 

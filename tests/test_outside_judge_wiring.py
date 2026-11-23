@@ -589,8 +589,8 @@ async def test_with_the_settings_on_and_the_mode_off_no_judge_runs_and_the_setti
     manager = await main._start_second_settings(settings, None, database=db)
     try:
         assert manager.state()["locked"] == "off" and manager.state()["running"] is False
-        assert (await manager.patch({"on": True}, confirm=True, actor="owner")).status == 409
-        assert (await manager.remove_key(confirm=False, actor="owner")).status == 200
+        assert (await manager.patch({"on": True}, confirmed=100, actor="owner")).status == 409
+        assert (await manager.remove_key(confirmed=None, actor="owner")).status == 200
         assert opened == []
     finally:
         await manager.close()
@@ -688,7 +688,7 @@ def test_with_the_settings_on_the_boot_runs_the_settings_and_the_tools_are_those
                 await main.shutdown_components(components)
             manager = seen[mode]["manager"]
             if manager is not None:
-                seen[mode]["after"] = await manager.patch({"on": False}, confirm=False, actor="owner")
+                seen[mode]["after"] = await manager.patch({"on": False}, confirmed=None, actor="owner")
 
     try:
         _run(scenario)
