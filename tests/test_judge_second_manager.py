@@ -610,19 +610,24 @@ async def test_the_old_second_judge_has_closed_before_the_change_returns(make):
 
 
 async def test_a_decision_submitted_during_a_swap_lands_on_exactly_one_second_judge(make):
+    """Every decision reaches exactly one second judge, none is lost, and it is the one installed when the decision
+    was submitted. The old judge's close starts a step after the swap, so a decision submitted in between goes to the
+    new judge although the old one has not begun closing: which side of the swap a submit falls on is read from the
+    set at that moment, never from the old judge's closing."""
     env = await _keyed(make, enabled=True, model="jev-1.14.0")
     [old] = env.built
     old.release.clear()  # the old judge's close waits
+    installed: dict[uuid.UUID, Any] = {}  # each decision, and the second judge in the set when it was submitted
 
     def submit() -> uuid.UUID:
         decision = uuid.uuid4()
+        installed[decision] = env.judges.second  # submit_decision reads the set once, with no await between
         env.judges.submit_decision(decision, grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC))
         return decision
 
     change = asyncio.create_task(env.manager.patch({"model": "jev-1.15.0"}, confirmed=None, actor="owner"))
-    before = []
     while not old.closing.is_set() and not change.done():  # until the swap is done and the old judge is closing
-        before.append(submit())
+        submit()
         await asyncio.sleep(0.001)
     assert old.closing.is_set() and not change.done()
     after = [submit() for _ in range(5)]
@@ -630,8 +635,17 @@ async def test_a_decision_submitted_during_a_swap_lands_on_exactly_one_second_ju
     assert new is not old and new.config.model == "jev-1.15.0" and not old.closed
     old.release.set()
     assert (await change).status == 200
-    assert old.submitted == before and new.submitted == after
-    assert env.primary.submitted == before + after
+    submitted = list(installed)
+    # None lost, none on both: each decision reached exactly one second judge.
+    assert sorted(old.submitted + new.submitted, key=str) == sorted(submitted, key=str)
+    assert not set(old.submitted) & set(new.submitted)
+    # Each reached the judge installed when it was submitted, in order; the first went before the swap (the change had
+    # not started), and every one after the old judge began closing went to the new judge.
+    assert old.submitted == [decision for decision in submitted if installed[decision] is old]
+    assert new.submitted == [decision for decision in submitted if installed[decision] is new]
+    assert installed[submitted[0]] is old and old.submitted
+    assert all(installed[decision] is new for decision in after) and new.submitted[-5:] == after
+    assert env.primary.submitted == submitted
 
 
 async def test_a_real_second_judge_drops_its_queued_decisions_when_it_is_replaced(make):
