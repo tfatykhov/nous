@@ -154,6 +154,12 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("GET", "/autonomy/tools"): OWNER,
     ("PUT", "/autonomy/tools/{tool}"): OWNER,
     ("DELETE", "/autonomy/tools/{tool}"): OWNER,
+    # F118 PR 3: the second judge's settings (reads included)
+    ("GET", "/dashboard/outside-judge/second"): OWNER,
+    ("PATCH", "/dashboard/outside-judge/second"): OWNER,
+    ("PUT", "/dashboard/outside-judge/second/key"): OWNER,
+    ("DELETE", "/dashboard/outside-judge/second/key"): OWNER,
+    ("POST", "/dashboard/outside-judge/second/check"): OWNER,
     # MCP client (mcp_client_enabled)
     ("GET", "/integrations/mcp/servers"): PROXY_SECRET,
     ("POST", "/integrations/mcp/servers"): PROXY_SECRET,
