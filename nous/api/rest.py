@@ -2468,8 +2468,10 @@ def create_app(
         """F118 task reports, for GET /dashboard/outside-judge: with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, ``reports``
         (the report judge's verdicts, beside the finish checks' and the owner's spot checks, and their cost) and
         ``sweep`` (the first judge's agreement with grades from outcomes, the stated-confidence grade apart, and what
-        the sweep did in this process). With the setting off nothing, so the answer is the same as without reports;
-        when they cannot be read nothing either, with one WARNING."""
+        the sweep did in this process, and what the second judge's own hourly pass did in this process, under
+        ``second_runtime``, when a second judge runs; it is read apart from the ``second`` block, so across a swap the
+        two can describe different services in one answer). With the setting off nothing, so the answer is the same
+        as without reports; when they cannot be read nothing either, with one WARNING."""
         if not settings.outside_judge_reports_enabled:
             return {}
         from nous.judge import store as judge_store
@@ -2485,11 +2487,14 @@ def create_app(
                     session, settings.agent_id, days=days, judge_name=name, judge_version=version
                 )
             sweep_numbers = getattr(service, "sweep_numbers", None)
+            second_numbers = getattr(service, "second_sweep_numbers", None)
+            second_sweep = second_numbers() if callable(second_numbers) else None
             return {
                 "reports": {"judge": name, "version": version, **reports},
                 "sweep": {
                     "agreement": judge_store.outcome_agreement(numbers["decisions"]["by_grader"]),
                     "runtime": sweep_numbers() if callable(sweep_numbers) else None,
+                    **({} if second_sweep is None else {"second_runtime": second_sweep}),
                 },
             }
         except Exception as e:

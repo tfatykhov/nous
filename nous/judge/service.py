@@ -32,7 +32,9 @@ as it stood at the task's completion, read from the task's row (a task not finis
 report judge shares the judge's name, so the daily limit counts both; reports may use at most half of it, so
 decisions always keep the other half (a report past that half is not judged now). ``JudgeSet`` hands a report to the
 first judge only (``SECOND_JUDGE_GRADES_REPORTS``). That service also runs the sweep (``sweep_once``): soon after the
-start and then hourly, at most ``SWEEP_BATCH`` subjects without a final row, none past half the day's limit.
+start and then hourly, at most ``SWEEP_BATCH`` subjects without a final row, nothing queued once its calls today reach
+half the day's limit. A second judge's service runs the same sweep over decisions, at its own name, version and limit
+(``sweep=True``).
 """
 
 from __future__ import annotations
@@ -175,8 +177,9 @@ class OutsideJudge:
         self._daily_calls = settings.outside_judge_daily_calls if daily_calls is None else daily_calls
         self.judge = judge
         # The judge of finished task reports (None: this service takes no report), and the hourly sweep. None: the
-        # sweep runs in the service that judges reports, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, so the first judge's
-        # only; a second judge's service sweeps nothing (sweep=True would give it a sweep of decisions).
+        # sweep runs in the service that judges reports, with NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED, so the first judge's.
+        # A second judge's service is built with sweep=True under the same setting (main.py, second_settings.py) and
+        # sweeps decisions only: it has no report judge.
         self.report_judge = report_judge
         if sweep is None:
             sweep = report_judge is not None and bool(getattr(settings, "outside_judge_reports_enabled", False))
@@ -603,8 +606,14 @@ class JudgeSet:
         return queued
 
     def sweep_numbers(self) -> dict[str, Any] | None:
-        """The first judge's sweep numbers (the second judge's service does not sweep)."""
+        """The first judge's sweep numbers (the second judge's are ``second_sweep_numbers``)."""
         return _sweep_numbers_of(self.primary)
+
+    def second_sweep_numbers(self) -> dict[str, Any] | None:
+        """The second judge's sweep numbers (its own hourly pass of decisions), or None when there is no second judge
+        or its sweep is off."""
+        second = self.second  # read once
+        return None if second is None else _sweep_numbers_of(second)
 
     async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
         """Close every judge at once (``OutsideJudge.close``); one that raises does not keep another open."""

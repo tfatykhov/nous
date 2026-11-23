@@ -1107,7 +1107,7 @@ async def test_the_second_judges_answer_is_stored_under_its_name_and_version(db,
     [row] = await _rows(db, agent)
     assert {k: row[k] for k in ("judge_name", "judge_version", "model", "status", "verdict", "labels", "reason")} == {
         "judge_name": "jev",
-        "judge_version": "jq-2:jev-1.14.0",
+        "judge_version": service.judge.version,
         "model": "jev-1.14.0",
         "status": "ok",
         "verdict": "partial",

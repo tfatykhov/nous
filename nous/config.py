@@ -1104,7 +1104,8 @@ class Settings(BaseSettings):
     # is judged too, by the first judge only, from the calls the task ran (nous_system.judge_verdicts, subject_kind
     # task_report; reports use at most half the daily limit), and the first judge runs an hourly sweep that queues
     # what a restart lost and decisions graded by the owner, the review route or a fixed signal, at most five a pass
-    # and none past half its daily limit. Off: neither.
+    # and none past half its daily limit; a second judge, when one runs, runs the same sweep over decisions at its own
+    # limit. Off: neither.
     outside_judge_reports_enabled: bool = False
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(

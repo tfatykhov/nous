@@ -141,3 +141,27 @@ def test_the_confirmation_says_what_leaves_to_which_company_and_the_limit():
     assert "At most 25 copies a day." in text and "Nothing is sent while this is off." in text
     assert "At most 1 copy a day." in confirm_text(1)
     assert "At most 5,000 copies a day." in confirm_text(5000)
+    # Without the hourly pass the sentence is word for word the one owners have said yes to.
+    assert text == (
+        "Send a copy of each decision Nous resolves to TypeSafe (api.typesafe.ai), an outside company? The copy holds "
+        "the decision, Nous's note and grade, and what its tools did in that session, with their inputs and results, "
+        "up to 16,000 characters. Text that looks like a key or a password is removed; everything else is sent as it "
+        "is. TypeSafe says it does not train on what it receives; it does not say for how many days it keeps it. At "
+        "most 25 copies a day. Nothing is sent while this is off."
+    )
+
+
+def test_with_the_hourly_pass_the_confirmation_also_says_what_it_sends_and_how_far_back():
+    assert confirm_text(25, hourly=True) == (
+        "Send a copy of each decision Nous resolves to TypeSafe (api.typesafe.ai), an outside company? The copy holds "
+        "the decision, Nous's note and grade, and what its tools did in that session, with their inputs and results, "
+        "up to 16,000 characters. Earlier decisions are sent too: about once an hour, and two minutes after a start or "
+        "a saved change, up to 5 that this model of Jev has not graded yet, from those Nous graded in the last 7 days "
+        "and those graded by the owner, the review route or an automatic check in the last 30 days. Decisions graded "
+        "by the owner, the review route or an automatic check are sent without the grade and its note. A copy whose "
+        "request failed is sent again, at most 3 times in all. Text that looks like a key or a password is removed; "
+        "everything else is sent as it is. TypeSafe says it does not train on what it receives; it does not say for "
+        "how many days it keeps it. At most 25 copies a day. Nothing is sent while this is off."
+    )
+    assert "At most 1 copy a day." in confirm_text(1, hourly=True)
+    assert confirm_text(25, hourly=False) == confirm_text(25)

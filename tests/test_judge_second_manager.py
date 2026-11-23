@@ -414,6 +414,18 @@ async def test_removing_a_saved_key_while_sending_hands_over_to_the_servers_key_
     assert redact_output(KEY) == KEY  # the saved key is forgotten once the judge that used it has closed
 
 
+@pytest.mark.parametrize("reports", [True, False])
+async def test_the_sentence_names_the_hourly_pass_exactly_when_the_reports_setting_is_on(make, reports):
+    env = await make(key=KEY, row={"enabled": False}, outside_judge_reports_enabled=reports)
+    sentence = second_settings.confirm_text(YES, hourly=reports)
+    assert env.manager.state()["confirm_text"] == sentence
+    asked = await env.manager.patch({"on": True}, confirmed=None, actor="owner")
+    assert (asked.status, asked.body["error"], asked.body["confirm_daily_calls"]) == (409, sentence, YES)
+    assert ("Earlier decisions are sent too" in sentence) is reports
+    accepted = await env.manager.patch({"on": True}, confirmed=YES, actor="owner")
+    assert accepted.status == 200 and accepted.body["confirm_text"] == sentence
+
+
 async def test_the_sentence_names_the_limit_after_the_change(make):
     env = await _keyed(make, enabled=False, daily_calls=4)
     refused = await env.manager.patch({"on": True, "daily_calls": 12}, confirmed=None, actor="owner")

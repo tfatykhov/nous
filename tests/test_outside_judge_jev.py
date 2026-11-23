@@ -138,7 +138,7 @@ def test_the_url_is_the_system_one_endpoint():
 
 def test_the_name_the_version_and_the_model():
     judge = jev_judge.JevJudge(KEY, "jev-1.13.0")
-    assert (judge.name, judge.version, judge.model) == ("jev", "jq-2:jev-1.13.0", "jev-1.13.0")
+    assert (judge.name, judge.version, judge.model) == ("jev", "jq-3:jev-1.13.0", "jev-1.13.0")
     assert isinstance(judge, slot.Judge)
 
 
@@ -174,9 +174,20 @@ def test_the_questions_name_the_records_fields_by_path():
     assert "`outside_data`" in jev_judge.SETS_VERDICT_QUESTION
 
 
+def test_the_question_says_how_to_grade_a_record_whose_claim_is_null():
+    # A decision graded by anyone but the agent is sent with no claim (``service._shown_claim``).
+    sentence = "It is null when the grade is kept out of the record: then grade the decision from `evidence` alone."
+    assert sentence in jev_judge.VERDICT_QUESTION
+    assert "`written_by_author.claim`, when it is not null, is how the agent graded it." in jev_judge.VERDICT_QUESTION
+    assert "what was claimed" not in jev_judge.VERDICT_CRITERIA["cannot_tell"]
+
+
 # A new question text or label threshold needs a new QUESTION_VERSION and its fingerprint here (old verdicts keep
 # theirs).
-PINNED = {"jq-2": "9adba39deefd808c52cd66b2e24137c961551b12875ca17080b4b7410d1a82df"}
+PINNED = {
+    "jq-2": "9adba39deefd808c52cd66b2e24137c961551b12875ca17080b4b7410d1a82df",
+    "jq-3": "0d79b8f596271d258a27c814a516a5e315e1ef20063861ed56e9c17852adc1ed",
+}
 
 
 def test_the_questions_change_only_with_their_version():
@@ -538,7 +549,7 @@ def test_with_a_key_the_judge_uses_the_pinned_model_and_the_real_transport():
     assert settings.typesafe_api_key == "k-1"
     judge = jev_judge.make_jev_judge(settings)
     assert isinstance(judge, jev_judge.JevJudge)
-    assert (judge.model, judge.version, judge._transport) == ("jev-1.13.0", "jq-2:jev-1.13.0", None)
+    assert (judge.model, judge.version, judge._transport) == ("jev-1.13.0", "jq-3:jev-1.13.0", None)
 
 
 def test_registering_makes_the_provider_available(monkeypatch):

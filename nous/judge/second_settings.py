@@ -21,9 +21,11 @@ backups, not the running process.
 that would start the sending, or raise the daily limit while it sends, needs the owner's yes to the sentence that names
 the limit after it, sent back as that number), registers a new key, writes the row and commits, then builds and
 starts the new second judge (when it sends), swaps it into the ``JudgeSet`` in one assignment and closes the old one,
-whose queued decisions are dropped. The change runs in a task the manager holds, so a caller that goes away does not
-stop it, and its answer comes after the old judge has closed. The first judge is never replaced, closed or read here.
-Nothing here logs a key, a request body or an exception's text: class names only.
+whose queued decisions are dropped. The second judge's hourly pass (with ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``, the
+setting of the first judge's) starts with it and stops when it is replaced or closed: a new judge's pass counts from
+zero, and its first pass runs two minutes after its start. The change runs in a task the manager holds, so a caller
+that goes away does not stop it, and its answer comes after the old judge has closed. The first judge is never
+replaced, closed or read here. Nothing here logs a key, a request body or an exception's text: class names only.
 """
 
 from __future__ import annotations
@@ -40,10 +42,10 @@ from typing import Any
 from sqlalchemy import text
 
 from nous.cognitive.ledger_store import forget_own_secret, register_own_secret
-from nous.judge import jev_judge
+from nous.judge import jev_judge, store
 from nous.judge.evidence import EVIDENCE_MAX_CHARS
 from nous.judge.jev_judge import JevJudge
-from nous.judge.service import OutsideJudge
+from nous.judge.service import SWEEP_BATCH, OutsideJudge
 from nous.mcp_client.secrets import AadFields, KeyFile, SecretBox, SecretUnavailable, aad_fields
 
 logger = logging.getLogger(__name__)
@@ -81,18 +83,39 @@ KEY_RULE = "key must be 16 to 200 characters: letters, digits and . _ ~ + / = : 
 CONFIRM_TEXT = (
     "Send a copy of each decision Nous resolves to TypeSafe (api.typesafe.ai), an outside company? The copy holds the "
     "decision, Nous's note and grade, and what its tools did in that session, with their inputs and results, up to "
-    "{chars} characters. Text that looks like a key or a password is removed; everything else is sent as it is. "
-    "TypeSafe says it does not train on what it receives; it does not say for how many days it keeps it. At most "
+    "{chars} characters.{hourly} Text that looks like a key or a password is removed; everything else is sent as it "
+    "is. TypeSafe says it does not train on what it receives; it does not say for how many days it keeps it. At most "
     "{calls} {copies} a day. Nothing is sent while this is off."
+)
+# The sentence's added part when the hourly pass is on (NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED); it starts with a space.
+HOURLY_TEXT = (
+    " Earlier decisions are sent too: about once an hour, and two minutes after a start or a saved change, up to "
+    "{batch} that this model of Jev has not graded yet, from those Nous graded in the last {agent_days} days and those "
+    "graded by the owner, the review route or an automatic check in the last {days} days. Decisions graded by the "
+    "owner, the review route or an automatic check are sent without the grade and its note. A copy whose request "
+    "failed is sent again, at most {attempts} times in all."
 )
 
 _sleep = asyncio.sleep  # the retry's wait; tests replace it
 
 
-def confirm_text(daily_calls: int) -> str:
-    """The confirmation sentence, with the daily limit after the change."""
+def confirm_text(daily_calls: int, hourly: bool = False) -> str:
+    """The confirmation sentence, with the daily limit after the change; ``hourly``: the hourly pass is on."""
+    extra = (
+        HOURLY_TEXT.format(
+            batch=SWEEP_BATCH,
+            agent_days=store.SWEEP_AGENT_DAYS,
+            days=store.SWEEP_DECISION_DAYS,
+            attempts=store.MAX_ATTEMPTS,
+        )
+        if hourly
+        else ""
+    )
     return CONFIRM_TEXT.format(
-        chars=f"{EVIDENCE_MAX_CHARS:,}", calls=f"{daily_calls:,}", copies="copy" if daily_calls == 1 else "copies"
+        hourly=extra,
+        chars=f"{EVIDENCE_MAX_CHARS:,}",
+        calls=f"{daily_calls:,}",
+        copies="copy" if daily_calls == 1 else "copies",
     )
 
 
@@ -320,6 +343,10 @@ class SecondJudgeManager:
         """The values in effect now."""
         return self._live
 
+    def _hourly(self) -> bool:
+        """Whether the second judge runs the hourly pass (``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED``)."""
+        return bool(getattr(self._settings, "outside_judge_reports_enabled", False))
+
     def state(self) -> dict[str, Any]:
         """What the card shows: each value and where it comes from, whether a key is saved and when, never the key,
         its length or any part of it."""
@@ -345,7 +372,7 @@ class SecondJudgeManager:
             },
             "can_store_key": self._key_file.box() is not None,
             "sends_to": SENDS_TO,
-            "confirm_text": confirm_text(live.daily_calls),
+            "confirm_text": confirm_text(live.daily_calls, self._hourly()),
             "updated_at": _iso(row.updated_at) if row is not None else None,
             "updated_by": row.updated_by if row is not None else None,
         }
@@ -473,6 +500,7 @@ class SecondJudgeManager:
             judge,
             timeout_seconds=jev_judge.TIMEOUT_SECONDS,
             daily_calls=config.daily_calls,
+            sweep=self._hourly(),
         )
 
     def _hold(self, key: str) -> None:
@@ -604,7 +632,10 @@ class SecondJudgeManager:
         after = resolve(self._settings, proposed, opened, problem)
         if self._needs_confirmation(after, confirmed):
             return _refusal(
-                409, confirm_text(after.daily_calls), needs_confirm=True, confirm_daily_calls=after.daily_calls
+                409,
+                confirm_text(after.daily_calls, self._hourly()),
+                needs_confirm=True,
+                confirm_daily_calls=after.daily_calls,
             )
         if key is not None:
             box = self._key_file.box()

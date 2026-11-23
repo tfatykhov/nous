@@ -315,6 +315,19 @@ async def test_the_read_answers_each_value_and_where_it_comes_from(served):
 
 
 @pytest.mark.postgres_only
+async def test_with_the_reports_setting_on_the_read_and_the_refusal_carry_the_hourly_sentence(served):
+    server = await served(outside_judge_reports_enabled=True, outside_judge_daily_calls=30)
+    sentence = second_settings.confirm_text(30, hourly=True)
+    assert (await server.send("GET", PATH)).json()["confirm_text"] == sentence
+    assert (await server.send("PATCH", PATH, {"on": True})).status_code == 200  # no key yet: nothing is sent
+    refused = await server.send("PUT", f"{PATH}/key", {"key": KEY})
+    assert (refused.status_code, refused.json()) == (
+        409,
+        {"error": sentence, "needs_confirm": True, "confirm_daily_calls": 30},
+    )
+
+
+@pytest.mark.postgres_only
 @pytest.mark.parametrize(
     ("method", "path", "body", "error"),
     [

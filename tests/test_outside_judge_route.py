@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 from nous import judge as judge_slot
 from nous.config import Settings
-from nous.judge import store
+from nous.judge import jev_judge, store
 
 OWNER_VALUE = "owner-only-test-value"
 OWNER = {"X-Nous-Owner-Secret": OWNER_VALUE}
@@ -627,7 +627,7 @@ async def test_with_two_judges_the_answer_adds_the_seconds_numbers_and_how_the_t
     claim_at = datetime.now(UTC) - timedelta(minutes=5)
     agree, differ = uuid.uuid4(), uuid.uuid4()
     first = {"judge_name": "stub", "judge_version": "stub-9", "claim_at": claim_at, "tokens_in": 1000}
-    second = {"judge_name": "jev", "judge_version": "jq-2:jev-1.14.0", "claim_at": claim_at, "tokens_in": 4100}
+    second = {"judge_name": "jev", "judge_version": both.second.judge.version, "claim_at": claim_at, "tokens_in": 4100}
     await _seed_verdicts(
         db,
         agent,
@@ -660,7 +660,7 @@ async def test_with_two_judges_the_answer_adds_the_seconds_numbers_and_how_the_t
     assert set(second_block) == {"judge", "version", "model", "decisions", "cost", "disagreements"}
     assert (second_block["judge"], second_block["version"], second_block["model"]) == (
         "jev",
-        "jq-2:jev-1.14.0",
+        f"{jev_judge.QUESTION_VERSION}:jev-1.14.0",
         "jev-1.14.0",
     )
     assert second_block["decisions"]["by_verdict"] == {"success": 1, "failure": 1}

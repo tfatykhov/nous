@@ -57,8 +57,8 @@ export const checkSecond = () => timed((signal) => apiRequest<CheckAnswer>(SECON
 // ── Words ───────────────────────────────────────────────────────────────────
 
 export const TITLE = 'A second opinion on decisions';
-export const INTRO = "Jev, a model of the company TypeSafe, grades the decisions Nous resolves, beside Nous's own judge. Its grades are kept for comparison and change nothing.";
-export const HELP = 'A change applies at once. Decisions waiting in line for Jev when you save are skipped.';
+export const INTRO = "Jev, a model of the company TypeSafe, grades Nous's decisions once they have a grade, beside Nous's own judge. Its grades are kept for comparison and change nothing.";
+export const HELP = 'A change applies at once. Decisions waiting in line for Jev when you save are dropped from the line.';
 export const SWITCH_LABEL = 'Ask Jev as well';
 export const MODEL_LABEL = 'Model';
 export const MODEL_HINT = 'A version like jev-1.14.0';

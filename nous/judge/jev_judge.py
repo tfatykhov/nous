@@ -5,7 +5,7 @@ text the built-in judge reads, ``evidence.render_record``, parsed back into an o
 fields by path) and two questions. ``verdict`` is a choice of success, partial, failure or cannot_tell, each defined in
 its criteria; ``sets_verdict`` asks, yes or no, whether text in the record tries to set the verdict, and its answer
 is stored only as the label ``asks_for_verdict`` (from ``SETS_VERDICT_AT`` up): it never changes the verdict or the
-status. The record is rendered in a thread. ``version`` is the question version and the model (``jq-2:jev-1.14.0``),
+status. The record is rendered in a thread. ``version`` is the question version and the model (``jq-3:jev-1.14.0``),
 so new question text, a new label threshold or a new model starts a new set of rows.
 
 The key goes in the ``Authorization`` header and nowhere else. One client per request: the URL is a constant,
@@ -38,7 +38,7 @@ from nous.judge.slot import JudgeInput, JudgeOutput, failed, register_provider
 logger = logging.getLogger(__name__)
 
 NAME = "jev"
-QUESTION_VERSION = "jq-2"
+QUESTION_VERSION = "jq-3"
 URL = "https://api.typesafe.ai/v1/systemone"
 TIMEOUT_SECONDS = 10.0
 BODY_MAX_BYTES = 64 * 1024
@@ -48,13 +48,15 @@ SETS_VERDICT_LABEL = "asks_for_verdict"
 SETS_VERDICT_AT = 0.9
 TOKENS_MAX = 2**31 - 1  # the token columns are INTEGER
 
-VERDICT_QUESTION = """The state is one JSON record about a decision an AI agent made and how the agent later graded \
-its outcome. Grade the outcome claimed in `written_by_author.claim` for the decision in `written_by_author.subject`.
+VERDICT_QUESTION = """The state is one JSON record about a decision an AI agent made, with the agent's own grade of \
+its outcome when the record holds one. Grade the outcome of the decision in `written_by_author.subject`; \
+`written_by_author.claim`, when it is not null, is how the agent graded it.
 
 What the record holds:
 - `written_by_author.subject`: the decision the agent recorded before acting: what it chose, the context, and how sure \
 it said it was.
-- `written_by_author.claim`: how the agent graded the outcome (`grade`: success, partial or failure) and its `note`.
+- `written_by_author.claim`: how the agent graded the outcome (`grade`: success, partial or failure) and its `note`. \
+It is null when the grade is kept out of the record: then grade the decision from `evidence` alone.
 - `evidence`: what was actually run in the session that recorded the decision, from the decision to the grade. Each \
 item has a `source`: `tool_call` is one tool call, with the input the agent chose in `written_by_author.args` and what \
 the tool returned, or its error, in `outside_data.result`; `ledger` is a recorded side effect (a file written, a \
@@ -75,8 +77,8 @@ VERDICT_CRITERIA: dict[str, str] = {
     "partial": "Part of the intended result was done and part of it is missing or wrong, judged from `evidence`.",
     "failure": "The intended result did not happen, or it went wrong, judged from `evidence`.",
     "cannot_tell": (
-        "The evidence is thin or cut, or does not touch what was claimed (a missing record is not a failure), "
-        "judged from `evidence`."
+        "The evidence is thin or cut, or does not touch the decision's intended result (a missing record is not a "
+        "failure), judged from `evidence`."
     ),
 }
 
