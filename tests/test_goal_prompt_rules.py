@@ -179,7 +179,21 @@ async def test_results_that_finish_close_together_are_read_in_one_follow_up_turn
     await record(env, a)
     await record(env, b)
     assert await claim(env, root.id, **waits) is None  # the newest result is fresh: the turn waits for it
+    await age(env, a.id, seconds=between)
+    assert await claim(env, root.id, **waits) is None  # the wait runs from the newest result
     await age(env, a.id, b.id, seconds=between)
+    got = await claim(env, root.id, **waits)
+    assert got is not None and {i.id for i in got.intentions} == {a.id, b.id}
+
+
+async def test_results_that_keep_coming_are_read_together_once_the_oldest_waited_the_longest(env_factory):  # noqa: F811
+    env = await env_factory(**CONT)
+    waits = _waits(env)
+    root = await make_root(env)
+    a, b = await make_child(env, root), await make_child(env, root)
+    await record(env, a)
+    await record(env, b)
+    await age(env, a.id, seconds=waits["max_wait"] + 1)  # b is fresh
     got = await claim(env, root.id, **waits)
     assert got is not None and {i.id for i in got.intentions} == {a.id, b.id}
 
@@ -195,6 +209,9 @@ async def test_a_result_that_finishes_later_is_read_in_a_later_follow_up_turn(en
     got = await claim(env, root.id, **waits)
     assert got is not None and [i.id for i in got.intentions] == [a.id]
     assert (await intention_of(env, "subtask", b.source_id)).state == b.state  # left for a later turn
+    await record(env, b)
+    await age(env, b.id, seconds=between)
+    assert await claim(env, root.id, **waits) is None  # not while the turn that reads a is deciding
 
 
 # ---- "The Limits of a follow-up turn show what is left of spawned work, follow-up turns and tokens, and whether more

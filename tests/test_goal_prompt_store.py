@@ -3,6 +3,7 @@ identity's own reads, writes and tools, which never see that row."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -24,6 +25,7 @@ from nous.identity.manager import (
     GOAL_PROMPT_SECTION,
     SECTIONS,
     VALID_SECTIONS,
+    GoalPromptChanged,
     IdentityManager,
 )
 from nous.identity.tools import register_identity_tools
@@ -107,6 +109,31 @@ async def test_the_text_is_counted_and_stored_as_normalized(manager):
     sent = "a" * 700 + "\r\n" + "b" * (GOAL_PROMPT_MAX_CHARS - 701)  # one character over as sent
     await manager.set_goal_prompt(sent, "owner")
     assert (await manager.get_goal_prompt()).text == "a" * 700 + "\n" + "b" * (GOAL_PROMPT_MAX_CHARS - 701)
+
+
+async def _until_a_save_waits(db) -> None:
+    """Return once a backend waits on a lock of agent_identity (callers bound it with ``asyncio.wait_for``)."""
+    query = text(
+        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+        "AND wait_event_type = 'Lock' AND query ILIKE '%agent_identity%'"
+    )
+    while True:
+        async with db.session() as s:
+            if (await s.execute(query)).scalar_one():
+                return
+        await asyncio.sleep(0.05)
+
+
+async def test_a_save_that_meets_another_save_committing_is_refused_and_writes_nothing(manager, db):
+    async with db.session() as first:
+        await manager.set_goal_prompt("The first text.", "owner", session=first)  # written, not committed
+        second = asyncio.create_task(manager.set_goal_prompt("The second text.", "owner"))
+        await asyncio.wait_for(_until_a_save_waits(db), timeout=10)
+        await first.commit()
+    with pytest.raises(GoalPromptChanged):
+        await asyncio.wait_for(second, timeout=10)
+    assert (await manager.get_goal_prompt()).text == "The first text."
+    assert len(await _rows(manager)) == 1
 
 
 @pytest.mark.parametrize("writer", ["agent", "initiation", "user", ""])
