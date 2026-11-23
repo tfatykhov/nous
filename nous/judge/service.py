@@ -30,9 +30,9 @@ With ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` the first judge's service also has a
 the task executor, after a completed task's row is written) queues a finished task's report, which the worker judges
 as it stood at the task's completion, read from the task's row (a task not finished as completed is not judged). The
 report judge shares the judge's name, so the daily limit counts both; reports may use at most half of it, so
-decisions always keep the other half (a report past that half is not judged now). ``JudgeSet`` hands a report to the first judge
-only (``SECOND_JUDGE_GRADES_REPORTS``). That service also runs the sweep (``sweep_once``): soon after the start and
-then hourly, at most ``SWEEP_BATCH`` subjects without a final row, none past half the day's limit.
+decisions always keep the other half (a report past that half is not judged now). ``JudgeSet`` hands a report to the
+first judge only (``SECOND_JUDGE_GRADES_REPORTS``). That service also runs the sweep (``sweep_once``): soon after the
+start and then hourly, at most ``SWEEP_BATCH`` subjects without a final row, none past half the day's limit.
 """
 
 from __future__ import annotations

@@ -359,7 +359,8 @@ async def build_decision_evidence(
     resolved_at: datetime,
 ) -> DecisionEvidence | None:
     """The record of one decision as it stood at ``resolved_at`` (when the claim was fixed), or None when the decision
-    does not exist for this agent. ``claim`` is the grade the judge reads with it (None: the record holds none). Read-only, and the same whenever it is read: a call counts once it had ended by
+    does not exist for this agent. ``claim`` is the grade the judge reads with it (None: the record holds none).
+    Read-only, and the same whenever it is read: a call counts once it had ended by
     then, a ledger row or a task once it had started, and one that finished later is shown as ``NOT_FINISHED``
     without its result. Each source reads its newest rows up to its limit; the rest are counted as left out. The record
     is assembled in a thread, off the event loop; one that cannot be rendered gives no record and the skip label
