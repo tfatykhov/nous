@@ -16,8 +16,9 @@ made up). A shell call's input is read to count its job launches (``spend.job_la
 answer, nor is any call's result, reason or error text.
 
 What a read costs: the calls are found through the log's ``(agent_id, started_at)`` index over the agent's calls
-since the session began (there is no index on a call's subtask or workflow), at most ``CALLS_CAP`` rows of narrow
-columns, and at most ``LAUNCH_ROWS_CAP`` shell calls with their input (each at most ``NOUS_TOOL_INPUT_MAX_CHARS``).
+since the session began (there is no index on a call's subtask or workflow), sorted by when each ended (there is no
+index on that either), at most ``CALLS_CAP`` rows of narrow columns, those that ended last, and at most
+``LAUNCH_ROWS_CAP`` shell calls with their input (each at most ``NOUS_TOOL_INPUT_MAX_CHARS``).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, or_, select, text
+from sqlalchemy import ColumnElement, Interval, func, literal_column, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.job_marks import JOB_ID_RE
@@ -342,22 +343,26 @@ async def read_activity(session: AsyncSession, agent_id: str, goal_id: UUID, *, 
     calls: list[Any] = []
     if chain:
         C = ToolCallLog
+        # When a call ended, as ``_ended`` reckons it. Ordering by it before the cap keeps the calls that ended last,
+        # so a long command that ended last is the last call however many calls started after it.
+        ended = C.started_at + func.greatest(func.coalesce(C.duration_ms, 0), 0) * literal_column(
+            "interval '1 millisecond'", Interval
+        )
         found = await session.execute(
             select(C.tool_name, C.outcome, C.is_error, C.duration_ms, C.started_at, C.session_id, C.work_kind)
             .where(*_window(agent_id, row, chain))
-            .order_by(C.started_at.desc(), C.id.desc())
+            .order_by(ended.desc(), C.started_at.desc(), C.id.desc())
             .limit(cap + 1)
         )
         calls = list(found.all())
+    # Newest first by when each call ended.
     kept = calls[:cap]
-    # Newest first by when each call ended: a long command that ended last is the last call.
-    by_end = sorted(kept, key=_ended, reverse=True)
-    answer["last_call_at"] = _iso(_ended(by_end[0])) if by_end else None
+    answer["last_call_at"] = _iso(_ended(kept[0])) if kept else None
     answer["calls"] = {"total": len(kept), "errors": sum(1 for c in kept if c.is_error), "capped": len(calls) > cap}
     if is_open:
         answer["jobs"] = await _launches(session, agent_id, row, chain)
-        answer["recent"] = [_call_words(c) for c in by_end[:RECENT_SHOWN]]
-    answer["work_sessions"] = _work_sessions(by_end)
+        answer["recent"] = [_call_words(c) for c in kept[:RECENT_SHOWN]]
+    answer["work_sessions"] = _work_sessions(kept)
     return answer
 
 

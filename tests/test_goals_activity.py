@@ -349,6 +349,23 @@ async def test_the_calls_read_is_capped_and_says_so(db, monkeypatch, rows, total
     assert found["last_call_at"] == at(rows).isoformat()
 
 
+async def test_a_long_call_that_ended_last_is_the_last_call_though_more_than_the_cap_started_after_it(db, monkeypatch):
+    """The capped read keeps the calls that ended last: a two-hour command is the last call even when more short
+    calls than the cap started after it and ended before it."""
+    monkeypatch.setattr(activity, "CALLS_CAP", 3)
+    w = await world_of(db)
+    s = await w.session()
+    sid = intent_sid(s.root_id)
+    await w.call(at(1), session_id=sid, tool="bash", duration_ms=120 * 60_000)
+    for minute in range(2, 7):
+        await w.call(at(minute), session_id=sid, tool="read_file", duration_ms=1_000)
+    found = await w.read()
+    assert found["last_call_at"] == at(121).isoformat()
+    assert found["recent"][0] == {"tool": "bash", "at": at(121).isoformat(), "outcome": "ran", "in": "decisions"}
+    assert [r["at"] for r in found["recent"][1:]] == [(at(m) + timedelta(seconds=1)).isoformat() for m in (6, 5)]
+    assert found["calls"] == {"total": 3, "errors": 0, "capped": True}
+
+
 async def test_jobs_started_this_session_count_each_launch_and_agree_with_the_days_count(db):
     w = await world_of(db)
     s = await w.session(first_status="completed")
