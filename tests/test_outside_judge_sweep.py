@@ -22,8 +22,8 @@ from sqlalchemy import text
 
 from nous.config import Settings
 from nous.handlers.decision_reviewer import ErrorSignal
+from nous.judge import evidence, store
 from nous.judge import service as service_module
-from nous.judge import store
 from nous.judge.service import JudgeSet, OutsideJudge
 from nous.judge.slot import JudgeInput, JudgeOutput
 
@@ -393,18 +393,38 @@ async def test_with_two_judges_only_the_first_sweeps(db, agent):
 # ---- the claim ------------------------------------------------------------------------------------------------------
 
 
-async def test_a_swept_decision_is_judged_on_its_claim_as_it_stands(db, agent):
+@pytest.mark.parametrize("reviewer", ["a2ui", "external", "auto"])
+async def test_a_swept_decision_graded_by_another_is_judged_without_its_grade_and_compared_with_it(
+    db, agent, reviewer
+):
     reviewed = NOW - timedelta(hours=3)
-    decision_id = await _decision(db, agent, "external", outcome="partial", reviewed_at=reviewed, note="half of it")
+    note = "NOTE-7c2e only half of the backup moved"
+    decision_id = await _decision(db, agent, reviewer, outcome="partial", reviewed_at=reviewed, note=note)
     service, decisions, _r = _service(db, agent)
     service.start()
     await _pass(service)
     await service.close()
     [record] = decisions.records
-    assert (record.claim.grader, record.claim.grade, record.claim.note) == ("external", "partial", "half of it")
+    assert record.claim is None
+    rendered = evidence.render_record(record)
+    assert json.loads(rendered)["written_by_author"]["claim"] is None
+    assert "NOTE-7c2e" not in rendered and "partial" not in rendered
     [row] = await _rows(db, agent)
-    assert (row["against_grader"], row["against_grade"], row["claim_at"]) == ("external", "partial", reviewed)
+    assert (row["against_grader"], row["against_grade"], row["claim_at"]) == (reviewer, "partial", reviewed)
     assert row["subject_id"] == decision_id
+
+
+async def test_a_decision_the_agent_resolved_is_judged_on_its_claim_as_it_stands(db, agent):
+    reviewed = NOW - timedelta(hours=3)
+    await _decision(db, agent, "agent", outcome="partial", reviewed_at=reviewed, note="half of it")
+    service, decisions, _r = _service(db, agent)
+    service.start()
+    await _pass(service)
+    await service.close()
+    [record] = decisions.records
+    assert (record.claim.grader, record.claim.grade, record.claim.note) == ("agent", "partial", "half of it")
+    [row] = await _rows(db, agent)
+    assert (row["against_grader"], row["against_grade"], row["claim_at"]) == ("agent", "partial", reviewed)
 
 
 async def test_the_reviewers_stated_confidence_grade_is_kept_apart_from_its_outcome_signals(db, agent):

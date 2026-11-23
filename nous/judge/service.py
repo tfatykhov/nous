@@ -132,6 +132,13 @@ def _checked(output: Any, kind: str) -> JudgeOutput:
     )
 
 
+def _shown_claim(claim: Claim) -> Claim | None:
+    """The claim the judge reads with a decision: the agent's own grade and note. A grade another grader gave (the
+    owner, a fixed signal) is what the verdict is compared with, so the judge reads the record without it; it is kept
+    on the verdict row only (``against_grader``, ``against_grade``)."""
+    return claim if claim.grader == store.AGENT_GRADER else None
+
+
 # The sweep's order: decisions graded by the owner, then what a restart lost (decisions the agent resolved, then
 # finished reports), then decisions graded by a fixed signal.
 _REPORT_RANK = 2
@@ -348,7 +355,7 @@ class OutsideJudge:
                     found = await evidence.build_report_evidence(session, self._agent_id, item.subject_id)
                 else:
                     found = await evidence.build_decision_evidence(
-                        session, self._agent_id, item.subject_id, item.claim, item.resolved_at
+                        session, self._agent_id, item.subject_id, _shown_claim(item.claim), item.resolved_at
                     )
             if found is None:
                 logger.debug("F118: %s %s is gone or not finished as completed; not judged", item.kind, item.subject_id)

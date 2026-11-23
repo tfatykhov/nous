@@ -334,7 +334,7 @@ class DecisionEvidence:
 
 
 def _assemble_and_measure(
-    decision_id: UUID, subject: dict[str, Any], claim: Claim, items: list[dict[str, Any]], not_read: int
+    decision_id: UUID, subject: dict[str, Any], claim: Claim | None, items: list[dict[str, Any]], not_read: int
 ) -> tuple[JudgeInput, int]:
     """The record and the length of its rendered text (run in a thread)."""
     record = assemble("decision", decision_id, subject, claim, items, not_read=not_read)
@@ -361,11 +361,11 @@ async def build_decision_evidence(
     session: AsyncSession,
     agent_id: str,
     decision_id: UUID,
-    claim: Claim,
+    claim: Claim | None,
     resolved_at: datetime,
 ) -> DecisionEvidence | None:
     """The record of one decision as it stood at ``resolved_at`` (when the claim was fixed), or None when the decision
-    does not exist for this agent. Read-only, and the same whenever it is read: a call counts once it had ended by
+    does not exist for this agent. ``claim`` is the grade the judge reads with it (None: the record holds none). Read-only, and the same whenever it is read: a call counts once it had ended by
     then, a ledger row or a task once it had started, and one that finished later is shown as ``NOT_FINISHED``
     without its result. Each source reads its newest rows up to its limit; the rest are counted as left out. The record
     is assembled in a thread, off the event loop; one that cannot be rendered gives no record and the skip label
