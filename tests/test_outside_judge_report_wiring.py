@@ -184,3 +184,88 @@ def test_with_reports_on_the_tools_are_those_of_the_judge_off_and_the_sweep_stop
     assert reports["definitions"] == off["definitions"]
     assert reports["offered"] == off["offered"]
     assert not [d for d in reports["definitions"] if "judge" in d["name"]]
+
+
+@pytest.mark.postgres_only
+def test_with_reports_and_the_second_judges_settings_on_only_the_first_judge_judges_reports_and_sweeps(monkeypatch):
+    """Both new settings on: the first judge (in the settings' JudgeSet) has the report judge and the sweep; the
+    second judge the settings manager starts has neither. At shutdown the manager closes before the judges, and the
+    first judge's sweep stops with them."""
+    import asyncio
+
+    from test_outside_judge_wiring import JEV_KEY
+
+    from nous.api.execution_context import ExecutionContext
+    from nous.judge.second_settings import SHUTTING_DOWN, SecondJudgeManager
+    from nous.judge.service import JudgeSet
+
+    agent_id = f"test-f118-rboot2-{uuid.uuid4().hex[:6]}"
+
+    async def already_migrated(engine: Any) -> None:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}') ON CONFLICT DO NOTHING"
+                ),
+                {"id": agent_id},
+            )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    settings = _boot_settings(
+        agent_id,
+        "shadow",
+        outside_judge_reports_enabled=True,
+        outside_judge_settings_enabled=True,
+        outside_judge_second="jev",
+        TYPESAFE_API_KEY=JEV_KEY,
+    )
+    seen: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        components = await main.create_components(settings)
+        try:
+            ctx = ExecutionContext(kind="interactive", session_id="rboot2")
+            current = judge_slot.current()
+            seen.update(
+                current=current,
+                manager=components.get("judge_second"),
+                sweeping=not current.primary._sweeper.done(),
+                second=current.second,
+                offered=components["runner"]._offered_tools(
+                    ctx, "task", is_subtask=False, tool_filter=None, refuse_active=False
+                ),
+            )
+        finally:
+            await main.shutdown_components(components)
+        seen["after"] = await seen["manager"].patch({"on": False}, confirmed=None, actor="owner")
+
+    try:
+        _run(scenario)
+    finally:
+
+        async def cleanup() -> None:
+            from nous.storage.database import Database
+
+            database = Database(settings)
+            await database.connect()
+            try:
+                async with database.session() as session:
+                    for table in ("heart.rubric_versions", "nous_system.judge_second_settings"):
+                        await session.execute(text(f"DELETE FROM {table} WHERE agent_id = :a"), {"a": agent_id})
+                    await session.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+                    await session.commit()
+            finally:
+                await database.disconnect()
+
+        asyncio.run(cleanup())
+
+    current, second = seen["current"], seen["second"]
+    assert isinstance(seen["manager"], SecondJudgeManager) and isinstance(current, JudgeSet)
+    assert isinstance(current.primary.report_judge, BackgroundModelReportJudge) and seen["sweeping"] is True
+    assert current.report_judge is current.primary.report_judge
+    assert isinstance(second, OutsideJudge) and second.report_judge is None and second.sweep_numbers() is None
+    assert not [tool for tool in seen["offered"] if "judge" in str(tool)]
+    # Shut down: the manager takes no more changes, the first judge's sweep stopped and both judges take no report.
+    assert (seen["after"].status, seen["after"].body["error"]) == (503, SHUTTING_DOWN)
+    assert current.primary._sweeper.done()
+    assert current.submit_report(uuid.uuid4(), claimed_at=datetime.now(UTC)) is False
