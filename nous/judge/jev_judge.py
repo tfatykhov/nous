@@ -216,9 +216,8 @@ class JevJudge:
             logger.warning("F118: the second judge's answer on %s did not check", record.subject_id)
         return output
 
-
     async def probe(self, timeout: float) -> str:
-        """F118 PR 3, the card's "Check": one request with ``CHECK_BODY``'s fixed record (never stored text) to the
+        """F118 PR 3, the card's "Check": one request with ``check_body``'s fixed record (never stored text) to the
         same address, header, timeout and size bound as a judgement. ``ok``: a 200 whose answer names the pinned
         model; ``refused``: another status (429 and 5xx aside), or a 200 that names another model or cannot be read;
         ``unreachable``: a timeout, a transport error, 429 or a 5xx. Never raises (a cancellation passes through);
