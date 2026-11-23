@@ -104,6 +104,7 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("POST", "/rubric/evolve"): OWNER,
     # Dashboard
     ("POST", "/dashboard/memory-write-health/acknowledge"): OWNER,
+    ("GET", "/dashboard/about"): OWNER,
     # The stored prompt, response, message and tool-result reads
     ("GET", "/dashboard/work/sessions"): OWNER,
     ("GET", "/dashboard/work/sessions/{session_id}"): OWNER,

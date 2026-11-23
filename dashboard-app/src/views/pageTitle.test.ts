@@ -8,6 +8,7 @@ const RULE = /font-size:\s*30px;\s*font-weight:\s*650;\s*letter-spacing:\s*-0\.0
 const SCREENS = [
   'views/Work.svelte', 'views/work/SessionList.svelte', 'views/work/Patterns.svelte',
   'views/ModelCalls.svelte', 'views/Health.svelte', 'views/Integrations.svelte', 'views/Goals.svelte',
+  'views/About.svelte',
 ];
 
 function svelteFiles(dir: string): string[] {

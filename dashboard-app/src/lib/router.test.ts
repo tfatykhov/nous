@@ -12,14 +12,14 @@ describe('router', () => {
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
   it('reads the hash route', () => { location.hash = '#/model-calls'; initRouter(); expect(get(currentRoute)).toBe('model-calls'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('lists the 21 routes in navigation order', () => {
-    expect(ROUTES.length).toBe(21);
+  it('lists the 22 routes in navigation order', () => {
+    expect(ROUTES.length).toBe(22);
     expect([...ROUTES]).toEqual([
       'overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation',
       'work', 'model-calls', 'dag', 'subtasks', 'heartbeat',
       'decisions', 'rubric',
       'autonomy', 'goals', 'intentions', 'harness', 'limits',
-      'observability', 'identity', 'integrations',
+      'observability', 'identity', 'integrations', 'about',
     ]);
   });
   it('includes the work route', () => { expect(ROUTES).toContain('work'); });
@@ -31,6 +31,7 @@ describe('router', () => {
   it('includes the limits route', () => { expect(ROUTES).toContain('limits'); });
   it('includes the identity route', () => { expect(ROUTES).toContain('identity'); });
   it('includes the integrations route', () => { expect(ROUTES).toContain('integrations'); });
+  it('includes the about route', () => { expect(ROUTES).toContain('about'); });
   it('unknown fragment (e.g. skip-link #main-content) leaves current route unchanged', () => {
     // Navigate to a known route first
     location.hash = '#/model-calls';

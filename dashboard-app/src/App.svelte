@@ -23,6 +23,7 @@
   import Goals from './views/Goals.svelte';
   import Limits from './views/Limits.svelte';
   import Integrations from './views/Integrations.svelte';
+  import About from './views/About.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
@@ -216,6 +217,8 @@
     <Limits />
   {:else if $currentRoute === 'integrations'}
     <Integrations />
+  {:else if $currentRoute === 'about'}
+    <About />
   {/if}
 </main>
 

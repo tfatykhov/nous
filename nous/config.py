@@ -1046,6 +1046,10 @@ class Settings(BaseSettings):
 
     # Agent identity
     agent_name: str = "Nous"
+    # Set by whoever deploys (NOUS_BUILD_COMMIT, NOUS_BUILD_TIME), empty when unknown. Shown on the About screen only,
+    # and only when a value has the shape of a commit hash or a timestamp with a timezone.
+    build_commit: str = ""
+    build_time: str = ""
     agent_description: str = "A thinking agent that learns from experience"
     identity_prompt: str = (
         "You are Nous, a cognitive AI agent that learns from experience. "

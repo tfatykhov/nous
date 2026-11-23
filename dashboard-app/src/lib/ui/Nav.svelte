@@ -100,6 +100,10 @@
       id: 'integrations',
       label: 'Integrations',
     },
+    {
+      id: 'about',
+      label: 'About',
+    },
   ];
 
   // F108 Phase 2: six groups, in this order (the order of ROUTES). Overview stands alone; every other group has a
@@ -112,7 +116,7 @@
     group('Execution', ['work', 'model-calls', 'dag', 'subtasks', 'heartbeat']),
     group('Decisions', ['decisions', 'rubric']),
     group('Autonomy', ['autonomy', 'goals', 'intentions', 'harness', 'limits']),
-    group('System', ['observability', 'identity', 'integrations']),
+    group('System', ['observability', 'identity', 'integrations', 'about']),
   ];
   // The sidebar and the mobile drawer each render a Nav: heading ids must differ between them.
   const uid = $props.id();

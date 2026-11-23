@@ -27,6 +27,7 @@ vi.mock('./views/Autonomy.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Goals.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Limits.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Integrations.svelte', () => ({ default: () => {} }));
+vi.mock('./views/About.svelte', () => ({ default: () => {} }));
 
 const { default: App } = await import('./App.svelte');
 
@@ -90,9 +91,9 @@ describe('App shell regions', () => {
     const focusable = Array.from(
       drawer.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
     );
-    // The close button first, the last of the 21 links last.
+    // The close button first, the last of the 22 links last.
     expect(focusable[0].classList.contains('drawer-close')).toBe(true);
-    expect(focusable).toHaveLength(22);
+    expect(focusable).toHaveLength(23);
     expect(focusable.at(-1)?.tagName).toBe('A');
     focusable.at(-1)!.focus();
     await fireEvent.keyDown(drawer, { key: 'Tab' });
