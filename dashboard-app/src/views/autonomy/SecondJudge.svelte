@@ -14,7 +14,7 @@
   // read its saved settings (loaded: false) the card asks again every 30 s, and stops once it has. Each change is sent
   // at once; one that needs the owner's yes is refused with the server's sentence and the daily limit it names, shown
   // in a box, and sent again with that number only on "Yes".
-  // The API key is bound to `keyText` alone, cleared when its call returns, on Cancel, and when the box closes.
+  // The API key is bound to `keyText` alone, cleared when the key's own call returns, on Cancel, and when the box closes.
 
   type Kind = 'change' | 'key' | 'remove';
   /** One change's request; `confirmed` is the daily limit of the sentence the owner said yes to, or null. */
@@ -101,7 +101,7 @@
       note = { text: refusalText(err), ok: false };
     } finally {
       busy = false;
-      if (pending === null) keyText = '';
+      if (kind === 'key' && pending === null) keyText = '';
     }
   }
 
@@ -216,11 +216,11 @@
           {#if editingKey && !locked}
             <div class="field key-field">
               <label for="jev-key-input">{KEY_LABEL}</label>
-              <input id="jev-key-input" type="password" bind:value={keyText} autocomplete="off" spellcheck="false"
+              <input id="jev-key-input" type="password" bind:value={keyText} autocomplete="new-password" spellcheck="false"
                 disabled={blocked} />
               <div class="actions">
                 <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={blocked || !keyText.trim()} onclick={submitKey}>Save key</Button>
-                <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy} onclick={closeKey}>Cancel</Button>
+                <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={blocked} onclick={closeKey}>Cancel</Button>
               </div>
             </div>
           {:else}

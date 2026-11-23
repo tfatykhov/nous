@@ -279,7 +279,7 @@ describe('the key', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Add key' }));
     const input = keyInput()!;
     expect(input.type).toBe('password');
-    expect(input.getAttribute('autocomplete')).toBe('off');
+    expect(input.getAttribute('autocomplete')).toBe('new-password');
     await fireEvent.input(input, { target: { value: KEY } });
     return section;
   }
@@ -338,6 +338,21 @@ describe('the key', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('The change could not be saved.');
     expect(keyInput()!.value).toBe('');
     expect(screen.queryByRole('group', { name: 'Confirm sending to api.typesafe.ai' })).toBeNull();
+  });
+
+  it("a change of another row keeps the typed key, and the key form's Cancel waits while the box asks", async () => {
+    replies = [{ status: 200, body: STATE({ model: { value: 'jev-1.15.0', source: 'stored' } }) }, needsConfirm()];
+    await typeKey();
+    await fireEvent.input(screen.getByLabelText('Model'), { target: { value: 'jev-1.15.0' } });
+    await fireEvent.click(screen.getAllByRole('button', { name: 'Save' })[0]);
+    await waitFor(() => expect(changes()).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('status').textContent).toBe('Saved.'));
+    expect(keyInput()!.value).toBe(KEY);
+    await fireEvent.click(screen.getByRole('button', { name: 'Save key' }));
+    await screen.findByRole('group', { name: 'Confirm sending to api.typesafe.ai' });
+    const form = keyInput()!.closest('.key-field') as HTMLElement;
+    expect((within(form).cancel as HTMLButtonElement).disabled).toBe(true);
+    expect(keyInput()!.value).toBe(KEY);
   });
 
   it.each([
