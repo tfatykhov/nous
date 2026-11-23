@@ -472,7 +472,7 @@ _TASK = text(
 # shared session, whose untagged rows may be other work's. Read as of the completion, like a decision's record.
 _TASK_ROWS = "agent_id = :agent AND (subtask_id = :task OR (subtask_id IS NULL AND session_id = :own))"
 _TASK_CALL_WINDOW = (
-    f"FROM nous_system.tool_call_log WHERE {_TASK_ROWS} AND started_at >= :since "
+    f"FROM nous_system.tool_call_log WHERE {_TASK_ROWS} AND started_at >= :since AND started_at <= :until "
     "AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until"
 )
 _TASK_CALL_COUNTS = text(

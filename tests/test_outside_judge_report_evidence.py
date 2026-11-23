@@ -376,6 +376,25 @@ async def test_rows_past_a_limit_are_counted_and_mark_the_record_truncated(db, a
     assert _sources(built) == ["read_file", "read_file"]
 
 
+async def test_a_call_that_started_after_the_completion_is_never_read_whatever_its_duration(db, agent):
+    task_id = await _task(db, agent)
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id, index=0)
+    # A row whose start is after the completion and whose duration would bring its end back before it.
+    _call(
+        recorder,
+        own_session(task_id),
+        "send_email",
+        DONE + timedelta(seconds=5),
+        subtask_id=task_id,
+        duration_ms=-60_000,
+        index=1,
+    )
+    await writer.drain(10)
+    built = await _build(db, agent, task_id)
+    assert _sources(built) == ["bash"] and built.counts["tool_calls"] == 1
+
+
 async def test_the_record_is_the_same_whenever_it_is_read(db, agent):
     task_id = await _task(db, agent)
     own = own_session(task_id)
