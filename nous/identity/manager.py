@@ -19,7 +19,9 @@ and ``clear_goal_prompt`` write it (the owner's ``PUT`` and ``DELETE /goals/prom
 from __future__ import annotations
 
 import logging
+import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -46,9 +48,20 @@ _CURRENT_INDEX = "idx_identity_agent_section_current"
 _CACHE_TTL = 60.0
 
 
+_GOAL_PROMPT_EDGES = re.compile(r"\A[ \t\n]+|[ \t\n]+\Z")  # the dashboard's card trims the same characters
+
+
 def normalize_goal_prompt(text: str) -> str:
-    """The goal prompt as it is stored and counted: ``\\r\\n`` turned into ``\\n``, then stripped."""
-    return text.replace("\r\n", "\n").strip()
+    """The goal prompt as it is stored and counted: ``\\r\\n`` and ``\\r`` turned into ``\\n``, then spaces, tabs and
+    newlines removed from both ends (and nothing else)."""
+    return _GOAL_PROMPT_EDGES.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+
+
+def goal_prompt_has_text(text: str) -> bool:
+    """Whether ``text`` shows anything once rendered: a character that is not white space, a control character or an
+    invisible format character (``nous.goals.quote.neutralize`` removes those two kinds). The one rule for a save and
+    for a render."""
+    return any(not ch.isspace() and unicodedata.category(ch) not in ("Cc", "Cf") for ch in text)
 
 
 @dataclass(frozen=True)
@@ -198,12 +211,13 @@ class IdentityManager:
             return await _get(s)
 
     async def set_goal_prompt(self, text: str, updated_by: str, session: AsyncSession | None = None) -> None:
-        """Save ``text`` as the goal prompt, a new version. ``ValueError`` when it is blank or longer than
-        ``GOAL_PROMPT_MAX_CHARS`` once normalized (``normalize_goal_prompt``), or when ``updated_by`` is not a proof
-        the owner guard accepts; ``GoalPromptChanged`` when another save committed meanwhile."""
+        """Save ``text`` as the goal prompt, a new version. ``ValueError`` when, once normalized
+        (``normalize_goal_prompt``), it shows nothing (``goal_prompt_has_text``) or is longer than
+        ``GOAL_PROMPT_MAX_CHARS``, or when ``updated_by`` is not a proof the owner guard accepts; ``GoalPromptChanged``
+        when another save committed meanwhile."""
         content = normalize_goal_prompt(text)
-        if not content:
-            raise ValueError("the goal prompt is empty")
+        if not goal_prompt_has_text(content):
+            raise ValueError("the goal prompt shows nothing")
         if len(content) > GOAL_PROMPT_MAX_CHARS:
             raise ValueError(f"the goal prompt is longer than {GOAL_PROMPT_MAX_CHARS} characters")
         if updated_by not in GOAL_PROMPT_WRITERS:

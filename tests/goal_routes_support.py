@@ -4,6 +4,7 @@ table's CHECKs."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from starlette.applications import Starlette
 
 from nous.api.goal_routes import build_goal_routes
@@ -159,3 +160,14 @@ async def paused(store: GoalStore, reason: str, **over: Any) -> Goal:
 async def deadline_in(store: GoalStore, goal: Goal, days: float) -> None:
     """Move an approved goal's deadline to ``days`` from the database's now (negative: passed)."""
     await set_values(store, goal, deadline_at=func.clock_timestamp() + timedelta(days=days))
+
+
+async def until_blocked_by(db, holder: int) -> None:
+    """Return once a backend waits on a lock that the backend ``holder`` holds (callers bound it with
+    ``asyncio.wait_for``)."""
+    query = text("SELECT count(*) FROM pg_stat_activity WHERE :holder = ANY(pg_blocking_pids(pid))")
+    while True:
+        async with db.session() as s:
+            if (await s.execute(query, {"holder": holder})).scalar_one():
+                return
+        await asyncio.sleep(0.05)

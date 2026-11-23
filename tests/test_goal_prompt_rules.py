@@ -22,6 +22,8 @@ from f099_support import (  # noqa: F401
     make_root,
     record,
     runner_env,
+    say,
+    use,
 )
 from goals_support import active, goal_tools, started, world
 from sqlalchemy import update
@@ -31,7 +33,7 @@ from nous.brain.continuation import RootLimits
 from nous.config import Settings
 from nous.goals import charter, evidence
 from nous.goals.default_prompt import DEFAULT_GOAL_PROMPT
-from nous.handlers.continuation_runner import build_arrival_prompt
+from nous.handlers.continuation_runner import ContinuationRunner, build_arrival_prompt
 from nous.storage.models import Subtask
 
 pytestmark = pytest.mark.postgres_only
@@ -133,7 +135,40 @@ async def test_tasks_started_in_one_turn_each_close_their_own_step(runner_env): 
     assert err and "already closes step s1" in said
 
 
+async def test_one_follow_up_turn_may_start_one_task_for_each_of_several_steps(runner_env):  # noqa: F811
+    env = await runner_env(
+        [
+            use("spawn_task", task="Merge folder A", intent="Folder A is merged"),
+            use("spawn_task", task="Merge folder B", intent="Folder B is merged"),
+        ],
+        [
+            say("Both merges are started."),
+            use("resolve_intention", decision="continue", note="Two merges run.", progress=True, confidence=0.8),
+        ],
+    )
+    root = await make_root(env)
+    await record(env, root)
+    cont = ContinuationRunner(
+        database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
+    )
+    assert await cont.run_arrival(root.id) is not None
+    started_here = [s for s in await env.heart.subtasks.list(limit=10) if str(s.id) != root.source_id]
+    assert len(started_here) == 2
+    for task in started_here:
+        intention = await intention_of(env, "subtask", task.id)
+        assert intention.parent_id == root.id and task.status == "pending"
+
+
 # ---- "They run side by side as far as the task workers allow and the rest wait in the queue" ----------------------
+
+
+async def test_the_task_workers_are_as_many_as_the_setting_says(env_factory):  # noqa: F811
+    env = await env_factory(**CONT, subtask_workers=3)
+    await env.pool.start()
+    try:
+        assert len(env.pool._workers) == 3
+    finally:
+        await env.pool.stop()
 
 
 async def test_waiting_tasks_are_handed_out_oldest_first(env_factory):  # noqa: F811

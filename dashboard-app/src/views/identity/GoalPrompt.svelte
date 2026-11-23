@@ -2,25 +2,33 @@
   import { onMount } from 'svelte';
   import { Button } from '../../lib/ui/button';
   import {
-    BLANK, CONFIRM_RESET, CONFIRM_SAVE, INTRO, LABEL, RESET, RESET_DONE, SAVE, SAVED, SAVING, SHOWING_DEFAULT, TITLE,
-    UNSAVED,
-    codePoints, countText, normalized, readPrompt, refusalText, resetPrompt, savePrompt, savedLine,
+    BLANK, BUILT_IN_WHEN, CONFIRM_RESET, CONFIRM_SAVE, INTRO, LABEL, LOAD_FAILED, NONE_WHEN, RESET, RESET_DONE, SAVE,
+    SAVED, SAVING, SHOWING_DEFAULT, TITLE, UNSAVED,
+    codePoints, countText, hasText, noCard, normalized, readPrompt, refusalText, resetPrompt, savePrompt, savedLine,
     type PromptState,
   } from '../../lib/goal_prompt';
 
   // The default goal prompt, on the Identity screen. One GET when the screen opens: with goals off on the server
-  // ({enabled: false}), or a read that fails, nothing is drawn and nothing more is asked. Save and Reset each ask first,
-  // and a refusal shows the server's sentence with the draft kept.
+  // ({enabled: false}) or a server without the route (404), nothing is drawn; another failure says the card could not
+  // be loaded. Save and Reset each ask first; a refusal shows the server's sentence with the draft kept, and after a
+  // save that another save beat (409) the card reads the prompt again so its line says what is saved now.
 
   let prompt = $state<PromptState | null>(null);
+  let failed = $state(false);
   let draft = $state('');
   let busy = $state(false);
   let status = $state<{ text: string; ok: boolean } | null>(null);
 
-  const count = $derived(codePoints(normalized(draft)));
+  const text = $derived(normalized(draft));
+  const count = $derived(codePoints(text));
   const over = $derived(prompt !== null && count > prompt.max_chars);
-  const blank = $derived(count === 0);
-  const changed = $derived(prompt !== null && normalized(draft) !== prompt.text);
+  const blank = $derived(!hasText(text));
+  const changed = $derived(prompt !== null && text !== prompt.text);
+
+  /** What is saved, and when a goal gets another text or none: true for every goal. */
+  function stateLine(state: PromptState): string {
+    return state.is_default ? `${SHOWING_DEFAULT} ${NONE_WHEN}` : `${savedLine(state.updated_at)} ${BUILT_IN_WHEN}`;
+  }
 
   function show(next: PromptState) {
     prompt = next;
@@ -31,10 +39,19 @@
     const reading = new AbortController();
     readPrompt(reading.signal).then(
       (answer) => { if (answer.enabled === true) show(answer); },
-      () => {}, // goals off, an older server, or no answer: the card stays away
+      (err) => { if (!reading.signal.aborted && !noCard(err)) failed = true; },
     );
     return () => reading.abort();
   });
+
+  async function readAgain() {
+    try {
+      const answer = await readPrompt();
+      if (answer.enabled === true) prompt = answer; // the draft is kept
+    } catch {
+      // the refusal's sentence is shown already
+    }
+  }
 
   async function save() {
     if (!confirm(CONFIRM_SAVE)) return;
@@ -45,6 +62,7 @@
       status = { text: SAVED, ok: true };
     } catch (err) {
       status = { text: refusalText(err, 'save'), ok: false };
+      if ((err as { status?: number })?.status === 409) await readAgain();
     } finally {
       busy = false;
     }
@@ -63,6 +81,10 @@
       busy = false;
     }
   }
+
+  function edited() {
+    if (!busy) status = null; // a status says what happened to the text that was sent, not to this one
+  }
 </script>
 
 {#if prompt}
@@ -70,11 +92,15 @@
     <h2 id="goal-prompt-title">{TITLE}</h2>
     <div class="prompt-card">
       <p class="intro">{INTRO}</p>
-      <p class="state-line" data-testid="goal-prompt-state">
-        {prompt.is_default ? SHOWING_DEFAULT : savedLine(prompt.updated_at)}
-      </p>
+      <p class="state-line" data-testid="goal-prompt-state">{stateLine(prompt)}</p>
       <label class="field-label" for="goal-prompt-text">{LABEL}</label>
-      <textarea id="goal-prompt-text" rows={12} bind:value={draft} aria-describedby="goal-prompt-count"></textarea>
+      <textarea
+        id="goal-prompt-text"
+        rows={12}
+        bind:value={draft}
+        oninput={edited}
+        aria-describedby="goal-prompt-count"
+      ></textarea>
       <p class="count" class:count-over={over} id="goal-prompt-count">{countText(count, prompt.max_chars)}</p>
       {#if blank}
         <p class="hint hint-err">{BLANK}</p>
@@ -114,6 +140,11 @@
         {/if}
       </div>
     </div>
+  </section>
+{:else if failed}
+  <section class="panel" aria-labelledby="goal-prompt-title">
+    <h2 id="goal-prompt-title">{TITLE}</h2>
+    <p class="load-failed" role="alert">{LOAD_FAILED}</p>
   </section>
 {/if}
 
@@ -193,8 +224,14 @@
   }
 
   .count.count-over,
-  .hint.hint-err {
+  .hint.hint-err,
+  .load-failed {
     color: var(--err-text);
+  }
+
+  .load-failed {
+    font-size: 0.8125rem;
+    margin: 0;
   }
 
   .card-actions {

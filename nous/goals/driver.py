@@ -843,8 +843,10 @@ class GoalDriver:
         and its spend) through the censor gate that every spawned task goes through. A steering censor appends its
         guidance; the task is then built again with that guidance's length kept free, so the stored task stays
         within ``charter.MAX_TASK_CHARS`` and the guidance stays whole. The task carries the goal prompt
-        (``default_prompt.load``); when the gate refuses a task with the owner's saved prompt, the task is built and
-        gated again with the built-in one, so a saved sentence never stops a goal from starting."""
+        (``default_prompt.load``). When the gate refuses the task and a censor that refuses matches the goal prompt
+        it carries, the task is built with the next of ``default_prompt.rungs`` (the built-in text, then none) and
+        gated again, unless that build is the same task; so neither the owner's text nor the built-in one stops a
+        goal from starting, and a refusal for anything else is gated once."""
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
@@ -854,9 +856,9 @@ class GoalDriver:
         until = goal_commands.charter_until(goal, now=now, settings=self._settings)
         tz = self._pace_zone(goal)
         pace = pacing.pace_line(now, tz, goal.daily_at_minute) if tz is not None else None
-        prompt = await default_prompt.load(self._db, self._agent_id)
+        prompts = default_prompt.rungs(await default_prompt.load(self._db, self._agent_id))
 
-        def build(max_chars: int) -> str:
+        def build(max_chars: int, prompt: str | None) -> str:
             plan = list(goal.plan or [])
             return charter.build_session_task(
                 goal,
@@ -872,19 +874,29 @@ class GoalDriver:
                 goal_prompt=prompt,
             )
 
-        task = build(charter.MAX_TASK_CHARS)
+        used = 0
+        task = build(charter.MAX_TASK_CHARS, prompts[used])
         rejection, gated = await gate_subtask_task(self._heart, task)
-        if rejection is not None and prompt != default_prompt.DEFAULT_GOAL_PROMPT:
-            logger.warning("Goal %s: the censor gate refused the task; the saved goal prompt was set aside", goal.id)
-            prompt = default_prompt.DEFAULT_GOAL_PROMPT
-            task = build(charter.MAX_TASK_CHARS)
-            rejection, gated = await gate_subtask_task(self._heart, task)
+        patterns: list[str] | None = None
+        while rejection is not None and used + 1 < len(prompts):
+            if patterns is None:
+                patterns = await default_prompt.refusing_patterns(self._heart)
+            if not default_prompt.refused(prompts[used], patterns):
+                break  # the goal prompt is not what the gate refused
+            used += 1
+            retry = build(charter.MAX_TASK_CHARS, prompts[used])
+            if retry != task:  # the same task would be refused the same way
+                task = retry
+                rejection, gated = await gate_subtask_task(self._heart, task)
+        if used and rejection is None:
+            kind = "the built-in text" if prompts[used] is not None else "no goal prompt"
+            logger.warning("Goal %s: a censor matches the goal prompt; the first task was built with %s", goal.id, kind)
         if rejection is not None or len(gated) <= charter.MAX_TASK_CHARS:
             return rejection, gated
         if not gated.startswith(task):
             raise ValueError("the censor gate changed the task instead of adding to it")
         guidance = gated[len(task) :]
-        return None, build(charter.MAX_TASK_CHARS - len(guidance)) + guidance
+        return None, build(charter.MAX_TASK_CHARS - len(guidance), prompts[used]) + guidance
 
     async def _tool_lines(self, goal: Goal) -> list[Any]:
         """F115 per-goal tools: what a new session's first task is told of the goal's grants, each available when

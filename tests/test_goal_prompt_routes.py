@@ -9,17 +9,17 @@ import uuid
 
 import pytest
 from f099_support import OWNER_HEADERS, env_factory, runner_env  # noqa: F401
-from goal_routes_support import FORBIDDEN, NOT_JSON, OWNER, PROXY, make_env, send
+from goal_routes_support import FORBIDDEN, NOT_JSON, OWNER, PROXY, make_env, send, until_blocked_by
 from goals_support import active, reset_goal_report_channel, started, world  # noqa: F401
 from sqlalchemy import select, text
 from starlette.applications import Starlette
 
-from nous.api.goal_routes import GOALS_OFF, PROMPT_CHANGED, PROMPT_EMPTY, build_goal_routes
+from nous.api.goal_routes import FAILED, GOALS_OFF, PROMPT_CHANGED, PROMPT_EMPTY, build_goal_routes
 from nous.api.owner_guard import OwnerGuard
 from nous.goals.default_prompt import DEFAULT_GOAL_PROMPT, HEADING, MAX_CHARS
 from nous.heart.schemas import CensorInput
 from nous.identity.manager import GOAL_PROMPT_SECTION, IdentityManager
-from nous.storage.models import AgentIdentity, GoalJournal, Subtask
+from nous.storage.models import AgentIdentity, Censor, GoalJournal, Subtask
 
 pytestmark = pytest.mark.postgres_only
 
@@ -102,8 +102,8 @@ async def test_a_reset_goes_back_to_the_built_in_text_and_may_be_repeated(db):
     assert (await env.call("DELETE", PATH, json={"text": SAVED})).status_code == 400  # a reset takes no field
 
 
-@pytest.mark.parametrize("value", ["", "   ", "\n\r\n\t"])
-async def test_a_blank_text_is_refused_with_a_sentence(db, value):
+@pytest.mark.parametrize("value", ["", "   ", "\n\r\n\t", "\u200b", "\u00ad\u200d\ufeff", "\x01 \x02"])
+async def test_a_text_that_shows_nothing_is_refused_with_a_sentence(db, value):
     env = await _env(db)
     answer = await env.call("PUT", PATH, json={"text": value})
     assert answer.status_code == 400 and answer.json() == {"error": PROMPT_EMPTY}
@@ -165,6 +165,51 @@ async def test_two_saves_at_once_leave_one_current_text(db):
         if answer.status_code == 409:
             assert answer.json() == {"error": PROMPT_CHANGED}
     assert len(await _current(db, env.settings.agent_id)) == 1
+
+
+async def test_a_save_that_meets_another_save_committing_answers_409_and_writes_nothing(db):
+    env = await _env(db)
+    manager = IdentityManager(db, env.settings.agent_id)
+    async with db.session() as first:
+        await manager.set_goal_prompt("The first text.", "owner", session=first)  # written, not committed
+        holder = (await first.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+        second = asyncio.create_task(env.call("PUT", PATH, json={"text": "The second text."}))
+        await asyncio.wait_for(until_blocked_by(db, holder), timeout=10)
+        await first.commit()
+    answer = await asyncio.wait_for(second, timeout=10)
+    assert (answer.status_code, answer.json()) == (409, {"error": PROMPT_CHANGED})
+    assert [row.content for row in await _current(db, env.settings.agent_id)] == ["The first text."]
+
+
+async def test_a_save_that_fails_for_another_reason_is_not_called_a_change_made_meanwhile(db):
+    env = make_env(db)  # no agents row: the table's foreign key refuses the write
+    answer = await env.call("PUT", PATH, json={"text": SAVED})
+    assert (answer.status_code, answer.json()) == (500, {"error": FAILED})
+
+
+async def test_a_change_that_was_made_is_answered_200_even_when_reading_it_back_fails(db, monkeypatch):
+    env = await _env(db)
+
+    async def unreadable(self, session=None):
+        raise ConnectionError("the database is not reachable")
+
+    monkeypatch.setattr(IdentityManager, "get_goal_prompt", unreadable)
+    saved = await env.call("PUT", PATH, json={"text": SAVED})
+    assert saved.status_code == 200
+    assert {k: saved.json()[k] for k in ("text", "is_default", "updated_by", "reload")} == {
+        "text": SAVED,
+        "is_default": False,
+        "updated_by": "owner",
+        "reload": True,
+    }
+    reset = await env.call("DELETE", PATH, json={})
+    assert reset.status_code == 200
+    assert {k: reset.json()[k] for k in ("text", "is_default", "reload")} == {
+        "text": DEFAULT_GOAL_PROMPT,
+        "is_default": True,
+        "reload": True,
+    }
+    assert await _current(db, env.settings.agent_id) == []
 
 
 async def test_each_route_needs_the_owners_or_the_proxys_secret_before_the_body_is_read(db):
@@ -275,6 +320,11 @@ async def test_a_saved_row_over_the_limit_gives_both_the_built_in_text(runner_en
 
 
 # ---- the censor gate -----------------------------------------------------------------------------------------------
+# Every reader tries the loaded text, the built-in text, then none (default_prompt.rungs). The first task moves down
+# when the gate refuses it and a censor that refuses matches the goal prompt; a follow-up turn moves down when such a
+# censor matches it, read without side effects. A refusal for anything else is gated once.
+
+FOLD = "- Fold every folder twice before merging."
 
 
 def _count_checks(w, monkeypatch) -> list[str]:
@@ -298,6 +348,21 @@ async def _refusals(w) -> list[GoalJournal]:
         return list(rows.scalars())
 
 
+async def _refuse(w, pattern: str) -> None:
+    await w.env.heart.add_censor(CensorInput(trigger_pattern=pattern, reason="Not this.", action="refuse"))
+
+
+async def _activations(w) -> int:
+    async with w.db.session() as s:
+        counts = await s.execute(select(Censor.activation_count).where(Censor.agent_id == w.agent))
+        return sum(count or 0 for count in counts.scalars())
+
+
+async def _stored_task(w, root) -> str:
+    async with w.db.session() as s:
+        return (await s.execute(select(Subtask.task).where(Subtask.id == uuid.UUID(root.source_id)))).scalar_one()
+
+
 async def test_the_built_in_text_passes_the_censor_gate(runner_env, monkeypatch):  # noqa: F811
     w = await _goal_world(runner_env)
     checked = _count_checks(w, monkeypatch)
@@ -305,31 +370,58 @@ async def test_the_built_in_text_passes_the_censor_gate(runner_env, monkeypatch)
     assert len(checked) == 1
 
 
-async def test_a_saved_text_the_censor_gate_refuses_is_set_aside_and_the_session_starts(runner_env, monkeypatch):  # noqa: F811
+async def test_a_saved_text_a_censor_refuses_gives_way_to_the_built_in_text_in_both_readers(runner_env, monkeypatch):  # noqa: F811
     w = await _goal_world(runner_env)
-    await _owner(w, "PUT", json={"text": "- Fold every folder twice before merging."})
-    await w.env.heart.add_censor(
-        CensorInput(trigger_pattern="Fold every folder twice", reason="Folding twice loses notes.", action="refuse")
-    )
+    await _owner(w, "PUT", json={"text": FOLD})
+    await _refuse(w, "Fold every folder twice")
     checked = _count_checks(w, monkeypatch)
     root, _row = await started(w, w.goal)
-    async with w.db.session() as s:
-        task = (await s.execute(select(Subtask.task).where(Subtask.id == uuid.UUID(root.source_id)))).scalar_one()
+    task = await _stored_task(w, root)
     assert _carries(task, DEFAULT_GOAL_PROMPT) and "Fold every folder twice" not in task
     assert len(checked) == 2
     assert w.driver._failures == {} and await _refusals(w) == []
     assert (await w.store.get(w.goal.id)).state == "active"
+    before = await _activations(w)
+    block = (await w.chain.turn_context(root.id)).block
+    assert _carries(block, DEFAULT_GOAL_PROMPT) and "Fold every folder twice" not in block
+    assert await _activations(w) == before  # the follow-up turn's choice is read only
+
+
+async def test_a_built_in_text_a_censor_refuses_gives_way_to_none_in_both_readers(runner_env, monkeypatch):  # noqa: F811
+    w = await _goal_world(runner_env)
+    await _refuse(w, "dag_create for a workflow")
+    checked = _count_checks(w, monkeypatch)
+    root, _row = await started(w, w.goal)
+    assert HEADING not in await _stored_task(w, root)
+    assert len(checked) == 2 and w.driver._failures == {}
+    assert HEADING not in (await w.chain.turn_context(root.id)).block
+
+
+async def test_a_saved_text_no_censor_refuses_stays_in_both_readers(runner_env):  # noqa: F811
+    w = await _goal_world(runner_env)
+    await _owner(w, "PUT", json={"text": SAVED})
+    await _refuse(w, "dag_create for a workflow")  # matches the built-in text only
+    root, _row = await started(w, w.goal)
+    assert f"## {HEADING}\n{SAVED}" in await _stored_task(w, root)
+    assert f"### {HEADING}\n{SAVED}" in (await w.chain.turn_context(root.id)).block
 
 
 @pytest.mark.parametrize("saved", [True, False])
-async def test_a_task_the_gate_refuses_with_the_built_in_text_too_is_one_failed_start(runner_env, monkeypatch, saved):  # noqa: F811
+async def test_a_refusal_of_the_goals_own_text_is_gated_once_and_is_one_failed_start(runner_env, monkeypatch, saved):  # noqa: F811
     w = await _goal_world(runner_env)
     if saved:
         await _owner(w, "PUT", json={"text": SAVED})
-    await w.env.heart.add_censor(
-        CensorInput(trigger_pattern="duplicate notes", reason="Merging loses notes.", action="refuse")
-    )
+    await _refuse(w, "duplicate notes")  # the goal's objective
     checked = _count_checks(w, monkeypatch)
     assert await w.driver.start_session(w.goal.id, trigger="timer") is None
-    assert len(checked) == (2 if saved else 1)
+    assert len(checked) == 1 and await _activations(w) == 1
     assert w.driver._failures == {w.goal.id: 1} and len(await _refusals(w)) == 1
+
+
+async def test_a_follow_up_turn_whose_goal_prompt_no_censor_refuses_keeps_it(runner_env):  # noqa: F811
+    w = await _goal_world(runner_env)
+    root, _row = await started(w, w.goal)
+    await _owner(w, "PUT", json={"text": SAVED})
+    await _refuse(w, "duplicate notes")  # the goal's own text: the turn's own check refuses it, not the prompt
+    block = (await w.chain.turn_context(root.id)).block
+    assert f"### {HEADING}\n{SAVED}" in block

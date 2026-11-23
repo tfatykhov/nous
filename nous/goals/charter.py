@@ -23,20 +23,21 @@ Goal pacing: given ``pace_line`` (``nous.goals.pacing.pace_line``, for a goal th
 first task says it on the line after the budget. Given none, it is as before.
 
 The default goal prompt: given ``goal_prompt`` (``nous.goals.default_prompt.load``), both put it after the charter and
-its tools, under the heading ``How a goal's work runs``, in the room the rest leaves: the task only when it does not
-hide the plan's first open step that the task shows without it, the block only when the evidence list keeps at least
-``EVIDENCE_FLOOR`` characters. When the given text does not fit the built-in one is tried, then none
-(``default_prompt.section``). Given none, both are as before.
+its tools, under the heading ``How a goal's work runs``. It gives way first: it is carried only when the text with it
+shows the plan's first open step and the owner's two newest journal entries wherever the text without it shows them,
+and, in the block, only when the evidence list keeps at least ``EVIDENCE_FLOOR`` characters. It can take the room of
+the other journal entries and of later plan steps. When the given text is not carried, the built-in one is tried, then
+none (``default_prompt.bodies``). Given none, both are as before.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nous.goals.default_prompt import section
+from nous.goals.default_prompt import bodies, section
 from nous.goals.quote import neutralize, quote_entry, quote_ref, quote_step
 from nous.goals.store import TAIL_CHARS, TAIL_ENTRY_CHARS, clip, format_short_id
 
@@ -300,8 +301,9 @@ def build_session_task(
     ``kind``, ``actor``, ``session_n`` and ``text``.
 
     ``goal_prompt`` goes after the charter under ``## How a goal's work runs`` when it fits in the room the charter
-    leaves beside an empty plan and journal, else the built-in text when that fits, else nothing; and never when it
-    would hide the plan's first open step that the task shows without it (the task is then exactly the one without).
+    leaves beside an empty plan and journal and the task with it still shows what the task without it shows of the
+    plan's first open step and the owner's two newest entries (``_gives_way``); else the built-in text on the same
+    terms; else the task is exactly the one without it.
 
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
     Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
@@ -313,25 +315,45 @@ def build_session_task(
     head = _charter(
         goal, spent=spent, day_spent=day_spent, tools=tools, commands_until=commands_until, pace_line=pace_line
     )
-    text = _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
+    plain = _fitted(head, plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
     if goal_prompt is None:
-        return text
-    base = len(_Fit([], [], []).render(head, _TASK_LAYOUT))  # the text with no plan and no journal
-    sec = section(goal_prompt, "##", max_chars - base - 2)
-    if not sec:
-        return text
-    try:
-        with_sec = _fitted(f"{head}\n\n{sec}", plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved)
-    except ValueError:  # what the cuts cannot remove (the cut notes) leaves no room for it
-        return text
-    if with_sec.endswith(CLOSING_WITHOUT_PLAN) and not text.endswith(CLOSING_WITHOUT_PLAN):
-        return text
-    return with_sec
+        return plain.text
+    room = max_chars - len(_Fit([], [], []).render(head, _TASK_LAYOUT)) - 2  # beside no plan and no journal
+    sections = [sec for sec in (section(body, "##") for body in bodies(goal_prompt)) if len(sec) <= room]
+    return _gives_way(
+        plain,
+        sections,
+        lambda sec: _fitted(f"{head}\n\n{sec}", plan, journal_rows, max_chars, _TASK_LAYOUT, moved=moved),
+    )
+
+
+@dataclass(frozen=True)
+class _Fitted:
+    """A fitted text, and what it shows of what the goal prompt gives way to: the plan's first open step, and which
+    of the owner's two newest journal entries (their indices, newest first)."""
+
+    text: str
+    first_open: bool
+    owner_newest: frozenset[int]
+
+
+def _gives_way(plain: _Fitted, sections: Sequence[str], build: Callable[[str], _Fitted]) -> str:
+    """The text ``build`` makes with the first of ``sections`` that shows the plan's first open step and the owner's
+    two newest entries wherever ``plain`` (the text without a section) shows them; else ``plain``'s text. A build the
+    cuts cannot fit (``ValueError``) is passed over."""
+    for sec in sections:
+        try:
+            with_sec = build(sec)
+        except ValueError:
+            continue
+        if with_sec.first_open == plain.first_open and plain.owner_newest <= with_sec.owner_newest:
+            return with_sec.text
+    return plain.text
 
 
 def _fitted(
     head: str, plan: Sequence[Any], journal_rows: Sequence[Any], max_chars: int, layout: _Layout, *, moved: int = 0
-) -> str:
+) -> _Fitted:
     """``head``, then the plan and the journal quoted as data and cut in ``_Fit.cuts`` order until the whole text
     is at most ``max_chars``, then the closing words of ``layout``. ``ValueError`` when the head and the closing
     alone do not fit."""
@@ -349,6 +371,7 @@ def _fitted(
                 break
             kept.append(index)
             used += len(entry)
+    owner_newest = sorted(i for i in kept if owner[i])[:NEWEST_OWNER_ENTRIES_KEPT]
     fit = _Fit(steps, quoted, kept, moved)
     cuts = fit.cuts(owner)
     text = fit.render(head, layout)
@@ -356,7 +379,8 @@ def _fitted(
         if not next(cuts, False):
             raise ValueError(f"the goal's charter alone is longer than {max_chars} characters")
         text = fit.render(head, layout)
-    return text
+    first_open = bool(fit.open) and fit.open[0] in fit.shown_steps
+    return _Fitted(text, first_open, frozenset(i for i in owner_newest if i in fit.kept))
 
 
 # ---- the goal block of a decision turn -------------------------------------------------------------------------
@@ -440,8 +464,9 @@ def render_goal_block(
     the room they leave less ``BLOCK_RESERVE`` (the plan's first open step and the headings), and counts the refs it
     cannot list. The whole block is at most ``max_chars``. ``root_dir`` is the workspace-relative directory whose
     files are evidence. ``goal_prompt`` goes after the charter under ``### How a goal's work runs`` when the evidence
-    list keeps at least ``EVIDENCE_FLOOR`` characters beside it, else the built-in text when that fits, else
-    nothing."""
+    list keeps at least ``EVIDENCE_FLOOR`` characters beside it and the block with it still shows what the block
+    without it shows of the plan's first open step and the owner's two newest entries (``_gives_way``); else the
+    built-in text on the same terms; else the block is exactly the one without it."""
     ended = "; that session has ended, so no plan step can be closed in this turn" if session_ended else ""
     head = (
         "## The goal this work belongs to\n"
@@ -454,11 +479,16 @@ def render_goal_block(
         head = f"{head}\n{commands_line(commands_until)}"
     if tools is not None:
         head = f"{head}\n{tools_section(tools)}"
-    if goal_prompt is not None:
-        sec = section(goal_prompt, "###", max_chars - len(head) - 2 - len(RECORDING) - BLOCK_RESERVE - EVIDENCE_FLOOR)
-        if sec:
-            head = f"{head}\n\n{sec}"
-    room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
-    closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
-    layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)
-    return _fitted(head, plan, journal_rows, max_chars, layout, moved=moved)
+
+    def build(head: str) -> _Fitted:
+        room = max_chars - len(head) - len(RECORDING) - BLOCK_RESERVE
+        closing = f"{RECORDING}\n{_evidence_lines(citeable, root_dir, room)}"
+        layout = _Layout(heading="###", last="Recording progress", closing=closing, closing_without_plan=closing)
+        return _fitted(head, plan, journal_rows, max_chars, layout, moved=moved)
+
+    plain = build(head)
+    if goal_prompt is None:
+        return plain.text
+    room = max_chars - len(head) - 2 - len(RECORDING) - BLOCK_RESERVE - EVIDENCE_FLOOR
+    sections = [sec for sec in (section(body, "###") for body in bodies(goal_prompt)) if len(sec) <= room]
+    return _gives_way(plain, sections, lambda sec: build(f"{head}\n\n{sec}"))

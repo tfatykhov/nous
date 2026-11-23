@@ -49,12 +49,14 @@ name, time, outcome) and the session ids the Work screen opens; never a call's i
 ``GET /goals/options`` carries ``activity: true`` with the flag on. With it off the route answers ``activity_enabled:
 false`` and reads no table, and the options have no ``activity`` key.
 
-The default goal prompt (``nous.goals.default_prompt``), which the first task of each goal session and every
-follow-up turn read: ``GET /goals/prompt`` (the text in use, whether it is the built-in one, the built-in one, the
-limit, and when and by which proof the owner's text was saved), ``PUT /goals/prompt`` (body ``{"text": ...}``: at most
-``default_prompt.MAX_CHARS`` characters once ``\\r\\n`` is turned into ``\\n`` and the text is stripped, never blank;
-the proof the guard accepted is stored with it) and ``DELETE /goals/prompt`` (back to the built-in text). With the
-goals flag off the read answers ``enabled: false`` and the changes 503 ``GOALS_OFF``.
+The default goal prompt (``nous.goals.default_prompt``), which goal sessions read in their first task and their
+follow-up turns: ``GET /goals/prompt`` (the text the builders start from, whether it is the built-in one, the built-in
+one, the limit, and when and by which proof the owner's text was saved), ``PUT /goals/prompt`` (body ``{"text": ...}``:
+normalized as ``normalize_goal_prompt`` says, it must show something, ``goal_prompt_has_text``, and be at most
+``default_prompt.MAX_CHARS`` characters; the proof the guard accepted is stored with it) and ``DELETE /goals/prompt``
+(back to the built-in text). When a save or a reset was made and reading it back fails, the answer is 200 with what was
+written and ``reload: true``. With the goals flag off the read answers ``enabled: false`` and the changes 503
+``GOALS_OFF``.
 """
 
 from __future__ import annotations
@@ -112,7 +114,7 @@ from nous.goals.store import (
     format_short_id,
     grant_identity,
 )
-from nous.identity.manager import GoalPromptChanged, IdentityManager, normalize_goal_prompt
+from nous.identity.manager import GoalPromptChanged, IdentityManager, goal_prompt_has_text, normalize_goal_prompt
 from nous.storage.models import Goal, GoalJournal, GoalSession, GoalToolGrant
 
 logger = logging.getLogger(__name__)
@@ -170,9 +172,9 @@ REF_ECHO_CHARS = 40
 FAILED = "the request could not be processed"
 # The default goal prompt's body: a longer text is refused by the body model; up to it, the route counts it.
 PROMPT_BODY_MAX_CHARS = 20_000
-PROMPT_EMPTY = "The text is empty. To go back to the default, use reset."
+PROMPT_EMPTY = "The text is blank. To go back to the built-in text, use reset."
 PROMPT_TOO_LONG = "The text is {n} characters; at most {max} are allowed."
-PROMPT_CHANGED = "The prompt was changed a moment ago. Look again."
+PROMPT_CHANGED = "The prompt was changed a moment ago, so this text was not saved. Save it again to replace that."
 
 Handler = Callable[[Request], Awaitable[Response]]
 
@@ -974,21 +976,36 @@ def build_goal_routes(
 
     # ---- the default goal prompt ---------------------------------------------------------------------------------
 
-    async def prompt_answer() -> dict[str, Any]:
-        """The goal prompt in use (``default_prompt.effective``, as the builders read it), the built-in text and the
-        limit; when the owner's text is in use, when and by which proof it was saved."""
-        row = await IdentityManager(database, agent_id).get_goal_prompt()
-        text, is_default = default_prompt.effective(row.text if row is not None else None)
-        saved = row if row is not None and not is_default else None
+    def prompt_shape(
+        text: str, is_default: bool, updated_at: Any = None, updated_by: str | None = None
+    ) -> dict[str, Any]:
         return {
             "enabled": True,
             "text": text,
             "is_default": is_default,
             "default": default_prompt.DEFAULT_GOAL_PROMPT,
             "max_chars": default_prompt.MAX_CHARS,
-            "updated_at": _iso(saved.updated_at) if saved is not None else None,
-            "updated_by": saved.updated_by if saved is not None else None,
+            "updated_at": _iso(updated_at),
+            "updated_by": updated_by,
         }
+
+    async def prompt_answer() -> dict[str, Any]:
+        """The goal prompt the builders start from (``default_prompt.effective``), the built-in text and the limit;
+        when the owner's text is the one, when and by which proof it was saved."""
+        row = await IdentityManager(database, agent_id).get_goal_prompt()
+        text, is_default = default_prompt.effective(row.text if row is not None else None)
+        if row is None or is_default:
+            return prompt_shape(text, is_default)
+        return prompt_shape(text, False, row.updated_at, row.updated_by)
+
+    async def changed_prompt(what: str, written: dict[str, Any]) -> JSONResponse:
+        """The answer of a save or a reset that was made: the read again, or, when that read fails, what was written
+        with ``reload: true`` (the change stands)."""
+        try:
+            return JSONResponse(await prompt_answer())
+        except Exception as exc:
+            logger.warning("F114: %s was made, and reading it back failed (%s)", what, type(exc).__name__)
+            return JSONResponse({**written, "reload": True})
 
     async def read_prompt(request: Request) -> Response:
         """GET /goals/prompt"""
@@ -1008,7 +1025,7 @@ def build_goal_routes(
         except _BadRequest as exc:
             return _error(400, str(exc))
         text = normalize_goal_prompt(body.text)
-        if not text:
+        if not goal_prompt_has_text(text):
             return _error(400, PROMPT_EMPTY)
         if len(text) > default_prompt.MAX_CHARS:
             return _error(400, PROMPT_TOO_LONG.format(n=len(text), max=default_prompt.MAX_CHARS))
@@ -1020,10 +1037,7 @@ def build_goal_routes(
             return _error(409, PROMPT_CHANGED)
         except Exception as exc:
             return failed("saving the default goal prompt", exc)
-        try:
-            return JSONResponse(await prompt_answer())
-        except Exception as exc:
-            return failed("reading the default goal prompt", exc)
+        return await changed_prompt("a save of the default goal prompt", prompt_shape(text, False, None, proof))
 
     async def reset_prompt(request: Request) -> Response:
         """DELETE /goals/prompt: back to the built-in text (nothing saved is not an error)."""
@@ -1035,9 +1049,10 @@ def build_goal_routes(
             return _error(400, str(exc))
         try:
             await IdentityManager(database, agent_id).clear_goal_prompt()
-            return JSONResponse(await prompt_answer())
         except Exception as exc:
             return failed("resetting the default goal prompt", exc)
+        written = prompt_shape(default_prompt.DEFAULT_GOAL_PROMPT, True)
+        return await changed_prompt("a reset of the default goal prompt", written)
 
     async def get_goal(request: Request) -> Response:
         """GET /goals/{ref}?journal=50"""

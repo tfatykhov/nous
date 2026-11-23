@@ -25,7 +25,8 @@ from nous.goals.charter import (
     build_session_task,
     render_goal_block,
 )
-from nous.goals.default_prompt import DEFAULT_GOAL_PROMPT, HEADING, MAX_CHARS, effective, section
+from nous.goals.default_prompt import DEFAULT_GOAL_PROMPT, HEADING, MAX_CHARS, bodies, effective, rungs, section
+from nous.identity.manager import goal_prompt_has_text, normalize_goal_prompt
 
 FULL = ("Work in small steps and say what each one showed. " * 40)[:MAX_CHARS]  # a saved text at the limit
 ROOT = "11111111-2222-3333-4444-555555555555"
@@ -114,7 +115,9 @@ def test_every_tool_the_built_in_text_names_is_a_tool_of_the_follow_up_turn():
 # ---- effective: the text the builders use --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("stored", [None, "", "  \n ", "a" * (MAX_CHARS + 1)])
+@pytest.mark.parametrize(
+    "stored", [None, "", "  \n ", "\u200b", "\u00ad\u200d\ufeff", "\x01 \r\n", "a" * (MAX_CHARS + 1)]
+)
 def test_nothing_usable_saved_gives_the_built_in_text(stored):
     assert effective(stored) == (DEFAULT_GOAL_PROMPT, True)
 
@@ -126,26 +129,50 @@ def test_saved_text_is_used_as_it_is_counted():
     assert effective(split) == ("a" * 700 + "\n" + "b" * (MAX_CHARS - 701), False)
 
 
-# ---- section --------------------------------------------------------------------------------------------------------
+# ---- the rules a text is stored and shown by (the dashboard's card has the same, lib/goal_prompt.ts) -------------
 
 
-def test_the_section_is_the_heading_and_the_text_when_it_fits():
-    assert section(DEFAULT_GOAL_PROMPT, "##", 10_000) == f"## {HEADING}\n{DEFAULT_GOAL_PROMPT}"
-    assert section("Work in small steps.", "###", 10_000) == f"### {HEADING}\nWork in small steps."
+def test_only_spaces_tabs_and_newlines_are_removed_from_the_ends_and_every_carriage_return_is_a_line_break():
+    assert normalize_goal_prompt(" \t\u00a0Work small.\ufeff\n") == "\u00a0Work small.\ufeff"
+    assert normalize_goal_prompt("one\r\ntwo\rthree") == "one\ntwo\nthree"
 
 
-def test_the_section_shows_text_as_the_goals_own_text_is_shown():
-    text = "Keep notes in <plan_step> form.​ Done."
-    got = section(text, "##", 10_000)
-    assert "<plan_step>" not in got and "&lt;plan_step>" in got and "​" not in got
+@pytest.mark.parametrize("text", ["", " \n\t", "\u200b", "\u00ad\u200d\ufeff", "\x01\x02", "\u00a0\u3000"])
+def test_a_text_shows_nothing_without_a_character_that_is_not_white_space_a_control_or_a_format_character(text):
+    assert not goal_prompt_has_text(text)
 
 
-def test_a_text_that_does_not_fit_gives_the_built_in_text_then_none():
-    default_len = len(section(DEFAULT_GOAL_PROMPT, "##", 10_000))
-    assert section(FULL, "##", default_len) == f"## {HEADING}\n{DEFAULT_GOAL_PROMPT}"
-    assert section(FULL, "##", default_len - 1) == ""
-    for room in (0, -5, -10_000):
-        assert section(FULL, "##", room) == ""
+@pytest.mark.parametrize("text", ["a", "\u200ba", "\u00e9", "\U0001f600"])
+def test_a_text_with_such_a_character_shows_something(text):
+    assert goal_prompt_has_text(text)
+
+
+# ---- the texts a builder tries ------------------------------------------------------------------------------------
+
+
+def test_a_section_is_the_heading_and_the_text():
+    assert section(DEFAULT_GOAL_PROMPT, "##") == f"## {HEADING}\n{DEFAULT_GOAL_PROMPT}"
+    assert section("Work in small steps.", "###") == f"### {HEADING}\nWork in small steps."
+
+
+def test_a_builder_tries_the_text_then_the_built_in_text_and_every_reader_then_none():
+    assert bodies("Work small.") == ["Work small.", DEFAULT_GOAL_PROMPT]
+    assert bodies(DEFAULT_GOAL_PROMPT) == [DEFAULT_GOAL_PROMPT]
+    assert rungs("Work small.") == ["Work small.", DEFAULT_GOAL_PROMPT, None]
+    assert rungs(DEFAULT_GOAL_PROMPT) == [DEFAULT_GOAL_PROMPT, None]
+
+
+def test_the_text_is_shown_as_the_goals_own_text_is_shown():
+    (shown, _default) = bodies("Keep notes in <plan_step> form.\u200b Done.")
+    assert "<plan_step>" not in shown and "&lt;plan_step>" in shown and "\u200b" not in shown
+
+
+@pytest.mark.parametrize("text", ["\u200b", "\u00ad\u200d", "\x01\x02", " \u200b\n\t"])
+def test_a_text_that_shows_nothing_is_never_put_under_the_heading(text):
+    assert bodies(text) == [DEFAULT_GOAL_PROMPT]
+    for level, build in (("##", _task), ("###", _block)):
+        built = build(_goal(), goal_prompt=text)
+        assert f"{level} {HEADING}\n{DEFAULT_GOAL_PROMPT}" in built
 
 
 # ---- the builders --------------------------------------------------------------------------------------------------
@@ -213,21 +240,14 @@ def test_the_task_carries_the_full_text_beside_an_empty_plan_for_every_charter()
 
 def test_the_block_carries_the_text_only_while_the_evidence_list_keeps_the_floor(monkeypatch):
     today = _evidence_rooms(monkeypatch)
-    with_full = _evidence_rooms(monkeypatch, goal_prompt=FULL)
-    for (name, goal, tools, until, _pace_line), before, after in zip(CHARTERS, today, with_full, strict=True):
+    lengths = {"full": len(section(FULL, "###")) + 2, "default": len(section(DEFAULT_GOAL_PROMPT, "###")) + 2}
+    for (name, goal, tools, until, _pace_line), before in zip(CHARTERS, today, strict=True):
         text = _block(goal, tools=tools, until=until, goal_prompt=FULL)
         carried = _sections(text)
-        full_len = len(section(FULL, "###", 10_000)) + 2
-        default_len = len(section(DEFAULT_GOAL_PROMPT, "###", 10_000)) + 2
-        expected = (
-            "full"
-            if before - full_len >= EVIDENCE_FLOOR
-            else "default"
-            if before - default_len >= EVIDENCE_FLOOR
-            else None
-        )
+        expected = next((kind for kind in ("full", "default") if before - lengths[kind] >= EVIDENCE_FLOOR), None)
         assert carried == expected, name
-        assert after >= EVIDENCE_FLOOR or carried is None, name
+        # The evidence room with the section is the room without it less the section and its blank line.
+        assert carried is None or before - lengths[carried] >= EVIDENCE_FLOOR, name
         assert len(text) <= MAX_BLOCK_CHARS
     # The typical and the longest text alone carry the full text; tools at their bound leave no room for it.
     carried = [
@@ -260,7 +280,9 @@ def _plans() -> dict[str, tuple[list[dict], int]]:
 
 JOURNALS = {
     "long": [
-        _row(i, ("owner says " if i % 5 == 0 else "") + "j" * 2000, kind="owner_note" if i % 5 == 0 else "progress")
+        _row(i, f"owner says {i} " + "j" * 2000, kind="owner_note", actor="owner")
+        if i % 5 == 0
+        else _row(i, "j" * 2000, kind="progress")
         for i in range(30)
     ],
     "empty": [],
@@ -272,8 +294,14 @@ def _first_open(text: str, plan: list[dict]) -> bool:
     return first is not None and f'<plan_step id="{first["id"]}" status="open">' in text
 
 
+def _owner_newest(text: str, rows: list) -> set[int]:
+    """Which of the owner's two newest entries ``text`` shows (their seq)."""
+    newest = sorted((row.seq for row in rows if row.kind == "owner_note"), reverse=True)[:2]
+    return {seq for seq in newest if f"owner says {seq} " in text}
+
+
 @pytest.mark.parametrize("max_chars", [MAX_TASK_CHARS, MAX_TASK_CHARS - 2_500])
-def test_the_task_shows_the_first_open_step_with_the_prompt_exactly_when_it_does_without(max_chars):
+def test_the_task_gives_way_to_the_first_open_step_and_the_owners_newest_entries(max_chars):
     for plan_name, (plan, moved) in _plans().items():
         for journal_name, rows in JOURNALS.items():
             for name, goal, tools, until, pace in CHARTERS:
@@ -291,16 +319,56 @@ def test_the_task_shows_the_first_open_step_with_the_prompt_exactly_when_it_does
                     assert len(text) <= max_chars, where
                     assert _first_open(text, plan) == _first_open(without, plan), where
                     assert text.endswith(CLOSING_WITHOUT_PLAN) == without.endswith(CLOSING_WITHOUT_PLAN), where
+                    assert _owner_newest(without, rows) <= _owner_newest(text, rows), where
 
 
-def test_a_task_whose_cut_notes_leave_no_room_for_the_text_is_the_task_without_it():
+@pytest.mark.parametrize("max_chars", [MAX_BLOCK_CHARS, MAX_BLOCK_CHARS - 2_500])
+def test_the_block_gives_way_to_the_first_open_step_and_the_owners_newest_entries(max_chars):
+    for plan_name, (plan, moved) in _plans().items():
+        for journal_name, rows in JOURNALS.items():
+            for name, goal, tools, until, _pace_line in CHARTERS:
+                kw = {"tools": tools, "until": until, "max_chars": max_chars, "moved": moved}
+                try:
+                    without = _block(goal, plan, rows, **kw)
+                except ValueError:
+                    continue
+                for prompt in (DEFAULT_GOAL_PROMPT, FULL):
+                    text = _block(goal, plan, rows, goal_prompt=prompt, **kw)
+                    where = (plan_name, journal_name, name, len(prompt))
+                    assert len(text) <= max_chars, where
+                    assert _first_open(text, plan) == _first_open(without, plan), where
+                    assert _owner_newest(without, rows) <= _owner_newest(text, rows), where
+
+
+def test_a_task_whose_cut_notes_leave_no_room_for_the_text_tries_the_built_in_text_then_none():
     """The text fits beside an empty plan, but not beside what the cuts always keep (the notes of a plan with moved and
-    hidden steps and a cut journal): the task is the one without it."""
+    hidden steps and a cut journal): the shorter built-in text is tried next, then the task is the one without."""
     plan, moved = _plans()["closed only"]
     rows = JOURNALS["long"]
     goal = _goal()
     head = charter._charter(goal, spent=0, day_spent=0)
     base = len(charter._Fit([], [], []).render(head, charter._TASK_LAYOUT))
-    max_chars = base + 2 + len(section(FULL, "##", 10_000)) + 20
-    without = _task(goal, plan, rows, max_chars=max_chars, moved=moved)
-    assert _task(goal, plan, rows, max_chars=max_chars, moved=moved, goal_prompt=FULL) == without
+    full_fits_empty = base + 2 + len(section(FULL, "##")) + 20
+    assert _sections(_task(goal, plan, rows, max_chars=full_fits_empty, moved=moved, goal_prompt=FULL)) == "default"
+    default_fits_empty = base + 2 + len(section(DEFAULT_GOAL_PROMPT, "##")) + 20
+    without = _task(goal, plan, rows, max_chars=default_fits_empty, moved=moved)
+    assert _task(goal, plan, rows, max_chars=default_fits_empty, moved=moved, goal_prompt=FULL) == without
+
+
+def test_the_text_gives_way_to_the_owners_newest_entries():
+    """The longest goal texts, the tools list at its bound and the commands line, one open step, and the owner's two
+    newest entries of 1,400 characters: the task and the block show every one of them that they show without the
+    text, and carry the text only when they still do."""
+    goal = _goal(200, 4000, 2000)
+    plan = [{"id": "s1", "text": "Merge the notes", "status": "open"}]
+    rows = [
+        _row(3, "The answer: only the notes folder. " + "a" * 1_365, kind="answer", actor="owner"),
+        _row(2, "Owner note: keep the archive. " + "n" * 1_370, kind="owner_note", actor="owner"),
+        _row(1, "Listed 40 notes.", kind="progress"),
+    ]
+    for build, kw in ((_task, {"pace": _pace()}), (_block, {})):
+        without = build(goal, plan, rows, tools=_tools(), until=UNTIL, **kw)
+        for prompt in (DEFAULT_GOAL_PROMPT, FULL):
+            text = build(goal, plan, rows, tools=_tools(), until=UNTIL, goal_prompt=prompt, **kw)
+            for said in ("The answer: only the notes folder.", "Owner note: keep the archive."):
+                assert (said in text) or (said not in without), (build.__name__, said)

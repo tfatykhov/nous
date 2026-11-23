@@ -61,7 +61,7 @@ async def world(runner_env, *steps, bind: bool = True, **settings) -> SimpleName
     if bind:
         from nous.goals.chain import GoalChain, report_channel
 
-        chain = GoalChain(env.db, env.settings, store)
+        chain = GoalChain(env.db, env.settings, store, heart=env.heart)
         cont.set_goal_turns(chain.turn_context)
         continuation.set_goal_report_channel(report_channel)
     return SimpleNamespace(

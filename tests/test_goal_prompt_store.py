@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from f099_support import OWNER_DIGEST, OWNER_HEADERS
+from goal_routes_support import until_blocked_by
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 
@@ -96,8 +97,10 @@ async def test_each_save_is_a_new_version_and_a_reset_keeps_them(manager, db):
     assert await default_prompt.load(db, manager.agent_id) == DEFAULT_GOAL_PROMPT
 
 
-@pytest.mark.parametrize("value", ["", "   ", "\r\n\n", "a" * (GOAL_PROMPT_MAX_CHARS + 1)])
-async def test_a_blank_or_too_long_text_is_refused(manager, value):
+@pytest.mark.parametrize(
+    "value", ["", "   ", "\r\n\n", "\u200b", "\u00ad\u200d\ufeff", "\x01", "a" * (GOAL_PROMPT_MAX_CHARS + 1)]
+)
+async def test_a_text_that_shows_nothing_or_is_too_long_is_refused(manager, value):
     with pytest.raises(ValueError):
         await manager.set_goal_prompt(value, "owner")
     assert await _rows(manager) == []
@@ -109,26 +112,18 @@ async def test_the_text_is_counted_and_stored_as_normalized(manager):
     sent = "a" * 700 + "\r\n" + "b" * (GOAL_PROMPT_MAX_CHARS - 701)  # one character over as sent
     await manager.set_goal_prompt(sent, "owner")
     assert (await manager.get_goal_prompt()).text == "a" * 700 + "\n" + "b" * (GOAL_PROMPT_MAX_CHARS - 701)
-
-
-async def _until_a_save_waits(db) -> None:
-    """Return once a backend waits on a lock of agent_identity (callers bound it with ``asyncio.wait_for``)."""
-    query = text(
-        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-        "AND wait_event_type = 'Lock' AND query ILIKE '%agent_identity%'"
-    )
-    while True:
-        async with db.session() as s:
-            if (await s.execute(query)).scalar_one():
-                return
-        await asyncio.sleep(0.05)
+    await manager.set_goal_prompt("one\rtwo", "owner")  # a lone carriage return is a line break too
+    assert (await manager.get_goal_prompt()).text == "one\ntwo"
+    await manager.set_goal_prompt(" \t\u00a0Work small.\ufeff\n", "owner")  # only spaces, tabs, newlines go
+    assert (await manager.get_goal_prompt()).text == "\u00a0Work small.\ufeff"
 
 
 async def test_a_save_that_meets_another_save_committing_is_refused_and_writes_nothing(manager, db):
     async with db.session() as first:
         await manager.set_goal_prompt("The first text.", "owner", session=first)  # written, not committed
+        holder = (await first.execute(text("SELECT pg_backend_pid()"))).scalar_one()
         second = asyncio.create_task(manager.set_goal_prompt("The second text.", "owner"))
-        await asyncio.wait_for(_until_a_save_waits(db), timeout=10)
+        await asyncio.wait_for(until_blocked_by(db, holder), timeout=10)
         await first.commit()
     with pytest.raises(GoalPromptChanged):
         await asyncio.wait_for(second, timeout=10)
@@ -238,6 +233,12 @@ def test_only_the_owners_routes_write_the_goal_prompt():
         if any(call in path.read_text(encoding="utf-8") for call in calls)
     }
     assert found == {"api/goal_routes.py"}
+    inner = {
+        path.relative_to(NOUS).as_posix()
+        for path in NOUS.rglob("*.py")
+        if any(name in path.read_text(encoding="utf-8") for name in ("GOAL_PROMPT_SECTION", "_write_version"))
+    }
+    assert inner == {"identity/manager.py"}
     named = {
         path.relative_to(NOUS).as_posix()
         for path in NOUS.rglob("*.py")

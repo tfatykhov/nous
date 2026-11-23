@@ -14,6 +14,7 @@ with ``NOUS_GOALS_ENABLED`` on:
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -31,6 +32,8 @@ from nous.storage.models import Goal, GoalSession, Intention
 
 if TYPE_CHECKING:
     from nous.goals.grants import GoalToolGrants
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,16 +73,24 @@ async def report_channel(session: AsyncSession, agent_id: str, root_id: UUID) ->
 class GoalChain:
     """The goals' side of a decision turn (``turn_context``). ``tool_grants`` is the runner's view of the goals' tool
     grants (F115 per-goal tools, main.py with the flag on), read again for the root at the start of each of its
-    decision turns."""
+    decision turns. ``heart`` (main.py passes the app's) reads the censors the goal prompt is matched against; with
+    none the loaded goal prompt is used as it is."""
 
     def __init__(
-        self, database: Database, settings: Any, store: GoalStore, *, tool_grants: GoalToolGrants | None = None
+        self,
+        database: Database,
+        settings: Any,
+        store: GoalStore,
+        *,
+        tool_grants: GoalToolGrants | None = None,
+        heart: Any = None,
     ) -> None:
         self._db = database
         self._settings = settings
         self._store = store
         self._agent_id = store.agent_id
         self._tool_grants = tool_grants
+        self._heart = heart
 
     async def turn_context(self, root_id: UUID) -> GoalTurn | None:
         """None unless ``root_id`` is a goal session's root. Else the goal block, built from the goal, its plan, its
@@ -114,7 +125,7 @@ class GoalChain:
         # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
         refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)
-        prompt = await default_prompt.load(self._db, self._agent_id)  # never raises: the built-in text on a failure
+        prompt = await self._goal_prompt(goal.id)
         block = charter.render_goal_block(
             goal,
             plan=list(goal.plan or []),
@@ -132,6 +143,21 @@ class GoalChain:
         )
         tools_of_turn = make_goal_tools(self._db, self._settings, self._store, ref, tool_grants=self._tool_grants)
         return GoalTurn(block=block, tools=tools_of_turn)
+
+    async def _goal_prompt(self, goal_id: UUID) -> str | None:
+        """The goal prompt of this turn's goal block: the first of ``default_prompt.rungs`` (the loaded text, the
+        built-in text, none) that no censor that refuses matches, read without side effects. The turn's prompt then
+        goes through the censor check every turn does: a refusal there is the turn's own, never the goal prompt's.
+        Neither read raises: a failed one gives the built-in text, or keeps the text."""
+        prompt = await default_prompt.load(self._db, self._agent_id)
+        if self._heart is None:
+            return prompt
+        patterns = await default_prompt.refusing_patterns(self._heart)
+        chosen = next(rung for rung in default_prompt.rungs(prompt) if not default_prompt.refused(rung, patterns))
+        if chosen != prompt:
+            kind = "the built-in text" if chosen is not None else "no goal prompt"
+            logger.warning("Goal %s: a censor matches the goal prompt; the follow-up turn gets %s", goal_id, kind)
+        return chosen
 
     async def _tool_lines(self, goal_id: UUID, root_id: UUID) -> list[Any]:
         """F115 per-goal tools: what the turn is told of the goal's grants, each available when the runner would
