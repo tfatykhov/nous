@@ -234,6 +234,11 @@ _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not an Anthropic request: a fresh httpx client per request posting the second outside judge's record to "
         "TypeSafe's System One API (F118), whose request has no system blocks",
     ),
+    ("nous/api/judge_second_routes.py", "_parse", "request.stream"): (
+        1,
+        "not a request: the body of an incoming request to the second judge's settings routes (F118 PR 3), read "
+        "from Starlette's stream and refused past 4096 bytes",
+    ),
 }
 _REQUEST_METHODS = frozenset({"call", "stream", "call_streaming_aggregated"})
 

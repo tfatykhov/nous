@@ -147,12 +147,19 @@ let urls: string[] = [];
 let loopBody: Record<string, unknown> = { enabled: false };
 let loopStatus = 200;
 let loopUrls: string[] = [];
+// F118 PR 3: the second judge's settings card asks once; off ({enabled: false}) unless a test says otherwise.
+let judgeBody: Record<string, unknown> = { enabled: false };
+let judgeUrls: string[] = [];
 
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.startsWith('/dashboard/loop-numbers')) {
       loopUrls.push(url);
       return { ok: loopStatus < 400, status: loopStatus, json: async () => loopBody } as Response;
+    }
+    if (url.startsWith('/dashboard/outside-judge/second')) {
+      judgeUrls.push(url);
+      return { ok: true, status: 200, text: async () => JSON.stringify(judgeBody) } as Response;
     }
     if (!url.startsWith('/dashboard/autonomy')) throw new Error(`unexpected ${url}`);
     urls.push(url);
@@ -685,6 +692,66 @@ describe('Autonomy: what a finished job costs', () => {
     await waitFor(() => expect(loopUrls.length).toBeGreaterThan(0));
     expect(screen.queryByRole('heading', { name: 'What a finished job costs' })).toBeNull();
     expect(screen.queryByText('Failed to load autonomy data — retrying…')).toBeNull();
+  });
+});
+
+// F118 PR 3: the second judge's settings card, under "What a finished job costs".
+describe('Autonomy: a second opinion on decisions', () => {
+  beforeEach(() => {
+    body = FULL(); status = 200; urls = []; loopBody = LOOP_ON(); loopStatus = 200; loopUrls = [];
+    judgeBody = { enabled: false }; judgeUrls = [];
+    install();
+  });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); judgeBody = { enabled: false }; });
+
+  const JUDGE_ON = () => ({
+    enabled: true, locked: null, loaded: true, running: true,
+    on: { value: true, source: 'stored' }, model: { value: 'jev-1.14.0', source: 'server' },
+    daily_calls: { value: 100, most: 100, source: 'server' },
+    key: { source: 'stored', set_at: '2026-05-03T12:00:00Z', problem: null, server_has_key: false },
+    can_store_key: true, sends_to: 'api.typesafe.ai', confirm_text: 'Send a copy?', updated_at: null, updated_by: null,
+  });
+
+  it('with the settings off it asks once on load, draws nothing, and never asks again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(Autonomy);
+      await screen.findByRole('heading', { name: 'What a finished job costs' });
+      await waitFor(() => expect(judgeUrls).toEqual(['/dashboard/outside-judge/second']));
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
+      await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await fireEvent.click(screen.getByRole('button', { name: '30 d' }));
+      await waitFor(() => expect(urls).toContain('/dashboard/autonomy?days=30'));
+      expect(judgeUrls).toEqual(['/dashboard/outside-judge/second']);
+      expect(screen.queryByRole('heading', { name: 'A second opinion on decisions' })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('with the settings on the card is drawn under what a finished job costs', async () => {
+    judgeBody = JUDGE_ON();
+    render(Autonomy);
+    const card = (await screen.findByRole('heading', { name: 'A second opinion on decisions' })).closest('section')!;
+    const costs = (await screen.findByRole('heading', { name: 'What a finished job costs' })).closest('section')!;
+    expect(costs.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(card.querySelector('[data-testid="jev-status"]')?.textContent).toBe('On');
+    expect(card.textContent).toContain('A key is saved (3 May)');
+  });
+
+  it('a card whose first read fails draws nothing and leaves the rest of the page', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.startsWith('/dashboard/outside-judge/second')) throw new TypeError('network');
+      if (url.startsWith('/dashboard/loop-numbers')) return { ok: true, status: 200, json: async () => loopBody } as Response;
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }));
+    render(Autonomy);
+    expect(await screen.findByRole('heading', { name: 'What a finished job costs' })).toBeTruthy();
+    expect(screen.getByText('Scorer running')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('heading', { name: 'A second opinion on decisions' })).toBeNull();
+    expect(screen.queryByText('These settings could not be read. Reload the page to try again.')).toBeNull();
   });
 });
 

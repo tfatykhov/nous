@@ -21,6 +21,7 @@ OWNER = {"X-Nous-Owner-Secret": OWNER_VALUE}
 PROXY = {"X-Nous-Proxy-Secret": PROXY_VALUE}
 FORBIDDEN = {"error": "forbidden"}
 NOT_JSON = {"error": "Content-Type must be application/json"}
+JUDGE_SECOND_OFF = {"error": "The second judge's settings are off on this server.", "enabled": False}
 
 
 def _settings(owner: bool = True, proxy: bool = True) -> SimpleNamespace:
@@ -226,6 +227,16 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
         400,
         {"error": "rule must be one of ['H1', 'F1', 'S1', 'P1', 'R1', 'A1']"},
     ),
+    # F118 PR 3: the second judge's settings, with the setting off (the default): refused before the body is read
+    **{
+        (method, path): (b"{}", 409, JUDGE_SECOND_OFF)
+        for method, path in (
+            ("PATCH", "/dashboard/outside-judge/second"),
+            ("PUT", "/dashboard/outside-judge/second/key"),
+            ("DELETE", "/dashboard/outside-judge/second/key"),
+            ("POST", "/dashboard/outside-judge/second/check"),
+        )
+    },
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
@@ -241,6 +252,14 @@ AUTONOMY_READS = {
     "/autonomy/limits": {"enabled": False},
     "/autonomy/log": {"enabled": False},
     "/autonomy/tools": {"enabled": False},
+}
+# F118 PR 3: the second judge's settings (nous/api/judge_second_routes.py)
+JUDGE_SECOND_ROUTE_SET = {
+    ("GET", "/dashboard/outside-judge/second"),
+    ("PATCH", "/dashboard/outside-judge/second"),
+    ("PUT", "/dashboard/outside-judge/second/key"),
+    ("DELETE", "/dashboard/outside-judge/second/key"),
+    ("POST", "/dashboard/outside-judge/second/check"),
 }
 AUTONOMY_ROUTE_SET = {
     ("GET", "/autonomy/limits"),
@@ -442,6 +461,8 @@ GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
     "/dashboard/execution/abc": (500, None),
     # With the judge off (the default) it answers without a session: the stand-in database has none.
     "/dashboard/outside-judge": (200, {"enabled": False}),
+    # F118 PR 3: the second judge's settings, with the setting off (the default): no session either.
+    "/dashboard/outside-judge/second": (200, {"enabled": False}),
     "/context/log/abc/payload": (404, {"error": "Not enabled"}),
     "/context/log/abc/sections": (404, {"error": "Not enabled"}),
 }
@@ -496,9 +517,12 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         if getattr(route, "methods", None) and getattr(route.endpoint, "owner_guarded", False)
         for method in route.methods - {"HEAD"}
     }
-    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET
+    assert guarded == (
+        REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET | JUDGE_SECOND_ROUTE_SET
+    )
     assert len(GOAL_ROUTE_SET) == 21
     assert len(AUTONOMY_ROUTE_SET) == 7
+    assert len(JUDGE_SECOND_ROUTE_SET) == 5
 
 
 @pytest.mark.parametrize("path", [*GOAL_READS, *AUTONOMY_READS])

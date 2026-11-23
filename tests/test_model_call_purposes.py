@@ -375,6 +375,11 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "TypeSafe's System One API (F118); it is not in nous_system.model_call_log, and the judge's verdict rows "
         "hold its calls and tokens",
     ),
+    ("nous/api/judge_second_routes.py", "_parse", "request.stream"): (
+        1,
+        "not a model call: the body of an incoming request to the second judge's settings routes (F118 PR 3), read "
+        "from Starlette's stream and refused past 4096 bytes",
+    ),
 }
 
 _Site = tuple[str, str, str]

@@ -65,6 +65,7 @@ from nous.api.entry_gate import EntryGate
 from nous.api.execution_context import ExecutionContext
 from nous.api.goal_routes import build_goal_routes
 from nous.api.intention_routes import build_intention_routes
+from nous.api.judge_second_routes import build_judge_second_routes
 from nous.api.models import Attachment
 from nous.api.owner_guard import CARD_DECISION, OwnerGuard, device_caller_key
 from nous.api.runner import AgentRunner
@@ -122,6 +123,7 @@ def create_app(
     mcp_client: Any | None = None,
     autonomy: Any | None = None,
     dispatcher: Any | None = None,
+    judge_second: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -4278,6 +4280,9 @@ def create_app(
             database=database, settings=settings, store=autonomy, dispatcher=dispatcher, guard=owner_guard
         )
     )
+    # F118 PR 3: the second judge's settings, for the Autonomy screen's card. Always mounted: with
+    # NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED off there is no manager, and the routes give their fixed "off" answers.
+    routes.extend(build_judge_second_routes(settings=settings, manager=judge_second, guard=owner_guard))
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
     # Companion devices: pairing, the owner's list and revoke, and a device's unpair (nous/api/companion_devices.py).

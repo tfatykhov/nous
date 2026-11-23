@@ -53,6 +53,11 @@ KNOWN_WRITES = {
     ("DELETE", "/autonomy/tools/{}"),
     ("PUT", "/goals/{}/tools/{}"),
     ("DELETE", "/goals/{}/tools/{}"),
+    # F118 PR 3: the second judge's settings card
+    ("PATCH", "/dashboard/outside-judge/second"),
+    ("PUT", "/dashboard/outside-judge/second/key"),
+    ("DELETE", "/dashboard/outside-judge/second/key"),
+    ("POST", "/dashboard/outside-judge/second/check"),
 }
 KNOWN_COMPANION_WRITES = {("POST", "/a2ui/action"), ("POST", "/a2ui/call")}
 

@@ -98,6 +98,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "mcp_server_secrets"),
         # F118 the outside judge's verdicts (migration 121)
         ("nous_system", "judge_verdicts"),
+        # F118 the owner's settings of the second judge, its key sealed (migration 122)
+        ("nous_system", "judge_second_settings"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

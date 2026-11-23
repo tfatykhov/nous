@@ -1,6 +1,8 @@
 """F112 MCP client: the agent uses tools of external MCP servers, as ``mcp__<server>__<tool>``.
 
-Imported only when ``NOUS_MCP_CLIENT_ENABLED`` is on (``nous/main.py``, and ``nous/api/rest.py`` for the routes).
+Imported only when ``NOUS_MCP_CLIENT_ENABLED`` is on (``nous/main.py``, and ``nous/api/rest.py`` for the routes), and
+by ``nous/judge/second_settings.py`` for ``secrets`` alone (the sealing of the second judge's key) when
+``NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED`` is on.
 ``transport.py`` is the one module that opens sessions with the MCP SDK's client; ``oauth.py`` (PR 2d) imports only the
 SDK's auth models and helpers, and imports ``transport.py``. The manager imports ``oauth.py``, so importing this
 package loads the SDK: it is imported only with the flag on.

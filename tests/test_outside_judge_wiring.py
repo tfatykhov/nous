@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 
 import nous.main as main
@@ -490,3 +491,244 @@ def test_with_two_judges_the_tools_are_those_of_the_judge_off_and_both_run_until
         )
     assert two["definitions"] == off["definitions"]
     assert two["offered"] == off["offered"]
+
+
+# ---- the second judge's dashboard settings (PR 3) -----------------------------------------------------------------
+
+
+def test_with_the_settings_off_the_build_is_the_environments_and_nothing_of_the_settings_is_imported():
+    loaded = _modules_after(
+        "import asyncio, sys\nimport nous.main as m\nfrom nous import judge\nfrom nous.config import Settings\n"
+        "from nous.judge.service import JudgeSet, OutsideJudge\n"
+        "async def run():\n"
+        "    s = Settings(_env_file=None, outside_judge_mode='shadow', outside_judge_model='claude-haiku-5-5',\n"
+        "                 outside_judge_second='jev', TYPESAFE_API_KEY='ts-sub-" + "Z9" * 10 + "')\n"
+        "    service = await m._start_outside_judge(s, database=object(), api_client=object())\n"
+        "    assert type(service) is JudgeSet and type(service.second) is OutsideJudge\n"
+        "    assert await m._start_second_settings(s, service, database=object()) is None\n"
+        "    await service.close()\n"
+        "asyncio.run(run())\n"
+        "print(' '.join(x for x in sys.modules if x.startswith(('nous.judge', 'nous.mcp_client'))))"
+    )
+    assert "nous.judge.second_settings" not in loaded
+    assert not [name for name in loaded if name.startswith("nous.mcp_client")]
+
+
+def _settings_on(agent_id: str = "test-f118-wiring", **over: Any) -> Settings:
+    return _shadow(agent_id=agent_id, outside_judge_settings_enabled=True, **over)
+
+
+@pytest_asyncio.fixture
+async def settings_agent(db):
+    agent = f"test-f118-wiring-{uuid.uuid4().hex[:8]}"
+    yield agent
+    async with db.session() as session:
+        await session.execute(text("DELETE FROM nous_system.judge_second_settings WHERE agent_id = :a"), {"a": agent})
+        await session.commit()
+
+
+@pytest.mark.postgres_only
+async def test_with_the_settings_on_and_nothing_stored_the_first_judge_runs_in_a_set_with_no_second(db, settings_agent):
+    from nous.judge.second_settings import SecondJudgeManager
+    from nous.judge.service import JudgeSet
+
+    settings = _settings_on(settings_agent)
+    service = await main._start_outside_judge(settings, database=db, api_client=object())
+    manager = await main._start_second_settings(settings, service, database=db)
+    try:
+        assert isinstance(service, JudgeSet) and service.second is None and judge_slot.current() is service
+        assert isinstance(manager, SecondJudgeManager) and manager.loaded is True
+        assert isinstance(service.judge, BackgroundModelJudge) and service.primary.runtime()["worker_alive"] is True
+    finally:
+        await manager.close()
+        await service.close()
+        judge_slot.set_current(None)
+
+
+@pytest.mark.postgres_only
+async def test_with_the_settings_on_and_the_servers_values_the_same_second_judge_as_the_environments_runs(
+    db, settings_agent
+):
+    from nous.judge.jev_judge import JevJudge
+    from nous.judge.service import JudgeSet
+
+    on = _settings_on(settings_agent, outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY, outside_judge_daily_calls=9)
+    off = _shadow(outside_judge_second="jev", TYPESAFE_API_KEY=JEV_KEY, outside_judge_daily_calls=9)
+    service = await main._start_outside_judge(on, database=db, api_client=object())
+    manager = await main._start_second_settings(on, service, database=db)
+    environments = await main._start_outside_judge(off, database=db, api_client=object())
+    try:
+        assert isinstance(service, JudgeSet) and isinstance(environments, JudgeSet)
+        mine, theirs = service.second, environments.second
+        assert type(mine) is type(theirs) and isinstance(mine.judge, JevJudge)
+        assert (mine.judge._key, mine.judge.model, mine.judge.version, mine._timeout, mine.daily_calls) == (
+            theirs.judge._key,
+            theirs.judge.model,
+            theirs.judge.version,
+            theirs._timeout,
+            theirs.daily_calls,
+        )
+        assert mine.runtime()["worker_alive"] is True
+    finally:
+        await manager.close()
+        await service.close()
+        await environments.close()
+        judge_slot.set_current(None)
+
+
+@pytest.mark.postgres_only
+async def test_with_the_settings_on_and_the_mode_off_no_judge_runs_and_the_settings_allow_the_removal_only(
+    db, settings_agent, monkeypatch
+):
+    from nous.judge import second_settings
+
+    opened: list[Any] = []
+    monkeypatch.setattr(second_settings, "open_key", lambda *args: opened.append(args) or (None, None))
+    settings = Settings(_env_file=None, agent_id=settings_agent, outside_judge_settings_enabled=True)
+    assert await main._start_outside_judge(settings, database=db, api_client=object()) is None
+    manager = await main._start_second_settings(settings, None, database=db)
+    try:
+        assert manager.state()["locked"] == "off" and manager.state()["running"] is False
+        assert (await manager.patch({"on": True}, confirmed=100, actor="owner")).status == 409
+        assert (await manager.remove_key(confirmed=None, actor="owner")).status == 200
+        assert opened == []
+    finally:
+        await manager.close()
+
+
+async def test_with_the_settings_on_and_the_outside_judge_not_running_there_is_no_manager(caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.main"):
+        assert await main._start_second_settings(_settings_on(), None, database=object()) is None
+    assert any("not available" in record.getMessage() for record in caplog.records)
+
+
+async def test_a_manager_that_raises_at_start_leaves_the_first_judge_running(monkeypatch, caplog):
+    from nous.judge import second_settings
+    from nous.judge.service import JudgeSet
+
+    async def broken(self: Any) -> None:
+        raise RuntimeError(f"cannot load {JEV_KEY}")
+
+    monkeypatch.setattr(second_settings.SecondJudgeManager, "load", broken)
+    settings = _settings_on()
+    service = await main._start_outside_judge(settings, database=object(), api_client=object())
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.main"):
+            assert await main._start_second_settings(settings, service, database=object()) is None
+        assert isinstance(service, JudgeSet) and service.second is None and judge_slot.current() is service
+        assert service.primary.runtime()["worker_alive"] is True
+        [line] = [r.getMessage() for r in caplog.records if r.name == "nous.main"]
+        assert "RuntimeError" in line and JEV_KEY not in line
+    finally:
+        await service.close()
+        judge_slot.set_current(None)
+
+
+def test_create_components_starts_the_settings_after_the_judge_and_closes_them_before_it():  # PIN
+    build = inspect.getsource(main.create_components)
+    assert build.count("_start_second_settings(") == 1
+    assert build.index("_start_outside_judge(") < build.index("_start_second_settings(")
+    assert '"judge_second": judge_second' in build
+    stop = inspect.getsource(main.shutdown_components)
+    assert stop.index('components.get("judge_second")') < stop.index('components.get("outside_judge")')
+    assert 'judge_second=_lazy_component(components, "judge_second")' in inspect.getsource(main.build_app)
+
+
+@pytest.mark.postgres_only
+def test_with_the_settings_on_the_boot_runs_the_settings_and_the_tools_are_those_of_the_judge_off(monkeypatch):
+    from nous.api.execution_context import ExecutionContext
+    from nous.judge.second_settings import SHUTTING_DOWN, SecondJudgeManager
+    from nous.judge.service import JudgeSet
+
+    agents = {mode: f"test-f118-boot3-{mode}-{uuid.uuid4().hex[:6]}" for mode in ("off", "settings")}
+
+    async def already_migrated(engine: Any) -> None:
+        async with engine.begin() as connection:
+            for agent_id in agents.values():
+                await connection.execute(
+                    text(
+                        "INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}') "
+                        "ON CONFLICT (id) DO NOTHING"
+                    ),
+                    {"id": agent_id},
+                )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    seen: dict[str, Any] = {}
+    boots = {
+        "off": _boot_settings(agents["off"], "off"),
+        "settings": _boot_settings(
+            agents["settings"],
+            "shadow",
+            outside_judge_settings_enabled=True,
+            outside_judge_second="jev",
+            TYPESAFE_API_KEY=JEV_KEY,
+        ),
+    }
+
+    async def scenario() -> None:
+        for mode, settings in boots.items():
+            components = await main.create_components(settings)
+            try:
+                dispatcher, runner = components["dispatcher"], components["runner"]
+                ctx = ExecutionContext(kind="interactive", session_id=f"boot3-{mode}")
+                current = judge_slot.current()
+                manager = components.get("judge_second")
+                seen[mode] = {
+                    "definitions": dispatcher.tool_definitions(),
+                    "offered": runner._offered_tools(
+                        ctx, "task", is_subtask=False, tool_filter=None, refuse_active=False
+                    ),
+                    "current": current,
+                    "manager": manager,
+                    "loaded": manager.loaded if manager is not None else None,
+                    "runtime": current.runtime() if current is not None else None,
+                }
+            finally:
+                await main.shutdown_components(components)
+            manager = seen[mode]["manager"]
+            if manager is not None:
+                seen[mode]["after"] = await manager.patch({"on": False}, confirmed=None, actor="owner")
+
+    try:
+        _run(scenario)
+    finally:
+
+        async def cleanup() -> None:
+            from nous.storage.database import Database
+
+            database = Database(boots["off"])
+            await database.connect()
+            try:
+                async with database.session() as session:
+                    for agent_id in agents.values():
+                        await session.execute(
+                            text("DELETE FROM heart.rubric_versions WHERE agent_id = :a"), {"a": agent_id}
+                        )
+                        await session.execute(
+                            text("DELETE FROM nous_system.judge_second_settings WHERE agent_id = :a"), {"a": agent_id}
+                        )
+                        await session.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+                    await session.commit()
+            finally:
+                await database.disconnect()
+
+        asyncio.run(cleanup())
+
+    off, on = seen["off"], seen["settings"]
+    assert off["manager"] is None and off["current"] is None
+    assert isinstance(on["manager"], SecondJudgeManager) and on["loaded"] is True
+    assert isinstance(on["current"], JudgeSet) and on["current"].second is not None
+    assert on["runtime"]["worker_alive"] is True and on["runtime"]["second"]["worker_alive"] is True
+    # No tool reads or changes the settings: the agent is offered exactly the tools of the judge off.
+    assert on["definitions"] == off["definitions"]
+    assert on["offered"] == off["offered"]
+    # After shutdown: no change is taken, and both judges are closed.
+    assert (on["after"].status, on["after"].body["error"]) == (503, SHUTTING_DOWN)
+    for service in (on["current"].primary, on["current"].second):
+        assert (
+            service.submit_decision(
+                uuid.uuid4(), grade="success", note=None, grader="agent", resolved_at=datetime.now(UTC)
+            )
+            is False
+        )

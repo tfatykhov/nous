@@ -765,7 +765,13 @@ async def _start_outside_judge(settings: Settings, *, database: Any, api_client:
         if service is None:
             return None
         service.start()
-        service = await _start_second_judge(settings, service, database=database)
+        if settings.outside_judge_settings_enabled:
+            # F118 PR 3: the second judge is the dashboard settings' (_start_second_settings), not the environment's.
+            from nous.judge.service import JudgeSet
+
+            service = JudgeSet(service, None)
+        else:
+            service = await _start_second_judge(settings, service, database=database)
         judge_slot.set_current(service)
         model = getattr(service.judge, "model", None)
         logger.info(
@@ -783,6 +789,45 @@ async def _start_outside_judge(settings: Settings, *, database: Any, api_client:
                 await service.close(timeout=0)
             except Exception as close_exc:
                 logger.debug("F118: closing the judge that did not start failed (%s)", type(close_exc).__name__)
+        return None
+
+
+async def _start_second_settings(settings: Settings, outside_judge: Any, *, database: Any) -> Any | None:
+    """F118 PR 3: with ``NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED`` on, the manager of the second judge's dashboard
+    settings, loaded: in shadow it runs the second judge the stored values and the server's ask for, in the running
+    ``JudgeSet``; with the mode off it holds no judge (the card can only remove a stored key). Off: None, and nothing
+    of it is imported. Fails open: any error is one WARNING with the class name, the manager is closed, a second judge
+    it started is closed, and the first judge runs alone (the card's routes then answer 503)."""
+    if not settings.outside_judge_settings_enabled:
+        return None
+    from nous.judge.service import JudgeSet
+
+    judges = outside_judge if isinstance(outside_judge, JudgeSet) else None
+    if settings.outside_judge_mode == "shadow" and judges is None:
+        logger.warning("F118: the outside judge is not running, so the second judge's settings are not available")
+        return None
+    manager = None
+    try:
+        from nous.judge.second_settings import SecondJudgeManager
+
+        manager = SecondJudgeManager(database, settings, judges)
+        await manager.load()
+        return manager
+    except Exception as exc:
+        logger.warning(
+            "F118: the second judge's settings did not start (%s); the first judge runs alone", type(exc).__name__
+        )
+        if manager is not None:
+            try:
+                await manager.close()
+            except Exception as close_exc:
+                logger.debug("F118: closing the settings manager failed (%s)", type(close_exc).__name__)
+        second = judges.replace_second(None) if judges is not None else None
+        if second is not None:
+            try:
+                await second.close(timeout=0)
+            except Exception as close_exc:
+                logger.debug("F118: closing the second judge failed (%s)", type(close_exc).__name__)
         return None
 
 
@@ -1536,6 +1581,9 @@ async def create_components(settings: Settings) -> dict:
     # resolve_decisions hands it each decision it resolved as success, partial or failure; nothing reads its verdicts
     # but GET /dashboard/outside-judge. Off: nothing is built. A failure to start leaves the process without it.
     outside_judge = await _start_outside_judge(settings, database=database, api_client=api_client)
+    # F118 PR 3: with NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED on, the second judge's dashboard settings, which start the
+    # second judge they ask for. Off: None, and the environment's second judge (above) is the one.
+    judge_second = await _start_second_settings(settings, outside_judge, database=database)
     runner.set_api_client(api_client)
     await runner.start()
 
@@ -2346,6 +2394,7 @@ async def create_components(settings: Settings) -> dict:
         "mcp_client": mcp_client,
         "autonomy": autonomy,
         "outside_judge": outside_judge,
+        "judge_second": judge_second,
     }
 
 
@@ -2528,6 +2577,15 @@ async def shutdown_components(components: dict) -> None:
     if runner:
         await runner.close()
 
+    # F118 PR 3: the second judge's settings take no more changes and finish the one in flight, before the judges
+    # close.
+    judge_second = components.get("judge_second")
+    if judge_second is not None:
+        try:
+            await judge_second.close()
+        except Exception as exc:
+            logger.warning("F118: the second judge's settings did not close cleanly (%s)", type(exc).__name__)
+
     # F118: no turn submits any more: the outside judge takes no more work, waits briefly for a verdict in flight and
     # cancels the rest, before the model client and the database close.
     outside_judge = components.get("outside_judge")
@@ -2668,6 +2726,7 @@ def build_app(settings: Settings) -> Starlette:
         mcp_client=_lazy_component(components, "mcp_client"),
         autonomy=_lazy_component(components, "autonomy"),
         dispatcher=_lazy_component(components, "dispatcher"),
+        judge_second=_lazy_component(components, "judge_second"),
     )
 
     if settings.mcp_enabled:
