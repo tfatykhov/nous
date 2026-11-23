@@ -217,6 +217,51 @@ class JevJudge:
         return output
 
 
+    async def probe(self, timeout: float) -> str:
+        """F118 PR 3, the card's "Check": one request with ``CHECK_BODY``'s fixed record (never stored text) to the
+        same address, header, timeout and size bound as a judgement. ``ok``: a 200 whose answer names the pinned
+        model; ``refused``: another status (429 and 5xx aside), or a 200 that names another model or cannot be read;
+        ``unreachable``: a timeout, a transport error, 429 or a 5xx. Never raises (a cancellation passes through);
+        a failure is one WARNING with the class name or the status, never a body, a header or an exception's text."""
+        try:
+            status, content = await asyncio.wait_for(self._send(check_body(self.model), timeout), timeout=timeout)
+        except (TimeoutError, httpx.TimeoutException):
+            logger.warning("F118: the second judge's check had no answer within %s s", timeout)
+            return "unreachable"
+        except AnswerTooLarge:
+            logger.warning("F118: the second judge's check answer was too large")
+            return "refused"
+        except Exception as exc:
+            logger.warning("F118: the second judge's check failed (%s)", type(exc).__name__)
+            return "unreachable"
+        if status == 429 or status >= 500:
+            logger.warning("F118: the second judge's check returned %d", status)
+            return "unreachable"
+        if status != 200:
+            logger.warning("F118: the second judge's check returned %d", status)
+            return "refused"
+        try:
+            answer = json.loads(content)
+        except Exception:
+            return "refused"
+        return "ok" if isinstance(answer, dict) and answer.get("model") == self.model else "refused"
+
+
+# F118 PR 3: the fixed record and question of the card's "Check". Nothing of the owner's is in it.
+CHECK_STATE = {"note": "connection check"}
+CHECK_QUESTION = "Is the state a connection check?"
+CHECK_CRITERIA = {"yes": "The state says it is a connection check.", "no": "The state does not say so."}
+
+
+def check_body(model: str) -> dict[str, Any]:
+    """The body of a check: the pinned model, the fixed record and one choice question with two fixed options."""
+    return {
+        "model": model,
+        "state": dict(CHECK_STATE),
+        "questions": {"check": {"type": "choice", "instructions": CHECK_QUESTION, "criteria": dict(CHECK_CRITERIA)}},
+    }
+
+
 def make_jev_judge(settings: Settings) -> JevJudge | None:
     """The second judge with ``TYPESAFE_API_KEY`` and ``NOUS_OUTSIDE_JUDGE_JEV_MODEL``, or None without a key."""
     key = settings.typesafe_api_key.strip()

@@ -78,11 +78,13 @@ def test_main_imports_and_builds_the_client_only_under_the_flag():
 def test_nothing_else_imports_the_client_and_only_transport_and_oauth_import_the_sdk():
     # nous/api/mcp_client_routes.py is the routes' module: only rest.py imports it, under the flag (next test).
     allowed = ("nous/main.py", "nous/api/mcp_client_routes.py")
+    # F118 PR 3: the second judge's settings seal its key with the credentials' sealing code, and import nothing else.
+    sealing_only = {"nous/judge/second_settings.py": "nous.mcp_client.secrets"}
     for path in (ROOT / "nous").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
         for _node, module in _imports_of(ast.parse(path.read_text(encoding="utf-8"))):
             if module.startswith("nous.mcp_client"):
-                assert rel in allowed or rel.startswith("nous/mcp_client/"), rel
+                assert rel in allowed or rel.startswith("nous/mcp_client/") or sealing_only.get(rel) == module, rel
             if module == "nous.api.mcp_client_routes":
                 assert rel == "nous/api/rest.py", rel
             if rel.startswith("nous/mcp_client/") and (module == "mcp" or module.startswith("mcp.")):
