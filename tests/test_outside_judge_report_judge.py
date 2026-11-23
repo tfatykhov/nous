@@ -4,7 +4,8 @@
 The report instructions are a second fixed text under their own version string, so the decision instructions and
 their version do not move. The report judge is the built-in judge with that text: one call labelled ``outside_judge``,
 no ``temperature`` and no ``thinking``, its answer checked against the report verdicts and labels. The record of a
-report keeps the finish check's labels as evidence, outside what the author wrote, and bounds every string.
+report keeps what the author wrote apart from the evidence and bounds every string; the finish checks' verdict, which
+the judge's is compared with, is neither in the record nor in the instructions.
 """
 
 from __future__ import annotations
@@ -76,7 +77,6 @@ def _report_record(items: list[dict[str, Any]] | None = None, **subject: Any) ->
                 "result": "login failed: the token was refused",
                 "at": 2.0,
             },
-            {"source": "finish_check", "verdict": "clean", "failed": None, "why": None, "at": 3.0},
         ],
     )
 
@@ -84,7 +84,7 @@ def _report_record(items: list[dict[str, Any]] | None = None, **subject: Any) ->
 # ---- the fixed report instructions --------------------------------------------------------------------------------
 
 # A new report text or schema needs a new version string and its fingerprint here (old verdicts keep theirs).
-REPORT_PINNED = {"rj-1": "91353803bf245898e1303cbcbb8b7b1c38becb7edd2a521679c582afee75a0c3"}
+REPORT_PINNED = {"rj-1": "540ff7e67a694c4ffb7f24c481c08d3901eac04dee74a8f67eb62a8e49ca5ded"}
 
 
 def test_the_report_instructions_change_only_with_their_version():
@@ -106,8 +106,13 @@ def test_the_report_schema_requires_only_the_verdict_and_lists_the_report_labels
     assert schema["properties"]["verdict"]["enum"] == list(instructions.REPORT_VERDICTS)
     assert schema["properties"]["labels"]["items"]["enum"] == list(instructions.REPORT_LABELS)
     assert schema["properties"]["labels"]["maxItems"] == instructions.MAX_LABELS
-    for word in (*instructions.REPORT_VERDICTS, *instructions.REPORT_LABELS, "finish_check", "outside_data"):
+    for word in (*instructions.REPORT_VERDICTS, *instructions.REPORT_LABELS, "outside_data"):
         assert word in instructions.REPORT_INSTRUCTIONS, word
+
+
+def test_the_report_instructions_do_not_describe_the_tasks_finish_check():
+    text = instructions.REPORT_INSTRUCTIONS
+    assert "finish_check" not in text and "clean" not in text and "flagged" not in text
 
 
 def test_the_report_instructions_give_no_example_record_or_verdict():
@@ -218,7 +223,7 @@ async def test_a_report_judge_that_hangs_is_a_timeout():
 # ---- the record of a report ---------------------------------------------------------------------------------------
 
 
-def test_the_finish_check_is_evidence_outside_what_the_author_wrote():
+def test_the_record_keeps_what_the_author_wrote_apart_from_the_evidence():
     document = json.loads(evidence.render_record(_report_record()))
     assert document["subject_kind"] == "task_report"
     assert set(document["written_by_author"]) == {"subject", "claim"}
@@ -227,31 +232,9 @@ def test_the_finish_check_is_evidence_outside_what_the_author_wrote():
         "grade": "completed",
         "note": "Fixed the link and deployed.",
     }
-    finish = [item for item in document["evidence"] if item["source"] == "finish_check"]
-    assert finish == [{"source": "finish_check", "verdict": "clean", "failed": None, "why": None}]
-    call = next(item for item in document["evidence"] if item["source"] == "tool_call")
+    [call] = document["evidence"]
+    assert call["source"] == "tool_call" and call["is_error"] is True
     assert call["outside_data"] == {"result": "login failed: the token was refused"}
-    assert call["is_error"] is True
-
-
-def test_the_finish_check_is_kept_first_when_the_cap_drops_items():
-    big = [
-        {
-            "source": "tool_call",
-            "tool": "read_file",
-            "status": "ok",
-            "is_error": False,
-            "args": "{}",
-            "result": "x" * 5000,
-            "at": float(i),
-        }
-        for i in range(40)
-    ]
-    flagged = {"source": "finish_check", "verdict": "flagged", "failed": "named_file_missing", "why": None, "at": 0.5}
-    record = _report_record([*big, flagged])
-    assert record.evidence_truncated and record.evidence_dropped > 0
-    assert any(item["source"] == "finish_check" and item["verdict"] == "flagged" for item in record.evidence)
-    assert len(evidence.render_record(record)) <= evidence.EVIDENCE_MAX_CHARS
 
 
 def test_long_findings_and_a_long_task_are_cut_head_and_tail():
@@ -260,10 +243,6 @@ def test_long_findings_and_a_long_task_are_cut_head_and_tail():
     assert len(record.subject["task"]) < 3000 and record.evidence_truncated
 
 
-def test_a_secret_in_the_task_or_the_finish_check_is_masked():
+def test_a_secret_in_the_task_is_masked():
     secret = "sk-ant-api03-" + "Z" * 40
-    record = _report_record(
-        [{"source": "finish_check", "verdict": "flagged", "failed": secret, "why": None, "at": 1.0}],
-        task=f"Use the key {secret} to deploy",
-    )
-    assert secret not in evidence.render_record(record)
+    assert secret not in evidence.render_record(_report_record(task=f"Use the key {secret} to deploy"))

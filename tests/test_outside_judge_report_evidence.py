@@ -4,8 +4,8 @@ A task is judged when it finished as ``completed`` with a valid report. Its clai
 by the agent, the summary as the note) at the moment the task was completed, and only what had happened by then is
 read: calls that had ended, ledger rows and child tasks as they stood. Calls and ledger rows are the task's own (its
 id on the row, or its own session for a row without one), never another task's or another agent's. Rows past a
-query's limit are counted and mark the record truncated. The finish check's labels are evidence, outside what the
-author wrote.
+query's limit are counted and mark the record truncated. The finish checks' verdict on the task, which the judge's
+is compared with, is kept in the counts and never in the record.
 """
 
 from __future__ import annotations
@@ -203,7 +203,7 @@ async def test_the_tasks_own_calls_up_to_its_completion_are_read(db, agent):
     built = await _build(db, agent, task_id)
     assert built.claim_at == DONE
     assert (built.claim.grader, built.claim.grade, built.claim.note) == ("agent", "completed", REPORT["summary"])
-    assert _sources(built) == ["read_file", "bash", "write_file", "finish_check"]
+    assert _sources(built) == ["read_file", "bash", "write_file"]
     assert built.counts == {
         "link": "own_session",
         "tool_calls": 3,
@@ -225,8 +225,6 @@ async def test_the_tasks_own_calls_up_to_its_completion_are_read(db, agent):
         "report_findings": "pricing.html now links to the new plan",
         "stated_confidence": 0.9,
     }
-    finish = record.evidence[-1]
-    assert dict(finish) == {"source": "finish_check", "verdict": "flagged", "failed": "effects_all_failed", "why": None}
     failed_call = record.evidence[1]
     assert failed_call["is_error"] is True
     assert failed_call["outside_data"] == {"result": "login failed: the token was refused"}
@@ -263,7 +261,6 @@ async def test_ledger_rows_and_child_tasks_are_read_as_they_stood_at_the_complet
         ("ledger", "write_file", "success"),
         ("ledger", "send_email", evidence.NOT_FINISHED),
         ("spawned_task", None, evidence.NOT_FINISHED),
-        ("finish_check", None, None),
     ]
     pending = built.record.evidence[1]
     assert pending["outside_data"] == {"result": None}
@@ -286,7 +283,7 @@ async def test_a_task_in_a_shared_session_reads_only_its_tagged_rows(db, agent):
 
     built = await _build(db, agent, task_id)
     assert built.counts["link"] == "shared_session"
-    assert _sources(built) == ["bash", "finish_check"]
+    assert _sources(built) == ["bash"]
     assert (built.counts["tool_calls"], built.counts["ledger_rows"]) == (1, 0)
 
 
@@ -300,7 +297,7 @@ async def test_a_task_in_a_shared_session_without_tagged_rows_has_nothing_to_jud
     assert built.counts["tool_calls"] == 0 and built.counts["finish_check"] == "flagged"
 
 
-async def test_the_report_call_and_the_finish_check_alone_are_not_evidence(db, agent):
+async def test_the_report_call_alone_is_not_evidence(db, agent):
     task_id = await _task(db, agent)
     writer, recorder = _recorder(db, agent)
     _call(recorder, own_session(task_id), "submit_final_report", T0 + timedelta(seconds=10), subtask_id=task_id)
@@ -310,7 +307,20 @@ async def test_the_report_call_and_the_finish_check_alone_are_not_evidence(db, a
     assert (built.counts["tool_calls"], built.counts["bookkeeping"]) == (0, 1)
 
 
-async def test_without_a_finish_check_there_is_no_finish_check_item(db, agent):
+async def test_the_record_never_holds_the_tasks_finish_check(db, agent):
+    """The finish checks' verdict is what the judge's is compared with: it is kept in the counts, never in the record."""
+    task_id = await _task(db, agent)  # finish check: flagged, effects_all_failed
+    writer, recorder = _recorder(db, agent)
+    _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id)
+    await writer.drain(10)
+    built = await _build(db, agent, task_id)
+    rendered = evidence.render_record(built.record)
+    assert built.counts["finish_check"] == "flagged"
+    assert "effects_all_failed" not in rendered and "flagged" not in rendered and "finish_check" not in rendered
+    assert [item["source"] for item in json.loads(rendered)["evidence"]] == ["tool_call"]
+
+
+async def test_without_a_finish_check_the_counts_hold_none(db, agent):
     task_id = await _task(db, agent, metadata={})
     writer, recorder = _recorder(db, agent)
     _call(recorder, own_session(task_id), "bash", T0 + timedelta(seconds=10), subtask_id=task_id)
@@ -363,7 +373,7 @@ async def test_rows_past_a_limit_are_counted_and_mark_the_record_truncated(db, a
     assert built.counts["tool_calls"] == 5 and built.counts["over_limit"] == 3
     assert built.record.evidence_truncated and built.record.evidence_dropped == 3
     assert built.counts["dropped"] == 3 and built.counts["truncated"] is True
-    assert _sources(built) == ["read_file", "read_file", "finish_check"]
+    assert _sources(built) == ["read_file", "read_file"]
 
 
 async def test_the_record_is_the_same_whenever_it_is_read(db, agent):

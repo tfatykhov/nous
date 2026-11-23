@@ -21,8 +21,9 @@ Without a session, or without any other row, there is nothing to judge, and neit
 be rendered.
 
 ``build_report_evidence`` reads a finished task's record the same way, as it stood when the task was completed: the
-task as it was set and its report (the claim), the task's own calls, ledger rows and child tasks, and the finish
-check's labels as one item. Only a task finished as ``completed`` with a report is judged.
+task as it was set and its report (the claim), and the task's own calls, ledger rows and child tasks. The finish
+checks' verdict on the task is kept with the counts, not in the record. Only a task finished as ``completed`` with a
+report is judged.
 """
 
 from __future__ import annotations
@@ -57,8 +58,6 @@ LEFT_OUT = "[text left out]"
 NOT_RENDERED = "record_not_rendered"
 # The top-level keys of a rendered record.
 RECORD_KEYS = frozenset({"subject_kind", "written_by_author", "evidence", "evidence_truncated", "evidence_dropped"})
-# The source of the item that holds a finished task's finish check (its verdict labels): kept first under the cap.
-FINISH_CHECK = "finish_check"
 
 
 class RenderError(Exception):
@@ -77,7 +76,7 @@ def _side_effect(item: Mapping[str, Any]) -> bool:
 
 
 def _priority(item: Mapping[str, Any]) -> int:
-    if item.get("is_error") or item.get("source") == FINISH_CHECK:
+    if item.get("is_error"):
         return 0
     return 1 if _side_effect(item) else 2
 
@@ -86,11 +85,6 @@ def _render_item(item: Mapping[str, Any]) -> dict[str, Any]:
     """One raw item as the judge reads it, every string bounded and redacted."""
     source = item.get("source")
     out: dict[str, Any] = {"source": source}
-    if source == FINISH_CHECK:  # the harness's own labels, not the author's
-        out["verdict"] = _bounded(item.get("verdict"), LABEL_CAP)
-        out["failed"] = _bounded(item.get("failed"), LABEL_CAP)
-        out["why"] = _bounded(item.get("why"), LABEL_CAP)
-        return out
     if source == "spawned_task":
         out["status"] = _bounded(item.get("status"), LABEL_CAP)
         out["finish_check"] = _bounded(item.get("finish_check"), LABEL_CAP)
@@ -506,7 +500,8 @@ class ReportEvidence:
     """What was found for one finished task: the bounded record (None: nothing to judge, ``skip_label`` says why), the
     claim (the report, graded ``completed`` by the agent), when it was made (the task's completion) and the counts
     kept on the verdict row: those of ``DecisionEvidence``, ``link`` being ``own_session`` or ``shared_session``, and
-    ``finish_check``, the finish check's verdict label (None without one)."""
+    ``finish_check``, the finish checks' verdict on the task (None without one). That verdict is what the judge's is
+    compared with, so it is on the row only, never in the record."""
 
     record: JudgeInput | None
     counts: dict[str, Any]
@@ -523,23 +518,10 @@ def _assemble_report(
     return record, len(render_record(record))
 
 
-def _text_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def _finish_check_item(value: Any, at: datetime) -> dict[str, Any] | None:
-    """The finish check record (``metadata.finish_check``) as one evidence item of labels, or None without one."""
-    if not isinstance(value, Mapping) or not isinstance(value.get("verdict"), str):
-        return None
-    failed = value.get("failed")
-    names = [name for name in failed if isinstance(name, str)] if isinstance(failed, list) else []
-    return {
-        "source": FINISH_CHECK,
-        "verdict": value["verdict"],
-        "failed": ", ".join(names) or None,
-        "why": _text_or_none(value.get("why")),
-        "at": at.timestamp(),
-    }
+def _finish_check_verdict(value: Any) -> str | None:
+    """The verdict of the finish check record (``metadata.finish_check``), or None without one."""
+    verdict = value.get("verdict") if isinstance(value, Mapping) else None
+    return verdict if isinstance(verdict, str) else None
 
 
 async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: UUID) -> ReportEvidence | None:
@@ -548,8 +530,8 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
     cancelled or blocked task is never judged. Read-only, and the same whenever it is read: a call counts once it had
     ended by the completion, a ledger row or a child task once it had started, and one that finished later is shown
     as ``NOT_FINISHED`` without its result. The task's own rows are read (``_TASK_ROWS``); the calls that only hand in
-    the report or record decisions are left out and counted; the finish check's labels are one item. Without a call,
-    a ledger row or a child task there is nothing to judge (the finish check alone is not what the task ran), and
+    the report or record decisions are left out and counted. The finish checks' verdict on the task is kept in the
+    counts only, never in the record. Without a call, a ledger row or a child task there is nothing to judge, and
     neither is there when the record cannot be rendered (``NOT_RENDERED``)."""
     row = (await session.execute(_TASK, {"agent": agent_id, "id": task_id})).one_or_none()
     if row is None or row.status != "completed" or row.final_outcome != "completed" or row.completed_at is None:
@@ -560,7 +542,6 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
         return None
     claim = Claim(grader=REPORT_CLAIM_GRADER, grade=REPORT_CLAIM_GRADE, note=summary)
     claim_at = row.completed_at
-    finish = _finish_check_item(row.finish_check, claim_at)
     own = None if row.shared_session else f"subtask-{task_id.hex[:8]}"
     counts: dict[str, Any] = {
         "link": "own_session" if own else "shared_session",
@@ -572,7 +553,7 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
         "dropped": 0,
         "chars": 0,
         "truncated": False,
-        "finish_check": None if finish is None else finish["verdict"],
+        "finish_check": _finish_check_verdict(row.finish_check),
     }
     window = {"agent": agent_id, "task": task_id, "own": own, "since": row.created_at - CLOCK_SLACK, "until": claim_at}
     calls, calls_bookkeeping = (await session.execute(_TASK_CALL_COUNTS, window)).one()
@@ -629,8 +610,6 @@ async def build_report_evidence(session: AsyncSession, agent_id: str, task_id: U
                     "at": task.created_at.timestamp(),
                 }
             )
-    if finish is not None:
-        items.append(finish)
 
     findings = report.get("findings") if isinstance(report.get("findings"), list) else []
     stated = report.get("confidence") if report.get("confidence_reported") is True else None
