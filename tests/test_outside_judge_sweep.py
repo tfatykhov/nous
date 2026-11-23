@@ -452,7 +452,7 @@ async def test_with_two_judges_only_the_first_sweeps(db, agent):
     assert [record.subject_id for record in first_reports.records] == [task_id]
     assert second_judge.records == []
     numbers = both.sweep_numbers()
-    assert numbers["second"] is None and numbers["queued_reports"] == 1
+    assert numbers == first.sweep_numbers() and "second" not in numbers and numbers["queued_reports"] == 1
 
 
 # ---- the claim ------------------------------------------------------------------------------------------------------

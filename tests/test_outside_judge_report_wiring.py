@@ -9,6 +9,7 @@ nothing is built whatever the setting says. The tools a turn is offered do not c
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +106,8 @@ def test_the_second_judge_gets_no_report_judge(monkeypatch):
     second = main._build_second_judge(settings, database=object())
     assert second is not None and second.judge.name == "jev"
     assert second.report_judge is None and second.sweep_numbers() is None  # no report and no sweep
-    assert second.submit_report(uuid.uuid4(), claimed_at=None) is False
+    assert second.submit_report(uuid.uuid4(), claimed_at=datetime.now(UTC)) is False
+    assert second.runtime()["dropped"] == 0 and second.idle  # nothing queued, nothing counted
 
 
 @pytest.mark.postgres_only

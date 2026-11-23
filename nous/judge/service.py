@@ -602,12 +602,8 @@ class JudgeSet:
         return queued
 
     def sweep_numbers(self) -> dict[str, Any] | None:
-        """The first judge's sweep numbers, with the second judge's under ``second`` when there is one."""
-        second = self.second
-        numbers = _sweep_numbers_of(self.primary)
-        if numbers is None or second is None:
-            return numbers
-        return {**numbers, "second": _sweep_numbers_of(second)}
+        """The first judge's sweep numbers (the second judge's service does not sweep)."""
+        return _sweep_numbers_of(self.primary)
 
     async def close(self, timeout: float = CLOSE_TIMEOUT_SECONDS) -> None:
         """Close every judge at once (``OutsideJudge.close``); one that raises does not keep another open."""
