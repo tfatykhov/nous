@@ -4,6 +4,9 @@ services:
     container_name: nous-agent
     # Reap orphaned children (git, chrome, sleep ...): python as PID 1 never does, and they piled up as zombies.
     init: true
+    # Time to stop before Docker kills the process: at shutdown Nous lets requests in flight finish (an outside
+    # judge's request can take up to 15 s), which Docker's default of 10 s would cut off.
+    stop_grace_period: 30s
     # F100 browser_task: the egress filter (iptables owner match on the nous-browser user) needs NET_ADMIN.
     # Without it the browser task refuses to start.
     cap_add:

@@ -1,6 +1,6 @@
 """F118 task reports beside the second judge's dashboard settings: a second judge the settings manager swaps in gets no
-report and no swept subject, and the first judge's sweep runs on across the swap (real Postgres, stub first judges, the
-real second judge with a transport that fails the test if a request is made).
+report and runs its own hourly pass of decisions, and the first judge's sweep runs on across the swap (real Postgres,
+stub first judges, the real second judge with a transport that refuses every request).
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ async def _until(predicate, seconds: float = 10.0) -> None:
         await asyncio.sleep(0.02)
 
 
-async def test_a_second_judge_swapped_in_by_the_settings_gets_no_report_and_no_swept_subject(db, agent):
+async def test_a_second_judge_swapped_in_by_the_settings_gets_no_report_and_sweeps_decisions_on_its_own(db, agent):
     settings = Settings(
         _env_file=None,
         agent_id=agent,
@@ -157,8 +157,10 @@ async def test_a_second_judge_swapped_in_by_the_settings_gets_no_report_and_no_s
         assert swapped.status == 200
         second = judges.second
         assert isinstance(second, OutsideJudge) and second is not first_second
-        for service in (first_second, second):  # the second judge's service judges no report and does not sweep
-            assert service.report_judge is None and service.sweep_numbers() is None and service._sweeper is None
+        for service in (first_second, second):  # the second judge's service judges no report and has its own pass
+            assert service.report_judge is None and service.sweep_numbers() is not None
+        assert first_second._closed and first_second._sweeper.done()  # the replaced judge's pass stopped with it
+        assert second._sweeper is not None and not second._sweeper.done()
         assert primary._sweeper is sweeper and not sweeper.done()  # the first judge's sweep runs on across the swap
 
         task_id = await _task(db, agent)
@@ -169,9 +171,15 @@ async def test_a_second_judge_swapped_in_by_the_settings_gets_no_report_and_no_s
         assert await primary.sweep_once() == 1
         await _until(lambda: primary.idle)
         assert second.idle and second.runtime() == {"queued": 0, "dropped": 0, "over_cap": 0, "worker_alive": True}
+        # The second judge's own pass takes the same decision, never the report; it waits out the settle delay in the
+        # second judge's line, so nothing is sent before the service closes below.
+        assert await second.sweep_once() == 1 and not second.idle
         assert [record.subject_id for record in reports.records] == [task_id]
         assert [record.subject_id for record in decisions.records] == [decision_id]
         assert judges.sweep_numbers() == primary.sweep_numbers()
+        second_numbers = judges.second_sweep_numbers()
+        assert second_numbers == second.sweep_numbers() and second_numbers["queued_decisions"] == {"a2ui": 1}
+        assert second_numbers["queued_reports"] == 0
     finally:
         await manager.close()
         old = judges.replace_second(None)

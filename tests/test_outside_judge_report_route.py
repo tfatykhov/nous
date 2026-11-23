@@ -400,6 +400,80 @@ async def test_with_reports_on_the_answer_adds_the_report_and_sweep_numbers(tmp_
     assert body["cost"]["today"] == {"calls": 7, "cap": 7}
 
 
+class _Second(_Stub):
+    def __init__(self) -> None:
+        self.name, self.version, self.model = "jev", "jq-3:jev-1.14.0", "jev-1.14.0"
+
+
+def _two_judges(db, settings: Settings, *, second_sweeps: bool) -> Any:
+    from nous.judge.service import JudgeSet, OutsideJudge
+
+    first = OutsideJudge(db, settings, _Stub("stub-9"), report_judge=_Stub("stub-r9"))
+    # As main.py and the settings manager build the second judge's service: no report judge, its own limit.
+    second = OutsideJudge(db, settings, _Second(), daily_calls=3, sweep=second_sweeps)
+    return JudgeSet(first, second)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("second_sweeps", [True, False])
+async def test_with_a_second_judge_the_sweep_block_adds_its_own_pass_only_when_it_runs_one(
+    tmp_path, db, agent, second_sweeps
+):
+    over = {
+        "agent_id": agent,
+        "outside_judge_mode": "shadow",
+        "outside_judge_daily_calls": 7,
+        "outside_judge_reports_enabled": True,
+    }
+    both = _two_judges(db, Settings(_env_file=None, **over), second_sweeps=second_sweeps)
+    if second_sweeps:
+        assert await both.second.sweep_once() == 0  # one pass that found nothing
+    judge_slot.set_current(both)
+    try:
+        response = await _get(_app(tmp_path, db, **over), "/dashboard/outside-judge")
+    finally:
+        await both.close()
+    body = response.json()
+    assert response.status_code == 200 and {"reports", "second", "between_judges"} <= set(body)
+    assert set(body["second"]) == {"judge", "version", "model", "decisions", "cost", "disagreements"}
+    sweep = body["sweep"]
+    assert sweep["runtime"] == both.primary.sweep_numbers()  # the first judge's own numbers, unchanged
+    if not second_sweeps:
+        assert set(sweep) == {"agreement", "runtime"}
+        return
+    assert set(sweep) == {"agreement", "runtime", "second_runtime"}
+    second_runtime = sweep["second_runtime"]
+    keys = {"passes", "queued_decisions", "queued_reports", "held_at_half_limit", "failed", "last_pass_at"}
+    assert set(second_runtime) == set(sweep["runtime"]) == keys
+    assert (second_runtime["passes"], sweep["runtime"]["passes"]) == (1, 0)
+    assert second_runtime["last_pass_at"] is not None and second_runtime["queued_reports"] == 0
+
+
+@pytest.mark.postgres_only
+async def test_when_the_second_judges_pass_numbers_cannot_be_read_only_they_are_left_out(
+    tmp_path, db, agent, monkeypatch, caplog
+):
+    over = {"agent_id": agent, "outside_judge_mode": "shadow", "outside_judge_reports_enabled": True}
+    both = _two_judges(db, Settings(_env_file=None, **over), second_sweeps=True)
+
+    def broken() -> Any:
+        raise RuntimeError("the second numbers broke")
+
+    monkeypatch.setattr(both.second, "sweep_numbers", broken)
+    judge_slot.set_current(both)
+    try:
+        with caplog.at_level(logging.WARNING):
+            response = await _get(_app(tmp_path, db, **over), "/dashboard/outside-judge")
+    finally:
+        await both.close()
+    body = response.json()
+    assert response.status_code == 200 and "reports" in body and "second" in body
+    assert set(body["sweep"]) == {"agreement", "runtime"} and body["sweep"]["runtime"] == both.primary.sweep_numbers()
+    read = [record.getMessage() for record in caplog.records if "sweep numbers" in record.getMessage()]
+    assert read == ["F118: a judge's sweep numbers were not read (RuntimeError)"]
+    assert "the second numbers broke" not in caplog.text
+
+
 @pytest.mark.postgres_only
 async def test_with_reports_on_and_no_judge_running_the_report_blocks_name_the_built_in_judge(tmp_path, db, agent):
     from nous.judge.instructions import REPORT_INSTRUCTION_VERSION

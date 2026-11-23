@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  CHECK_WORDS, HELP, NOT_SAVED, changeSecond, checkSecond, confirmation, dayText, keyLine, limitRule, mostText, parseLimit,
+  CHECK_WORDS, HELP, INTRO, NOT_SAVED, changeSecond, checkSecond, confirmation, dayText, keyLine, limitRule, mostText, parseLimit,
   readSecond, refusalText, removeKey, removeQuestion, saveKey, sourceText, statusText, statusTone,
   type SecondState,
 } from './outside_judge';
@@ -83,8 +83,14 @@ describe('the other words', () => {
       ok: 'Jev answered', refused: 'Jev refused the key or the model', unreachable: 'Jev could not be reached',
     });
   });
-  it('says that a change applies at once and what waits in line is skipped', () => {
-    expect(HELP).toBe('A change applies at once. Decisions waiting in line for Jev when you save are skipped.');
+  it('says that a change applies at once and what waits in line is dropped from it', () => {
+    expect(HELP).toBe('A change applies at once. Decisions waiting in line for Jev when you save are dropped from the line.');
+  });
+  it('says what Jev is without naming which decisions are sent (the confirmation says that)', () => {
+    expect(INTRO).toBe(
+      "Jev, a model of the company TypeSafe, gives a second opinion on Nous's decisions, beside Nous's own judge. " +
+        'Its grades are kept for comparison and change nothing.',
+    );
   });
   it.each([
     ['40', 100, 40], ['0', 100, 0], [' 7 ', 100, 7], ['100', 100, 100], ['101', 100, null], ['-1', 100, null],

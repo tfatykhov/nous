@@ -442,12 +442,12 @@ async def test_a_service_without_a_report_judge_sweeps_nothing_unless_it_is_give
     assert given.sweep_numbers()["queued_reports"] == 0
 
 
-async def test_with_two_judges_only_the_first_sweeps(db, agent):
+async def test_a_second_service_built_without_the_sweep_flag_does_not_sweep(db, agent):
     await _decision(db, agent, "external")
     task_id = await _task(db, agent)
     first, _d, first_reports = _service(db, agent)
     second_judge = StubJudge(name="second", version="j1")
-    second = OutsideJudge(db, _settings(agent), second_judge, **FAST)  # as main.py builds it: no report judge
+    second = OutsideJudge(db, _settings(agent), second_judge, **FAST)  # no report judge and no sweep=True
     both = JudgeSet(first, second)
     first.start()
     second.start()
@@ -459,6 +459,7 @@ async def test_with_two_judges_only_the_first_sweeps(db, agent):
     assert second_judge.records == []
     numbers = both.sweep_numbers()
     assert numbers == first.sweep_numbers() and "second" not in numbers and numbers["queued_reports"] == 1
+    assert both.second_sweep_numbers() is None
 
 
 # ---- the claim ------------------------------------------------------------------------------------------------------

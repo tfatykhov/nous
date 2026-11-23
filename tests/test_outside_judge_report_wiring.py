@@ -2,8 +2,9 @@
 
 ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` defaults to false. With it off, the judge in shadow is built exactly as before:
 no report judge and no sweep. With it on (and the mode shadow), the first judge's service gets the built-in report
-judge over the same client and model, and runs the sweep; the second judge's service gets neither. With the mode off
-nothing is built whatever the setting says. The tools a turn is offered do not change.
+judge over the same client and model, and runs the sweep; the second judge's service gets no report judge and runs its
+own sweep of decisions. With the mode off nothing is built whatever the setting says. The tools a turn is offered do
+not change.
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ import nous.main as main
 from nous import judge as judge_slot
 from nous.config import Settings
 from nous.judge import slot
+from nous.judge.jev_judge import TIMEOUT_SECONDS
 from nous.judge.model_judge import BackgroundModelJudge, BackgroundModelReportJudge
-from nous.judge.service import OutsideJudge
+from nous.judge.service import CLOSE_TIMEOUT_SECONDS, OutsideJudge, call_bound
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,6 +63,7 @@ def test_with_reports_off_the_judge_is_built_as_before(monkeypatch):
     )
     assert isinstance(built, OutsideJudge) and isinstance(built.judge, BackgroundModelJudge)
     assert built.report_judge is None and built.sweep_numbers() is None
+    assert built._close_timeout == CLOSE_TIMEOUT_SECONDS  # the first judge's close waits as before
 
 
 def test_with_reports_on_the_first_judge_gets_the_report_judge_and_the_sweep(monkeypatch):
@@ -94,18 +97,23 @@ def test_with_the_mode_off_nothing_is_built_whatever_the_setting(monkeypatch):
     assert main._build_outside_judge(settings, database=object(), api_client=object()) is None
 
 
-def test_the_second_judge_gets_no_report_judge(monkeypatch):
+@pytest.mark.parametrize("reports", [True, False])
+def test_the_second_judge_gets_no_report_judge_and_its_own_sweep_with_the_setting(monkeypatch, reports):
     monkeypatch.setattr(slot, "PROVIDERS", {})
     settings = Settings(
         _env_file=None,
         outside_judge_mode="shadow",
-        outside_judge_reports_enabled=True,
+        outside_judge_reports_enabled=reports,
         outside_judge_second="jev",
         TYPESAFE_API_KEY="ts-wiring-" + "R7" * 16,
     )
     second = main._build_second_judge(settings, database=object())
     assert second is not None and second.judge.name == "jev"
-    assert second.report_judge is None and second.sweep_numbers() is None  # no report and no sweep
+    assert second.report_judge is None  # no report
+    # Its own sweep of decisions with the setting on (built, not started: the numbers say whether it is on).
+    assert (second.sweep_numbers() is not None) is reports
+    # Its close waits out a request it has sent, so the request ends with its row.
+    assert second._close_timeout == call_bound(TIMEOUT_SECONDS) > CLOSE_TIMEOUT_SECONDS
     assert second.submit_report(uuid.uuid4(), claimed_at=datetime.now(UTC)) is False
     assert second.runtime()["dropped"] == 0 and second.idle  # nothing queued, nothing counted
 
@@ -187,10 +195,10 @@ def test_with_reports_on_the_tools_are_those_of_the_judge_off_and_the_sweep_stop
 
 
 @pytest.mark.postgres_only
-def test_with_reports_and_the_second_judges_settings_on_only_the_first_judge_judges_reports_and_sweeps(monkeypatch):
+def test_with_reports_and_the_second_judges_settings_on_only_the_first_judge_judges_reports_and_both_sweep(monkeypatch):
     """Both new settings on: the first judge (in the settings' JudgeSet) has the report judge and the sweep; the
-    second judge the settings manager starts has neither. At shutdown the manager closes before the judges, and the
-    first judge's sweep stops with them."""
+    second judge the settings manager starts has no report judge and its own sweep of decisions. At shutdown the
+    manager closes before the judges, and both judges' sweeps stop with them."""
     import asyncio
 
     from test_outside_judge_wiring import JEV_KEY
@@ -231,6 +239,7 @@ def test_with_reports_and_the_second_judges_settings_on_only_the_first_judge_jud
                 manager=components.get("judge_second"),
                 sweeping=not current.primary._sweeper.done(),
                 second=current.second,
+                second_sweeping=current.second is not None and not current.second._sweeper.done(),
                 offered=components["runner"]._offered_tools(
                     ctx, "task", is_subtask=False, tool_filter=None, refuse_active=False
                 ),
@@ -263,9 +272,10 @@ def test_with_reports_and_the_second_judges_settings_on_only_the_first_judge_jud
     assert isinstance(seen["manager"], SecondJudgeManager) and isinstance(current, JudgeSet)
     assert isinstance(current.primary.report_judge, BackgroundModelReportJudge) and seen["sweeping"] is True
     assert current.report_judge is current.primary.report_judge
-    assert isinstance(second, OutsideJudge) and second.report_judge is None and second.sweep_numbers() is None
+    assert isinstance(second, OutsideJudge) and second.report_judge is None and second.sweep_numbers() is not None
+    assert seen["second_sweeping"] is True
     assert not [tool for tool in seen["offered"] if "judge" in str(tool)]
-    # Shut down: the manager takes no more changes, the first judge's sweep stopped and both judges take no report.
+    # Shut down: the manager takes no more changes, both judges' sweeps stopped and both judges take no report.
     assert (seen["after"].status, seen["after"].body["error"]) == (503, SHUTTING_DOWN)
-    assert current.primary._sweeper.done()
+    assert current.primary._sweeper.done() and second._closed and second._sweeper.done()
     assert current.submit_report(uuid.uuid4(), claimed_at=datetime.now(UTC)) is False

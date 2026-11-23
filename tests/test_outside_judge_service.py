@@ -559,7 +559,10 @@ async def test_close_cancels_a_call_in_flight_and_writes_nothing(db, agent):
 
 async def test_close_waits_for_a_call_that_ends_within_its_time(db, agent):
     class Slow(StubJudge):
+        started = False
+
         async def grade(self, record: JudgeInput, *, timeout: float, max_calls: int | None = None) -> JudgeOutput:
+            self.started = True
             await asyncio.sleep(0.2)
             return await super().grade(record, timeout=timeout, max_calls=max_calls)
 
@@ -567,7 +570,7 @@ async def test_close_waits_for_a_call_that_ends_within_its_time(db, agent):
     service = OutsideJudge(db, _settings(agent), stub, **FAST)
     service.start()
     _submit(service, await _decision(db, agent))
-    await _until(lambda: service.busy)
+    await _until(lambda: stub.started)  # the call has begun (one not begun when close starts is not made)
     await service.close(timeout=5.0)
     assert len(await _rows(db, agent)) == 1
 
@@ -1107,7 +1110,7 @@ async def test_the_second_judges_answer_is_stored_under_its_name_and_version(db,
     [row] = await _rows(db, agent)
     assert {k: row[k] for k in ("judge_name", "judge_version", "model", "status", "verdict", "labels", "reason")} == {
         "judge_name": "jev",
-        "judge_version": "jq-2:jev-1.14.0",
+        "judge_version": service.judge.version,
         "model": "jev-1.14.0",
         "status": "ok",
         "verdict": "partial",

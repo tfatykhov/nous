@@ -714,10 +714,11 @@ def _build_outside_judge(settings: Settings, *, database: Any, api_client: Any) 
 
 def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:
     """F118: register the second judge (``NOUS_OUTSIDE_JUDGE_SECOND=jev``) and build its own service, with the
-    judge's timeout and its daily limit; the caller starts it. None, with one WARNING, when ``TYPESAFE_API_KEY`` is
-    empty. Its key and model are read by the provider (``jev_judge.make_jev_judge``), its limit here."""
+    judge's timeout and its daily limit, and its own hourly pass of decisions when NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED
+    is on; the caller starts it. None, with one WARNING, when ``TYPESAFE_API_KEY`` is empty. Its key and model are read
+    by the provider (``jev_judge.make_jev_judge``), its limit here."""
     from nous.judge.jev_judge import NAME, TIMEOUT_SECONDS, register_jev_judge
-    from nous.judge.service import OutsideJudge
+    from nous.judge.service import OutsideJudge, call_bound
     from nous.judge.slot import PROVIDERS
 
     register_jev_judge()
@@ -728,7 +729,13 @@ def _build_second_judge(settings: Settings, *, database: Any) -> Any | None:
         )
         return None
     return OutsideJudge(
-        database, settings, judge, timeout_seconds=TIMEOUT_SECONDS, daily_calls=settings.outside_judge_daily_calls
+        database,
+        settings,
+        judge,
+        timeout_seconds=TIMEOUT_SECONDS,
+        daily_calls=settings.outside_judge_daily_calls,
+        sweep=bool(settings.outside_judge_reports_enabled),
+        close_timeout=call_bound(TIMEOUT_SECONDS),  # at shutdown a request it has sent ends with its row
     )
 
 
