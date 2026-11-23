@@ -23,12 +23,14 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 import jsonschema
 import referencing
 import referencing.exceptions
 
+from nous import judge as outside_judge  # F118: the running judge's accessor only (nous/judge/__init__.py)
 from nous.api.execution_context import ExecutionContext
 from nous.api.subtask_tools import (
     SubtaskReportCollector,
@@ -511,6 +513,7 @@ async def execute_hardened(
                         subtask, session_id, last_result.report,
                         runner=runner, settings=settings,
                     )
+                    _submit_report_to_outside_judge(subtask, settings)
 
             duration_ms = int((time.monotonic() - started_monotonic) * 1000)
             if emit_event:
@@ -631,6 +634,28 @@ def _check_report_claims(
     except Exception as exc:
         logger.warning(
             "F113: the report claim check of subtask %s failed (%s)",
+            subtask.id.hex[:8], type(exc).__name__,
+        )
+
+
+def _submit_report_to_outside_judge(subtask, settings) -> None:
+    """F118 (shadow): hand a validated report, once its completed row is written, to the outside judge.
+
+    Only with ``NOUS_OUTSIDE_JUDGE_REPORTS_ENABLED`` and a judge running (``nous.judge.current()``, built only in
+    shadow). Hands over the task's id and the time; the judge reads the task's row and its calls later, and judges
+    only a task whose row says it finished as completed. Synchronous (a queue put), so the caller adds no await and
+    no delay; it never reads or changes the row, the outcome, the event or the notification. Any error is logged at
+    WARNING by its class name only and swallowed. ``getattr`` with False keeps settings without the field off.
+    """
+    if not getattr(settings, "outside_judge_reports_enabled", False):
+        return
+    try:
+        service = outside_judge.current()
+        if service is not None:
+            service.submit_report(subtask.id, claimed_at=datetime.now(UTC))
+    except Exception as exc:
+        logger.warning(
+            "F118: the report of subtask %s was not handed to the outside judge (%s)",
             subtask.id.hex[:8], type(exc).__name__,
         )
 
