@@ -175,3 +175,27 @@ def test_every_second_judge_setting_has_a_row_in_the_environment_reference():
     text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
     for name, default in SECOND_DEFAULTS.items():
         assert _reference_row(name, default) in text, name
+
+
+# ---- the second judge's settings on the dashboard (PR 3) -----------------------------------------------------------
+
+SETTINGS_FLAG = "NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED"
+
+
+def test_the_dashboard_settings_are_off_by_default():
+    assert Settings(_env_file=None).outside_judge_settings_enabled is False
+
+
+def test_the_dashboard_settings_switch_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv(SETTINGS_FLAG, "true")
+    assert Settings(_env_file=None).outside_judge_settings_enabled is True
+
+
+def test_compose_passes_the_dashboard_settings_switch_with_its_default():
+    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert f"- {SETTINGS_FLAG}=${{{SETTINGS_FLAG}:-false}}" in text
+
+
+def test_the_dashboard_settings_switch_has_a_row_in_the_environment_reference():
+    text = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
+    assert _reference_row(SETTINGS_FLAG, "false") in text

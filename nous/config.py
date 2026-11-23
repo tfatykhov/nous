@@ -1091,6 +1091,11 @@ class Settings(BaseSettings):
     outside_judge_second: Literal["", "jev"] = ""
     typesafe_api_key: str = Field("", validation_alias="TYPESAFE_API_KEY")
     outside_judge_jev_model: str = "jev-1.14.0"
+    # F118 PR 3: the second judge's settings on the dashboard (its switch, model, daily limit and API key, stored in
+    # nous_system.judge_second_settings, the key sealed with NOUS_MCP_CLIENT_KEY_FILE's key). Off: the table is never
+    # read and the three settings above decide, as before. On, with the mode shadow: a stored value applies over the
+    # server's, each change at once, and the daily limit is never above NOUS_OUTSIDE_JUDGE_DAILY_CALLS.
+    outside_judge_settings_enabled: bool = False
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",
