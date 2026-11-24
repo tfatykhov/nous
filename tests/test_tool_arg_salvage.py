@@ -353,15 +353,17 @@ class TestSchemaTypeValidation:
         assert not received  # handler never ran
 
     @pytest.mark.asyncio
-    async def test_scalar_for_scalar_is_left_alone(self):
+    async def test_scalar_for_scalar_is_not_rejected(self):
         """pydantic's lax mode turns "0.9" into 0.9. Rejecting it here would
-        fail calls that succeed today -- the check must stay fail-open."""
+        fail calls that succeed today -- the check must stay fail-open. The
+        dispatcher converts the text number for the declared number type
+        (tests/test_tool_arg_text_scalars.py)."""
         dispatcher, received = _make_tagged_dispatcher()
         _, is_error = await dispatcher.dispatch(
             "record_decision", {"description": "d", "confidence": "0.9"},
         )
         assert is_error is False
-        assert received["confidence"] == "0.9"  # passed through untouched
+        assert received["confidence"] == 0.9
 
     @pytest.mark.asyncio
     async def test_container_where_scalar_belongs_is_rejected(self):
