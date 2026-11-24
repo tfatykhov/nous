@@ -473,9 +473,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RUBRIC_OUTCOME_MODEL` | `claude-haiku-5-5` | Model for outcome classification |
 | `NOUS_HEARTBEAT_ENABLED` | `true` | Enable heartbeat proactive monitoring |
 | `NOUS_HEARTBEAT_TICK_INTERVAL` | `30` | Seconds between heartbeat tick loop iterations |
-| `NOUS_HEARTBEAT_QUIET_START` | `23` | Quiet hours start (hour, user timezone). F114 goals: in these hours (compared in UTC, `nous.heartbeat.quiet_hours`) the goal driver starts no timer session of a goal that may not run then (`quiet_hours_ok` false); the owner's run-now still starts one. |
+| `NOUS_HEARTBEAT_QUIET_START` | `23` | Quiet hours start (hour, user timezone). F114 goals: in these hours (compared in UTC, `nous.heartbeat.quiet_hours`) the goal driver starts no timer session of a goal that may not run then (`quiet_hours_ok` false); the owner's run-now still starts one. A goal session's question or approval request is due at once in these hours too: the next push sends it, and its window starts when it is written (`continuation.ask_push_after`). |
 | `NOUS_HEARTBEAT_QUIET_END` | `8` | Quiet hours end (hour, user timezone) |
-| `NOUS_F099_QUIET_HOURS_ACTIVE_GRACE_MINUTES` | `60` | F099. During quiet hours, an owner-facing row (report, question, proposal) is pushed at once, not at the end of the quiet hours, when the owner last wrote on its channel (`heart.channel_sessions.last_active`, touched only by interactive turns) at most this many minutes ago (`>= 0`; `0` restores the old hold). The heartbeat's own quiet hours do not change. |
+| `NOUS_F099_QUIET_HOURS_ACTIVE_GRACE_MINUTES` | `60` | F099. During quiet hours, an owner-facing row (report, question, proposal) is pushed at once, not at the end of the quiet hours, when the owner last wrote on its channel (`heart.channel_sessions.last_active`, touched only by interactive turns) at most this many minutes ago (`>= 0`; `0` restores the old hold, which a goal session's question or approval request never has). The heartbeat's own quiet hours do not change. |
 | `NOUS_HEARTBEAT_DAILY_TOKEN_BUDGET` | `50000` | Max tokens/day for heartbeat cognitive sessions |
 | `NOUS_HEARTBEAT_EMAIL_ENABLED` | `false` | Enable email check (needs IMAP credentials) |
 | `NOUS_HEARTBEAT_EMAIL_INTERVAL` | `180` | Seconds between email checks |
