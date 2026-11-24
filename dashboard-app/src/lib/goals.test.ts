@@ -806,6 +806,6 @@ describe('what a goal waits on you for: the words', () => {
       .toBe(goals.ANSWER_UNREADABLE_TEXT);
     expect(goals.askRefusal('proposal', refused(403, { error: 'forbidden' })).text).toBe(goals.WRITE_FORBIDDEN_TEXT);
     expect(goals.askRefusal('proposal', refused(500, { error: 'the decision could not be processed' })))
-      .toEqual({ text: 'The decision could not be processed.', ok: false, final: false, lost: false });
+      .toEqual({ text: 'The decision could not be processed.', ok: false, final: false, lost: true });
   });
 });

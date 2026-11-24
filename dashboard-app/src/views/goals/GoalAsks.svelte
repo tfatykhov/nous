@@ -30,6 +30,8 @@
   let drafts = $state<Record<string, string>>({});
   /** A question whose field was typed in (the empty-answer hint waits for that). */
   let typed = $state<Record<string, boolean>>({});
+  /** A question with a Send that got no answer: its text may have been recorded, so it is never called "not sent". */
+  let sendLost = $state<Record<string, boolean>>({});
 
   $effect.pre(() => {
     const read = goal.awaiting;
@@ -100,6 +102,7 @@
       delete drafts[q.id];
     } catch (err) {
       outcome = askRefusal('question', err);
+      if (outcome.lost) sendLost[q.id] = true;
     }
     delete busy[q.id];
     outcomes[q.id] = outcome;
@@ -198,7 +201,7 @@
                 </div>
               {:else if (drafts[q.id] ?? '').trim()}
                 <div class="field">
-                  <label for={partId(s, 'answer')}>What you wrote (not sent)</label>
+                  <label for={partId(s, 'answer')}>{sendLost[q.id] ? 'What you wrote' : 'What you wrote (not sent)'}</label>
                   <textarea id={partId(s, 'answer')} rows="3" readonly value={drafts[q.id]}></textarea>
                 </div>
               {/if}
@@ -219,6 +222,8 @@
   h3:focus { outline: none; }
   /* The line in view: no height of its own, so showing it moves nothing; it sticks to the top while the pane scrolls. */
   .pin { position: sticky; top: 0.75rem; z-index: 2; height: 0; }
+  /* Below the phone's fixed top bar (App.svelte: 3.25rem tall). */
+  @media (max-width: 768px) { .pin { top: 3.75rem; } }
   .pin-line { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 0.75rem; flex-wrap: wrap;
     padding: 0.5rem 0.625rem 0.5rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--warn-bg); color: var(--warn-text);
     box-shadow: var(--card-shadow); font-size: 0.8125rem; font-weight: 600; }

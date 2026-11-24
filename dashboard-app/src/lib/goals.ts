@@ -1266,7 +1266,8 @@ export function decisionText(state: unknown, shortId: string): string {
 }
 
 /** A press of Approve, Reject or Send that did not get a 200, in words. A gateway's 502 or 504 is a lost answer too:
- * the routes never send one, and an approved call may have run behind it. */
+ * the routes never send one, and an approved call may have run behind it. So is a 500: the server may have stored the
+ * press before it failed, and its own sentence is kept. */
 export function askRefusal(kind: 'proposal' | 'question', err: unknown): AskOutcome {
   const status = (err as ApiAnswerError | null)?.status;
   const said = (text: string, final: boolean) => ({ text, ok: false, final, lost: false });
@@ -1279,6 +1280,7 @@ export function askRefusal(kind: 'proposal' | 'question', err: unknown): AskOutc
   }
   if (status === 503) return said(NOT_RUNNING_TEXT, false);
   if (status === 400 && kind === 'question') return said(ANSWER_UNREADABLE_TEXT, false);
+  if (status === 500) return { text: refusalText(err), ok: false, final: false, lost: true };
   return said(refusalText(err), false);
 }
 

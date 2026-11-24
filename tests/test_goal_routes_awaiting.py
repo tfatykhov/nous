@@ -130,7 +130,7 @@ async def test_the_call_and_the_reason_are_the_text_the_approval_message_shows(e
     arguments = {
         **SEND_EMAIL_ARGS,
         "subject": 'Notes <b>bold</b> & "quoted"',
-        "body": "line one\nline two ‮owt",
+        "body": "line one\nline two \u202eowt",
     }
     proposal_id = await stage(env, got, arguments=arguments, rationale="The owner asked for <i>this</i> list.")
     await commit_ask(env, got)
@@ -140,7 +140,7 @@ async def test_the_call_and_the_reason_are_the_text_the_approval_message_shows(e
     assert item["arguments"] == continuation.render_arguments((await proposal_row(env, proposal_id)).arguments)
     assert '"subject": "Notes <b>bold</b> & \\"quoted\\""' in item["arguments"]
     assert '"body": "line one\\nline two \\u202eowt"' in item["arguments"]
-    assert "‮" not in item["arguments"]  # the direction mark is shown as its escape, as in the approval message
+    assert "\u202e" not in item["arguments"]  # the direction mark is shown as its escape, as in the approval message
     assert item["why"] == "The owner asked for <i>this</i> list."
 
 

@@ -6,7 +6,7 @@ import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
 import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
 import { get } from 'svelte/store';
-import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, activityAnswer, awaitingProposal, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
+import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, activityAnswer, awaitingProposal, awaitingQuestion, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
 import { attentionOverride } from '../lib/stores/attention';
 import type { Action, GoalDetail } from '../lib/goals';
 
@@ -1438,6 +1438,27 @@ describe('Goals: what waits for your answer', () => {
     await settle();
     expect(within(region).getByText('Approved and executed (cfd2afea).')).toBeTruthy();
     expect(within(region).queryByText(/no longer waiting/)).toBeNull();
+  });
+
+  it("opening another goal carries over nothing of the first goal's requests, typed text or result line", async () => {
+    const Q = awaitingQuestion();
+    install([{ ...A, awaiting_count: 2, awaiting: { proposals: [P], questions: [Q] } }, B, C]);
+    let release!: (a: [number, unknown]) => void;
+    handlers[`POST /intentions/proposals/${P.id}/decide`] = () => new Promise((resolve) => { release = resolve; });
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const first = await pane('Tidy the notes');
+    await fireEvent.input(await within(first).findByLabelText('Your answer'), { target: { value: 'Half an answer' } });
+    await fireEvent.click(within(first).getByRole('button', { name: 'Approve' }));
+    go('#/goals/g/G-0002');
+    const second = await pane('Sort the photos');
+    release([200, { proposal_id: P.id, short_id: P.short_id, state: 'executed', result: 'sent', error: null, changed: true, woke: false }]);
+    await settle();
+    await settle();
+    expect(within(second).queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+    expect(within(second).queryByText('Nous asks to run send_email')).toBeNull();
+    expect(within(second).queryByText('Approved and executed (cfd2afea).')).toBeNull();
+    expect(screen.queryByDisplayValue('Half an answer')).toBeNull();
   });
 
   it('a new request shows up on the next poll, in the pane and in the list, with no reload', async () => {

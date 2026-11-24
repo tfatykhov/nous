@@ -191,7 +191,6 @@ describe('answering', () => {
     ['403', 403, { error: 'forbidden' }, 'Your sign-in is needed to change goals. Open the dashboard through the login page.', false],
     ['415', 415, { error: 'Content-Type must be application/json' }, 'The request was not sent as JSON, so it was refused.', false],
     ['503', 503, { error: 'continuation is not running' }, 'Nous is not running its follow-up work.', false],
-    ['500', 500, { error: 'the decision could not be processed' }, 'The decision could not be processed.', false],
   ])('a decision refused with %s says so; the buttons stay only when it can still be decided', async (_name, status, body, sentence, final) => {
     reply = () => [status as number, body];
     render(GoalAsks, props());
@@ -211,7 +210,6 @@ describe('answering', () => {
     ['400', 400, { error: 'text is required (at most 8000 characters)' },
       'The answer could not be read as text. Remove any unusual characters and send it again.', false],
     ['503', 503, { error: 'continuation is not running' }, 'Nous is not running its follow-up work.', false],
-    ['500', 500, { error: 'the answer could not be processed' }, 'The answer could not be processed.', false],
   ])('an answer refused with %s says so; the text typed is kept', async (_name, status, body, sentence, final) => {
     reply = () => [status as number, body];
     render(GoalAsks, props(awaiting({ proposals: [] })));
@@ -241,6 +239,18 @@ describe('answering', () => {
     expect(await screen.findByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
     expect(button('Approve').disabled).toBe(false);
     expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('a 500 keeps its sentence and the buttons, and counts as a lost answer: the decision may have been stored', async () => {
+    reply = () => [500, { error: 'the decision could not be processed' }];
+    const view = render(GoalAsks, props());
+    await fireEvent.click(button('Approve'));
+    expect(await screen.findByText('The decision could not be processed.')).toBeTruthy();
+    expect(button('Approve').disabled).toBe(false);
+    expect(onChanged).not.toHaveBeenCalled();
+    await view.rerender(props(awaiting({ proposals: [] })));
+    expect(screen.getByText("No answer came back, and this is no longer waiting. Check the goal's journal for what happened.")).toBeTruthy();
+    expect(screen.queryByText(/answered somewhere else/)).toBeNull();
   });
 
   it('a double click sends once; both buttons wait while it is on its way', async () => {
@@ -326,6 +336,33 @@ describe('when an item leaves the list', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
   });
 
+  it('a question whose Send got no answer, and that then leaves, keeps the text and does not call it unsent', async () => {
+    reply = () => [0, null];
+    const view = render(GoalAsks, props(awaiting({ proposals: [] })));
+    await fireEvent.input(field(), { target: { value: 'The 2024 folder.' } });
+    await fireEvent.click(button('Send'));
+    await screen.findByText('No answer came back. Check the goal before trying again.');
+    await view.rerender(props(awaiting({ proposals: [], questions: [] })));
+    const kept = screen.getByLabelText('What you wrote') as HTMLTextAreaElement;
+    expect(kept.value).toBe('The 2024 folder.');
+    expect(kept.readOnly).toBe(true);
+    expect(screen.queryByLabelText('What you wrote (not sent)')).toBeNull();
+    expect(screen.getByText("No answer came back, and this is no longer waiting. Check the goal's journal for what happened.")).toBeTruthy();
+  });
+
+  it('a second Send after a lost one, refused as already answered, does not call the text unsent', async () => {
+    reply = () => [0, null];
+    render(GoalAsks, props(awaiting({ proposals: [] })));
+    await fireEvent.input(field(), { target: { value: 'The 2024 folder.' } });
+    await fireEvent.click(button('Send'));
+    await screen.findByText('No answer came back. Check the goal before trying again.');
+    reply = () => [409, { error: 'That question was already answered.', reason: 'answered' }];
+    await fireEvent.click(button('Send'));
+    expect(await screen.findByText('That question was already answered.')).toBeTruthy();
+    expect((screen.getByLabelText('What you wrote') as HTMLTextAreaElement).value).toBe('The 2024 folder.');
+    expect(screen.queryByLabelText('What you wrote (not sent)')).toBeNull();
+  });
+
   it('a question that leaves while text is typed keeps the text, to copy', async () => {
     const view = render(GoalAsks, props(awaiting({ proposals: [] })));
     await fireEvent.input(field(), { target: { value: 'Half an answer' } });
@@ -380,5 +417,11 @@ describe('the line that stays in view', () => {
   it('sticks to the top with no height of its own, so showing it moves nothing', () => {
     const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'GoalAsks.svelte'), 'utf-8')));
     expect(css.get('.pin')).toMatchObject({ position: 'sticky', height: '0' });
+  });
+
+  it("sticks below the phone's fixed top bar", () => {
+    const source = readFileSync(join(__dirname, 'GoalAsks.svelte'), 'utf-8');
+    expect(source).toMatch(/@media \(max-width: 768px\) \{ \.pin \{ top: 3\.75rem; \} \}/);
+    expect(readFileSync(join(__dirname, '..', '..', 'App.svelte'), 'utf-8')).toMatch(/height: 3\.25rem/);
   });
 });
