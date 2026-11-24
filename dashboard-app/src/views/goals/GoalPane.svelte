@@ -4,6 +4,7 @@
   import { fmtUtc } from '../../lib/harness';
   import GoalTools from './GoalTools.svelte';
   import GoalActivity from './GoalActivity.svelte';
+  import GoalAsks from './GoalAsks.svelte';
   import Fold from './Fold.svelte';
   import {
     FOLD_DEFAULTS, sessionsSummary,
@@ -17,7 +18,8 @@
     BUDGET_UNCHANGED_TEXT, SESSIONS_UNCHANGED_TEXT, STALL_HINT, zoneWords,
   } from '../../lib/goals';
 
-  // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
+  // One goal. First, what its sessions wait on the owner for (GoalAsks: approval requests and questions, answered here),
+  // then its state and the owner's actions, then its charter, limits, the tools it may use without asking
   // (GoalTools, shown only while the server has per-goal tools on), spend, plan, sessions and journal, and the note
   // box. The buttons are exactly the server's `actions`; an action that spends tokens or ends something says so
   // in a sentence and waits for a Yes. Whether the goal may run any command has a card of its own, with the server's
@@ -373,6 +375,7 @@
 {/snippet}
 
 <section class="goal" aria-labelledby="goal-h.{goal.ref}">
+  <GoalAsks {goal} {onChanged} />
   <div class="card">
     <div class="goal-head">
       <h2 id="goal-h.{goal.ref}" tabindex="-1">{goal.title}</h2>

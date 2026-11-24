@@ -62,6 +62,34 @@ async def test_the_new_routes_answer_with_their_shapes(db, settings, brain, hear
     assert set(harness["rules"]) == {"offered_set", "context_policy", "claims"}
     attention = (await _get(app, "/dashboard/attention")).json()
     assert {"questions_waiting", "sends_in_doubt", "harness", "ledger_persisted"} <= set(attention)
+    assert attention["goal_asks_waiting"] == 0  # goals are off: nothing is read
+
+
+async def test_the_attention_answer_carries_the_goals_waiting_count_and_null_when_it_cannot_be_read(
+    db, settings, brain, heart, monkeypatch
+):
+    from nous.goals import awaiting
+
+    goals_on = settings.model_copy(update={"goals_enabled": True})
+    seen: list[str] = []
+
+    async def three(_session, agent_id, *, settings):
+        seen.append(agent_id)
+        return 3
+
+    monkeypatch.setattr(awaiting, "waiting_total", three)
+    counted = await _get(_app(db, goals_on, brain, heart), "/dashboard/attention")
+    assert (counted.status_code, counted.json()["goal_asks_waiting"], seen) == (200, 3, [settings.agent_id])
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("the database said something private")
+
+    monkeypatch.setattr(awaiting, "waiting_total", broken)
+    unread = await _get(_app(db, goals_on, brain, heart), "/dashboard/attention")
+    assert unread.status_code == 200
+    assert unread.json()["goal_asks_waiting"] is None
+    assert {"questions_waiting", "sends_in_doubt", "harness", "ledger_persisted"} <= set(unread.json())
+    assert "private" not in unread.text
 
 
 async def test_the_dag_route_reads_the_orchestrators_held_reason(db, settings, brain, heart):

@@ -763,6 +763,8 @@ export interface AttentionData {
     tombstone: boolean;
   } | null;
   ledger_persisted: boolean;
+  /** The approval requests and questions the goals' sessions wait on the owner for; null when it could not be read. */
+  goal_asks_waiting?: number | null;
   harness: {
     events_persisted: boolean;
     offered_set: { mode: string | null; warn_7d: number; refused_7d: number };

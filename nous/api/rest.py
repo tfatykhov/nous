@@ -2261,6 +2261,20 @@ def create_app(
             logger.error("Dashboard harness error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def goal_asks_waiting() -> int | None:
+        """How many approval requests and questions the goals' sessions wait on the owner for (the Goals badge), in
+        a transaction of its own: 0 with goals off (nothing is read), None when the read failed."""
+        if not settings.goals_enabled:
+            return 0
+        from nous.goals.awaiting import waiting_total
+
+        try:
+            async with database.session() as session:
+                return await waiting_total(session, settings.agent_id, settings=settings)
+        except Exception as e:
+            logger.warning("Dashboard attention: the goals' waiting count failed (%s)", type(e).__name__)
+            return None
+
     async def dashboard_attention(request: Request) -> JSONResponse:
         """GET /dashboard/attention — the Overview strip and nav badges (§3.4)."""
         from nous.api.harness_dashboard import get_attention_data
@@ -2273,6 +2287,7 @@ def create_app(
                     events_persisted=modes["events_persisted"],
                     ledger_persisted=modes["persist"],
                 )
+            data["goal_asks_waiting"] = await goal_asks_waiting()
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard attention error: %s", e)

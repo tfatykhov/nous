@@ -763,3 +763,49 @@ describe('what a goal is doing now, and the folding page', () => {
     });
   });
 });
+
+describe('what a goal waits on you for: the words', () => {
+  const refused = (status: number | undefined, body?: unknown) => Object.assign(new Error('refused'), { status, body });
+
+  it('the list pill and the count, in words', () => {
+    expect(goals.waitingPill(1)).toBe('Waiting for your answer');
+    expect(goals.waitingPill(3)).toBe('3 waiting for your answer');
+    expect(goals.waitingPill(1200)).toBe('1,200 waiting for your answer');
+    expect(goals.waitingWords(0, 0)).toBe('');
+    expect(goals.waitingWords(1, 0)).toBe('1 approval request');
+    expect(goals.waitingWords(0, 2)).toBe('2 questions');
+    expect(goals.waitingWords(2, 1)).toBe('2 approval requests and 1 question');
+    expect(goals.waitingSentence(0, 0)).toBe('');
+    expect(goals.waitingSentence(1, 1)).toBe('Waiting for your answer: 1 approval request and 1 question.');
+  });
+
+  it("a decision's sentence by the proposal's state after it; any other state is Done", () => {
+    expect(goals.decisionText('executed', 'cfd2afea')).toBe('Approved and executed (cfd2afea).');
+    expect(goals.decisionText('failed', 'cfd2afea')).toBe('Approved, but the call failed (cfd2afea). Nothing was retried.');
+    expect(goals.decisionText('executing', 'cfd2afea')).toBe('Already running (cfd2afea).');
+    expect(goals.decisionText('approved', 'cfd2afea')).toBe('Approved (cfd2afea).');
+    expect(goals.decisionText('rejected', 'cfd2afea')).toBe('Rejected (cfd2afea).');
+    for (const other of ['pending', '', null, undefined, 7]) expect(goals.decisionText(other, 'cfd2afea')).toBe('Done (cfd2afea).');
+  });
+
+  it('a refused press: final when the item can no longer be answered, lost when no answer came back', () => {
+    const lost = { text: goals.NO_ANSWER_TEXT, ok: false, final: false, lost: true };
+    expect(goals.askRefusal('proposal', new TypeError('Failed to fetch'))).toEqual(lost);
+    expect(goals.askRefusal('proposal', refused(502))).toEqual(lost);
+    expect(goals.askRefusal('question', refused(504))).toEqual(lost);
+    expect(goals.askRefusal('proposal', refused(404, { error: 'no such proposal' })))
+      .toEqual({ text: 'That proposal is no longer available.', ok: false, final: true, lost: false });
+    expect(goals.askRefusal('question', refused(404, { error: 'no such question' })).text).toBe('That question is no longer available.');
+    expect(goals.askRefusal('question', refused(409, { error: 'That question was already answered.', reason: 'answered' })))
+      .toEqual({ text: 'That question was already answered.', ok: false, final: true, lost: false });
+    expect(goals.askRefusal('proposal', refused(409, {})).text).toBe('That proposal can no longer be decided.');
+    expect(goals.askRefusal('question', refused(409, { error: ' ' })).text).toBe('That question can no longer be answered.');
+    expect(goals.askRefusal('proposal', refused(503, { error: 'continuation is not running' })))
+      .toEqual({ text: goals.NOT_RUNNING_TEXT, ok: false, final: false, lost: false });
+    expect(goals.askRefusal('question', refused(400, { error: 'text is required (at most 8000 characters)' })).text)
+      .toBe(goals.ANSWER_UNREADABLE_TEXT);
+    expect(goals.askRefusal('proposal', refused(403, { error: 'forbidden' })).text).toBe(goals.WRITE_FORBIDDEN_TEXT);
+    expect(goals.askRefusal('proposal', refused(500, { error: 'the decision could not be processed' })))
+      .toEqual({ text: 'The decision could not be processed.', ok: false, final: false, lost: false });
+  });
+});

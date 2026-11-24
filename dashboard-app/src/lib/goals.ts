@@ -28,6 +28,8 @@ export interface GoalRow {
   next_wake_at: string | null;
   open_session: number | null;
   pending_request: 'run_now' | 'stop' | 'cancel' | null;
+  /** How many approval requests and questions its sessions wait on you for; null when the server could not read it. */
+  awaiting_count: number | null;
   mode: string;
   updated_at: string | null;
 }
@@ -86,7 +88,28 @@ export interface GoalDetail extends GoalRow {
   actions: Action[];
   resume_blocked: 'budget' | 'deadline' | null;
   spend_note: string;
+  /** What its sessions wait on you for, oldest first; null when the server could not read it. */
+  awaiting: Awaiting | null;
 }
+
+/** An approval request a goal's session waits on you for. `tool`, `arguments` (the call, exactly as it will run) and
+ * `why` are the approval message's own text; `id` is what POST /intentions/proposals/{id}/decide takes. */
+export interface AwaitingProposal {
+  id: string;
+  short_id: string;
+  tool: string;
+  arguments: string;
+  why: string;
+  expires_at: string | null;
+}
+/** A question a goal's session waits on you for; `id` is what POST /intentions/questions/{id}/answer takes. */
+export interface AwaitingQuestion {
+  id: string;
+  short_id: string;
+  text: string;
+  expires_at: string;
+}
+export interface Awaiting { proposals: AwaitingProposal[]; questions: AwaitingQuestion[] }
 
 /** Whether a goal may run any command, as its page shows it (the server's words): `off`, `set` (chosen at creation,
  * its time starts at approval), `on` (until `mode_until`) or `ended`; whether its tasks run any command now and why
@@ -1171,6 +1194,92 @@ export function jobsText(jobs: ActivityJobs, now: number): string {
 export function endedText(session: ActivitySession, calls: ActivityCalls | null, now: number): string {
   const when = session.ended_at ? ` ended ${ago(session.ended_at, now)}` : ' ended';
   return `Session ${session.n}${when}${calls ? ` after ${callCount(calls)}` : ''}.`;
+}
+
+// ── What a goal's sessions wait on you for ───────────────────────────────────
+// A goal's `awaiting` (its approval requests and questions), answered through the routes the Telegram bot calls. The
+// 200 sentences are the bot's (nous/telegram_bot.py describe_decision, describe_answer); a 409 shows the server's own
+// fixed sentence (nous/owner_actions.py). Workflow approval steps are not here: they are on the Workflows screen.
+
+/** The answer of POST /intentions/proposals/{id}/decide. The call's own output (`result`, `error`) is never shown. */
+export interface DecisionAnswer { proposal_id: string; short_id: string; state: string; changed: boolean }
+
+/** Approve or reject. An approve answers once the approved call has run (the server bounds it by the tool's time
+ * limit), so it is not given up after `REQUEST_TIMEOUT_MS` as the goal changes are. */
+export const decideProposal = (id: string, approve: boolean) =>
+  apiRequest<DecisionAnswer>(`/intentions/proposals/${encodeURIComponent(id)}/decide`, 'POST', {
+    decision: approve ? 'approve' : 'reject',
+    actor: 'dashboard',
+  });
+export const answerQuestion = (id: string, text: string) =>
+  timed((signal) =>
+    apiRequest<unknown>(`/intentions/questions/${encodeURIComponent(id)}/answer`, 'POST', { text, actor: 'dashboard' }, signal),
+  );
+
+/** The longest answer the server takes (continuation.ANSWER_MAX_CHARS). */
+export const ANSWER_MAX = 8000;
+export const ASKS_TITLE = 'Waiting for you';
+export const ASKS_READ_FAILED_TEXT = 'Could not read what is waiting for you.';
+export const ASKS_GONE_TEXT = 'This is no longer waiting for you. It was answered somewhere else, expired, or its work ended.';
+export const ASKS_LOST_GONE_TEXT = "No answer came back, and this is no longer waiting. Check the goal's journal for what happened.";
+export const ANSWER_RECORDED_TEXT = 'Answer recorded.';
+export const ANSWER_EMPTY_TEXT = 'Write an answer first.';
+export const ANSWER_LIMIT_TEXT = 'At most 8,000 characters.';
+/** A 400 for an answer the owner typed: the server could not take the text (a pasted NUL or broken character). */
+export const ANSWER_UNREADABLE_TEXT = 'The answer could not be read as text. Remove any unusual characters and send it again.';
+export const NOT_RUNNING_TEXT = 'Nous is not running its follow-up work.';
+export const proposalLead = (tool: string) => `Nous asks to run ${tool}`;
+export const proposalExpiryText = (at: string) => `Expires ${fmtUtc(at)}. If you do nothing, it is rejected.`;
+export const questionExpiryText = (at: string) => `You can answer until ${fmtUtc(at)}.`;
+
+/** The list's pill for a goal that waits on you. */
+export const waitingPill = (n: number) => (n === 1 ? 'Waiting for your answer' : `${formatNumber(n)} waiting for your answer`);
+
+/** What waits on you, in words: "1 approval request and 2 questions" ('' for nothing). */
+export function waitingWords(proposals: number, questions: number): string {
+  return [
+    proposals ? `${formatNumber(proposals)} approval request${proposals === 1 ? '' : 's'}` : '',
+    questions ? `${formatNumber(questions)} question${questions === 1 ? '' : 's'}` : '',
+  ].filter(Boolean).join(' and ');
+}
+
+/** The same in one sentence: "Waiting for your answer: 1 approval request and 2 questions." ('' for nothing). */
+export function waitingSentence(proposals: number, questions: number): string {
+  const words = waitingWords(proposals, questions);
+  return words ? `Waiting for your answer: ${words}.` : '';
+}
+
+/** What a press led to. `final`: the item can no longer be answered from here, so its buttons go; `lost`: no answer
+ * came back, so the press may or may not have landed. */
+export interface AskOutcome { text: string; ok: boolean; final: boolean; lost: boolean }
+
+/** The sentence of a decision the server made, by the proposal's state after it (the bot's words). */
+export function decisionText(state: unknown, shortId: string): string {
+  switch (state) {
+    case 'executed': return `Approved and executed (${shortId}).`;
+    case 'failed': return `Approved, but the call failed (${shortId}). Nothing was retried.`;
+    case 'executing': return `Already running (${shortId}).`;
+    case 'approved': return `Approved (${shortId}).`;
+    case 'rejected': return `Rejected (${shortId}).`;
+    default: return `Done (${shortId}).`;
+  }
+}
+
+/** A press of Approve, Reject or Send that did not get a 200, in words. A gateway's 502 or 504 is a lost answer too:
+ * the routes never send one, and an approved call may have run behind it. */
+export function askRefusal(kind: 'proposal' | 'question', err: unknown): AskOutcome {
+  const status = (err as ApiAnswerError | null)?.status;
+  const said = (text: string, final: boolean) => ({ text, ok: false, final, lost: false });
+  if (status === undefined || status === 502 || status === 504) return { text: NO_ANSWER_TEXT, ok: false, final: false, lost: true };
+  if (status === 404) return said(`That ${kind} is no longer available.`, true);
+  if (status === 409) {
+    const api = ((err as ApiAnswerError).body as { error?: unknown } | undefined)?.error;
+    const fallback = kind === 'proposal' ? 'That proposal can no longer be decided.' : 'That question can no longer be answered.';
+    return said(typeof api === 'string' && api.trim() ? refusalText(err) : fallback, true);
+  }
+  if (status === 503) return said(NOT_RUNNING_TEXT, false);
+  if (status === 400 && kind === 'question') return said(ANSWER_UNREADABLE_TEXT, false);
+  return said(refusalText(err), false);
 }
 
 // The page's sections fold. The viewer's choice is kept in this browser (one choice for every goal); the page works

@@ -2,6 +2,7 @@
   import { tick, untrack } from 'svelte';
   import { Button } from '../lib/ui/button';
   import { makePollStore } from '../lib/stores/registry';
+  import { pushCounts } from '../lib/stores/attention';
   import { usePoll } from '../lib/poll';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
@@ -11,7 +12,7 @@
   import {
     DRIVER_OFF_TEXT, GOALS_OFF_TEXT, HALT_TEXT, HELD_TEXT, PILL, READ_FORBIDDEN_TEXT,
     deadlineText, formatNumber, getGoal, goalOptions, haltState, listGoals, nextSessionText, refusalText, spentPercent, stateWord,
-    timed,
+    timed, waitingPill,
     type GoalDetail, type GoalFilter, type GoalList, type GoalOptions, type GoalRow, type HaltState,
   } from '../lib/goals';
   import type { ApiAnswerError } from '../lib/api';
@@ -116,6 +117,15 @@
   let listReady = $derived($store.data?.filter === filter);
   let listed = $derived(listReady ? goals : []);
   let listTotal = $derived($store.data?.list.total ?? listed.length);
+  // The Goals badge in the navigation follows this page's own read of every open goal: the open list, whole, with
+  // every count read (a finished goal never waits).
+  $effect(() => {
+    const data = $store.data;
+    if (!data || data.filter !== 'open' || !data.list.enabled) return;
+    const rows = data.list.goals;
+    if ((data.list.total ?? rows.length) > rows.length || rows.some((g) => g.awaiting_count === null)) return;
+    untrack(() => pushCounts({ goals: rows.reduce((sum, g) => sum + (g.awaiting_count ?? 0), 0) }));
+  });
   // A new filter asks the server at once.
   let lastFilter: GoalFilter = 'open';
   $effect(() => {
@@ -319,6 +329,7 @@
                 <span class="item-state">
                   <span class="status-pill {PILL[word.tone]}">{word.text}</span>
                   {#if halted && g.state === 'active'}<span class="status-pill status-pill--warn">{HELD_TEXT}</span>{/if}
+                  {#if g.awaiting_count}<span class="status-pill status-pill--warn">{waitingPill(g.awaiting_count)}</span>{/if}
                 </span>
                 {#if next || due}<span class="item-line">{[next, due].filter(Boolean).join('. ')}</span>{/if}
                 <span class="item-spend">

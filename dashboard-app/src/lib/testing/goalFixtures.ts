@@ -1,8 +1,8 @@
 // Test-only: answers of the goal routes (nous/api/goal_routes.py) in their real shape, with made-up values. The
 // detail's keys and order are those of a real GET /goals/{ref} answer; refresh them when the route's answer changes.
 import type {
-  CommandsOptions, GoalActivity, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow, GoalToolGrant, GoalToolOption, GoalTools,
-  GoalToolWords, NewGoalTools, PacingOptions,
+  AwaitingProposal, AwaitingQuestion, CommandsOptions, GoalActivity, GoalCommandsNow, GoalDetail, GoalOptions, GoalRow,
+  GoalToolGrant, GoalToolOption, GoalTools, GoalToolWords, NewGoalTools, PacingOptions,
 } from '../goals';
 
 /** The server's sentence of what spend does not count (nous/goals/seed.py SPEND_NOTE). */
@@ -28,6 +28,7 @@ export function goalRow(over: Partial<GoalRow> = {}): GoalRow {
     next_wake_at: '2026-11-15T14:00:00+00:00',
     open_session: null,
     pending_request: null,
+    awaiting_count: 0,
     mode: 'contained',
     updated_at: '2026-11-15T11:00:00+00:00',
     ...over,
@@ -71,6 +72,32 @@ export function goalDetail(over: Partial<GoalDetail> = {}): GoalDetail {
     actions: ['run-now', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel'],
     resume_blocked: null,
     spend_note: SPEND_NOTE,
+    awaiting: { proposals: [], questions: [] },
+    ...over,
+  };
+}
+
+/** An approval request in a goal's `awaiting`, as the server sends it (made-up values; the call is the stored
+ * arguments as two-space-indented JSON). */
+export function awaitingProposal(over: Partial<AwaitingProposal> = {}): AwaitingProposal {
+  return {
+    id: 'cfd2afea-0000-4000-8000-000000000001',
+    short_id: 'cfd2afea',
+    tool: 'send_email',
+    arguments: '{\n  "to": "friend@example.com",\n  "subject": "Snow",\n  "body": "40 cm overnight."\n}',
+    why: 'The owner asked me to share the snow report.',
+    expires_at: '2026-11-16T09:00:00+00:00',
+    ...over,
+  };
+}
+
+/** A question in a goal's `awaiting`, as the server sends it (made-up values). */
+export function awaitingQuestion(over: Partial<AwaitingQuestion> = {}): AwaitingQuestion {
+  return {
+    id: '5b1e0c2d-0000-4000-8000-000000000002',
+    short_id: '5b1e0c2d',
+    text: 'Which folder holds the newest notes?',
+    expires_at: '2026-11-16T10:30:00+00:00',
     ...over,
   };
 }
@@ -157,10 +184,11 @@ export const PACING = (over: Partial<PacingOptions> = {}): PacingOptions => ({
 /** The keys of a real detail answer, in order. */
 export const DETAIL_KEYS = [
   'enabled', 'id', 'ref', 'title', 'state', 'pause_reason', 'preset', 'proposed_by', 'total_budget', 'day_budget',
-  'spent_total', 'spent_today', 'deadline_at', 'next_wake_at', 'open_session', 'pending_request', 'mode', 'updated_at',
-  'objective', 'done_when', 'origin_channel', 'deadline_days', 'sessions_per_day', 'min_interval_seconds', 'jobs_per_day',
-  'quiet_hours_ok', 'stall_limit', 'mode_until', 'mode_hours', 'commands', 'approved_at', 'finished_at', 'created_at',
-  'plan', 'sessions', 'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
+  'spent_total', 'spent_today', 'deadline_at', 'next_wake_at', 'open_session', 'pending_request', 'awaiting_count', 'mode',
+  'updated_at', 'objective', 'done_when', 'origin_channel', 'deadline_days', 'sessions_per_day', 'min_interval_seconds',
+  'jobs_per_day', 'quiet_hours_ok', 'stall_limit', 'mode_until', 'mode_hours', 'commands', 'approved_at', 'finished_at',
+  'created_at', 'plan', 'sessions', 'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
+  'awaiting',
 ];
 
 /** The keys of a real GET /goals/{ref}/activity answer with the panel on, in order. */

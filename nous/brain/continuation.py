@@ -4708,6 +4708,85 @@ async def _awaiting_views(
     return out
 
 
+async def awaiting_ids(
+    session: AsyncSession, agent_id: str, root_ids: Sequence[UUID], *, settings: Any, now: datetime
+) -> dict[UUID, tuple[list[str], list[str]]]:
+    """Per root, the ids of the proposals and of the QUESTION rows the owner is waited on for: ``_awaiting_views``
+    (the one definition of what waits, the one the Intentions card shows) merged over the root's arrivals, as
+    ``(proposal_ids, question_ids)``. Read-only, three queries; none for no roots."""
+    if not root_ids:
+        return {}
+    views = await _awaiting_views(session, agent_id, list(root_ids), settings=settings, now=now)
+    return {
+        root_id: (
+            [pid for view in entries for pid in view["proposal_ids"]],
+            [qid for view in entries for qid in view["question_ids"]],
+        )
+        for root_id, entries in views.items()
+    }
+
+
+async def awaiting_items(
+    session: AsyncSession,
+    agent_id: str,
+    proposal_ids: Sequence[str],
+    question_ids: Sequence[str],
+    *,
+    settings: Any,
+) -> dict[str, list[dict[str, Any]]]:
+    """The proposals and questions of these ids (``awaiting_ids``) as the owner reads them in Telegram, oldest
+    first: a proposal's tool, its call as ``render_arguments`` shows it, its reason (``render_text``) and its
+    deadline; a question's text (``render_text``) and the end of its window. ``id`` is what the owner routes take.
+    A proposal no longer pending is left out. Read-only; a query for each list that has ids."""
+    proposals: list[dict[str, Any]] = []
+    if proposal_ids:
+        for proposal in (
+            await session.execute(
+                select(IntentionProposal)
+                .where(
+                    IntentionProposal.agent_id == agent_id,
+                    IntentionProposal.id.in_([UUID(value) for value in proposal_ids]),
+                    IntentionProposal.state == PROPOSAL_PENDING,
+                )
+                .order_by(IntentionProposal.created_at, IntentionProposal.id)
+            )
+        ).scalars():
+            proposals.append(
+                {
+                    "id": str(proposal.id),
+                    "short_id": short_id(proposal.id),
+                    "tool": render_text(proposal.tool),
+                    "arguments": render_arguments(proposal.arguments),
+                    "why": render_text(proposal.rationale),
+                    "expires_at": _iso(proposal.deadline),
+                }
+            )
+    questions: list[dict[str, Any]] = []
+    if question_ids:
+        ttl = timedelta(hours=float(settings.intention_proposal_ttl_hours))
+        for question in (
+            await session.execute(
+                select(ResultInbox)
+                .where(
+                    ResultInbox.agent_id == agent_id,
+                    ResultInbox.source_kind == SOURCE_INTENTION_REPORT,
+                    ResultInbox.msg_type == MSG_QUESTION,
+                    ResultInbox.source_id.in_([UUID(value) for value in question_ids]),
+                )
+                .order_by(ResultInbox.created_at, ResultInbox.id)
+            )
+        ).scalars():
+            questions.append(
+                {
+                    "id": str(question.source_id),
+                    "short_id": short_id(question.source_id),
+                    "text": render_text(question.body),
+                    "expires_at": _iso(question_window_start(question) + ttl),
+                }
+            )
+    return {"proposals": proposals, "questions": questions}
+
+
 async def newest_reports(session: AsyncSession, agent_id: str, root_ids: Sequence[UUID]) -> dict[str, dict[str, str]]:
     """The newest REPORT row of each root, by the lineage its intention belongs to (3b: the active card shows it,
     read-only). ``body`` is the model's text, raw: whoever shows it passes it through ``card_text``. One query."""

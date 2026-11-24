@@ -37,14 +37,14 @@ FIXTURES = Path(__file__).resolve().parents[1] / "dashboard-app" / "src" / "lib"
 
 ROW_KEYS = {
     "id", "ref", "title", "state", "pause_reason", "preset", "proposed_by", "total_budget", "day_budget",
-    "spent_total", "spent_today", "deadline_at", "next_wake_at", "open_session", "pending_request", "mode",
-    "updated_at",
+    "spent_total", "spent_today", "deadline_at", "next_wake_at", "open_session", "pending_request", "awaiting_count",
+    "mode", "updated_at",
 }
 DETAIL_KEYS = ROW_KEYS | {
     "enabled", "objective", "done_when", "origin_channel", "deadline_days", "sessions_per_day",
     "min_interval_seconds", "jobs_per_day", "quiet_hours_ok", "stall_limit", "mode_until", "mode_hours", "commands",
     "approved_at", "finished_at", "created_at", "plan", "sessions", "sessions_total", "journal", "pause_sentence",
-    "actions", "resume_blocked", "spend_note",
+    "actions", "resume_blocked", "spend_note", "awaiting",
 }
 
 

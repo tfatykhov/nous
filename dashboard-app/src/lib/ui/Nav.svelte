@@ -132,6 +132,10 @@
     if (id === 'work' && c.sends > 0) {
       return { count: c.sends, text: `${c.sends} send${c.sends === 1 ? '' : 's'} in doubt`, kind: 'unknown' };
     }
+    // The approval requests and questions goal sessions wait on the owner for, answered on the Goals screen.
+    if (id === 'goals' && c.goals > 0) {
+      return { count: c.goals, text: `${c.goals} waiting for your answer`, kind: 'waiting' };
+    }
     return null;
   }
 </script>
