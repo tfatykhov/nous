@@ -2,8 +2,9 @@
 
 Owner-facing rows (a REPORT, a QUESTION, a PROPOSAL) are written to the inbox at once, so chat shows them at any
 hour. Telegram is the push: each row carries ``push_after`` (now, or the end of the quiet hours unless the owner
-is chatting on the row's channel, set by ``continuation.owner_push_after`` when the row was written), and this
-sweep sends the rows that are due, once each.
+is chatting on the row's channel, set by ``continuation.owner_push_after`` when the row was written; a goal
+session's QUESTION or PROPOSAL is due at once, ``continuation.ask_push_after``), and this sweep sends the rows that
+are due, once each.
 
 2d: a PROPOSAL goes out with Approve and Reject buttons, a QUESTION with ``force_reply`` (a reply to the message
 is the answer). Both are sent as HTML in which every model-authored string is escaped and inside ``<pre>``: a

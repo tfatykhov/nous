@@ -966,6 +966,22 @@ async def owner_push_after(
     return now
 
 
+async def ask_push_after(
+    session: AsyncSession, agent_id: str, settings: Any, *, channel: str, root_id: UUID, now: datetime
+) -> datetime:
+    """When a QUESTION or a PROPOSAL may go to Telegram: ``now`` for the chain of a goal session (F114: its root's
+    origin is ``goal``), so quiet hours never hold what a goal waits on the owner for and its window starts at once;
+    otherwise ``owner_push_after``."""
+    origin = (
+        await session.execute(
+            select(Intention.origin_kind).where(Intention.agent_id == agent_id, Intention.id == root_id)
+        )
+    ).scalar_one_or_none()
+    if origin == intentions.ORIGIN_GOAL:
+        return now
+    return await owner_push_after(session, agent_id, settings, channel=channel, root_id=root_id, now=now)
+
+
 def _close_reason(outcome: str) -> str:
     if outcome == OUTCOME_FALLBACK:
         return CLOSE_FALLBACK_REPORT
@@ -1381,6 +1397,14 @@ async def _commit_arrival(
             )
         else:
             body = resolution.note if kind == MSG_QUESTION else (report_text or resolution.note)
+            if kind == MSG_QUESTION:
+                push_after = await ask_push_after(
+                    session, agent_id, settings, channel=channel, root_id=root_id, now=now
+                )
+            else:
+                push_after = await owner_push_after(
+                    session, agent_id, settings, channel=channel, root_id=root_id, now=now
+                )
             report_ids.append(
                 await insert_report(
                     session,
@@ -1392,9 +1416,7 @@ async def _commit_arrival(
                     intention_id=deepest.id,
                     root_id=root_id,
                     arrival_id=arrival_id,
-                    push_after=await owner_push_after(
-                        session, agent_id, settings, channel=channel, root_id=root_id, now=now
-                    ),
+                    push_after=push_after,
                 )
             )
 
@@ -1428,7 +1450,7 @@ async def _commit_arrival(
     if publishing:
         # The approval window starts when the owner can see the proposal: a push deferred to the end of the quiet
         # hours moves the deadline with it, and the push's "Expires" line shows this same deadline.
-        push_after = await owner_push_after(session, agent_id, settings, channel=channel, root_id=root_id, now=now)
+        push_after = await ask_push_after(session, agent_id, settings, channel=channel, root_id=root_id, now=now)
         published = await publish_staged(
             session,
             agent_id,

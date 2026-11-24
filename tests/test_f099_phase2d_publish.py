@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,11 +13,13 @@ from f099_support import (
     CONT,
     SEND_EMAIL_ARGS,
     ask_with_proposals,
+    claim,
     claimed,
     commit_ask,
     env_factory,  # noqa: F401
     inbox_rows,
     intention_of,
+    make_child,
     make_root,
     proposal_row,
     record,
@@ -31,6 +34,7 @@ from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.brain.continuation import Resolution
+from nous.goals import roots
 from nous.handlers.continuation_publisher import OwnerPublisher, render_proposal_html
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.storage.models import IntentionArrival, IntentionProposal
@@ -94,6 +98,108 @@ async def test_a_proposal_staged_in_quiet_hours_gets_its_window_from_the_push(en
     row = await proposal_row(env, pid)
     assert row.deadline == pushed.push_after + timedelta(hours=24)  # the 24 h TTL, from the push
     assert f"Expires {row.deadline.astimezone(UTC):%Y-%m-%d %H:%M} UTC." in render_proposal_html(row, None)
+
+
+# ---- a goal session's approval requests and questions are due at once -------------------------------------------
+
+
+async def _quiet_now(env_factory, **over):  # noqa: F811
+    """An environment in its quiet hours (from this hour, for three), the owner's chat grace off."""
+    hour = datetime.now(UTC).hour
+    return await env_factory(
+        **CONT,
+        heartbeat_quiet_start=hour,
+        heartbeat_quiet_end=(hour + 3) % 24,
+        f099_quiet_hours_active_grace_minutes=0,
+        **over,
+    )
+
+
+async def _goal_root(env):
+    """The root intention of a goal session, written as the goal driver writes it."""
+    goal = SimpleNamespace(id=uuid.uuid4(), short_id=7, title="Tidy the notes", origin_channel=CHAN)
+    subtask = await roots.create_session_root(
+        env.heart, env.settings, goal=goal, session_n=1, subtask_id=uuid.uuid4(), task="Take the next step."
+    )
+    root = await intention_of(env, "subtask", subtask.id)
+    assert root.origin_kind == "goal"
+    return root
+
+
+async def _goal_claimed(env):
+    """A goal session's root with one recorded result, claimed: ``(root, claim)``."""
+    root = await _goal_root(env)
+    await record(env, root)
+    return root, await claim(env, root.id)
+
+
+async def test_a_goal_sessions_proposal_in_quiet_hours_is_due_at_once(env_factory):  # noqa: F811
+    """F114: the approval request of a goal session's chain is pushed when it is written, and its window starts then.
+    A chat's proposal in the same hours waits for their end (the test above)."""
+    env = await _quiet_now(env_factory)
+    _root, got = await _goal_claimed(env)
+    proposal_id = await stage(env, got)
+    before = datetime.now(UTC)
+    await commit_ask(env, got)
+    after = datetime.now(UTC)
+    (pushed,) = await _proposal_rows(env)
+    assert before <= pushed.push_after <= after
+    row = await proposal_row(env, proposal_id)
+    assert row.deadline == pushed.push_after + timedelta(hours=24)
+    assert f"Expires {row.deadline.astimezone(UTC):%Y-%m-%d %H:%M} UTC." in render_proposal_html(row, None)
+
+
+async def test_a_goal_sessions_question_in_quiet_hours_is_due_at_once(env_factory):  # noqa: F811
+    """Its answer window counts from when it was written: 25 hours on it is over, 23 hours on it is answered."""
+    env = await _quiet_now(env_factory)
+    _root, got = await _goal_claimed(env)
+    before = datetime.now(UTC)
+    await commit_ask(env, got, "Which folder holds the notes?")
+    after = datetime.now(UTC)
+    (question,) = [r for r in await inbox_rows(env) if r.msg_type == "QUESTION"]
+    assert before <= question.push_after <= after
+    answer = {"text": "The archive folder.", "actor": "t", "settings": env.settings}
+    async with env.db.session() as s:
+        with pytest.raises(continuation.AnswerRefused) as refused:
+            await continuation.record_answer(
+                s, env.agent, question.source_id, now=after + timedelta(hours=25), **answer
+            )
+    assert refused.value.reason == continuation.REFUSE_EXPIRED
+    async with env.db.session() as s:
+        await continuation.record_answer(s, env.agent, question.source_id, now=after + timedelta(hours=23), **answer)
+
+
+async def test_a_question_from_deeper_in_a_goal_sessions_chain_is_due_at_once(env_factory):  # noqa: F811
+    """The chain's root decides, not the intention that asks."""
+    env = await _quiet_now(env_factory)
+    root = await _goal_root(env)
+    child = await make_child(env, root)
+    await record(env, child)
+    got = await claim(env, root.id)
+    assert (got.root_id, got.deepest.id) == (root.id, child.id)
+    before = datetime.now(UTC)
+    await commit_ask(env, got)
+    after = datetime.now(UTC)
+    (question,) = [r for r in await inbox_rows(env) if r.msg_type == "QUESTION"]
+    assert question.intention_id == child.id and before <= question.push_after <= after
+
+
+async def test_in_quiet_hours_the_push_sends_a_goal_sessions_asks_and_holds_a_chats(env_factory):  # noqa: F811
+    env = await _quiet_now(env_factory, telegram_bot_token="test-token", telegram_chat_id="8080")
+    asking_root, got = await _goal_claimed(env)
+    await stage(env, got)
+    await commit_ask(env, got)  # a goal session's approval request
+    questioning_root, got = await _goal_claimed(env)
+    await commit_ask(env, got, "Which folder holds the notes?")  # and a goal session's question
+    await ask_with_proposals(env)  # a chat's approval request
+    _root, got = await claimed(env)
+    await commit_ask(env, got)  # and a chat's question
+    publisher = OwnerPublisher(database=env.db, settings=env.settings, http_client=_http())
+    assert await publisher.push_due(now=datetime.now(UTC)) == 2
+    rows = [r for r in await inbox_rows(env) if r.msg_type in ("PROPOSAL", "QUESTION")]
+    assert len(rows) == 4
+    sent = {(r.msg_type, r.intention_id) for r in rows if r.pushed_at is not None}
+    assert sent == {("PROPOSAL", asking_root.id), ("QUESTION", questioning_root.id)}
 
 
 async def test_an_ask_with_no_proposals_still_writes_its_question(env_factory):  # noqa: F811  # PIN (2c behaviour)
