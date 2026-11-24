@@ -49,6 +49,12 @@ name, time, outcome) and the session ids the Work screen opens; never a call's i
 ``GET /goals/options`` carries ``activity: true`` with the flag on. With it off the route answers ``activity_enabled:
 false`` and reads no table, and the options have no ``activity`` key.
 
+What a goal's sessions wait on the owner for (``nous.goals.awaiting``): each row of ``GET /goals`` says how many
+approval requests and questions (``awaiting_count``), and a goal's detail lists them (``awaiting``): each request's
+tool, its call and reason as the approval message shows them, and its deadline; each question's text and the end of
+its window. The screen answers them through ``POST /intentions/proposals/{id}/decide`` and ``POST
+/intentions/questions/{id}/answer``. When that read fails, both are null and the rest of the answer is sent.
+
 The default goal prompt (``nous.goals.default_prompt``), which goal sessions read in their first task and their
 follow-up turns: ``GET /goals/prompt`` (the text the builders start from, whether it is the built-in one, the built-in
 one, the limit, and when and by which proof the owner's text was saved), ``PUT /goals/prompt`` (body ``{"text": ...}``:
@@ -93,6 +99,7 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_backgro
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals import activity as goal_activity
+from nous.goals import awaiting as goal_awaiting
 from nous.goals import commands as goal_commands
 from nous.goals import default_prompt, pacing
 from nous.goals.envelope import _RANGES, PRESETS, STALL_RANGE
@@ -485,8 +492,9 @@ def _plan_steps(plan: Any) -> list[dict[str, Any]]:
     return steps
 
 
-def goal_row(goal: Goal, tally: Tally) -> dict[str, Any]:
-    """A goal as the list shows it."""
+def goal_row(goal: Goal, tally: Tally, awaiting_count: int | None = 0) -> dict[str, Any]:
+    """A goal as the list shows it. ``awaiting_count``: how many approval requests and questions its sessions wait
+    on the owner for (``nous.goals.awaiting``), None when that could not be read."""
     return {
         "id": str(goal.id),
         "ref": format_short_id(goal.short_id),
@@ -503,6 +511,7 @@ def goal_row(goal: Goal, tally: Tally) -> dict[str, Any]:
         "next_wake_at": _iso(goal.next_wake_at),
         "open_session": tally.open_session,
         "pending_request": goal.pending_request,
+        "awaiting_count": awaiting_count,
         "mode": goal.mode,
         "updated_at": _iso(goal.updated_at),
     }
@@ -555,15 +564,19 @@ def goal_detail(
     journal: list[GoalJournal],
     pause_sentence: str | None,
     settings: Any,
+    awaiting: dict[str, list[dict[str, Any]]] | None,
     mode_ended: str | None = None,
 ) -> dict[str, Any]:
     """A goal in full: its row, charter, limits, plan, its newest sessions (the oldest of them first) and how many it
     has in all, journal (newest first), why the harness paused it, the actions the store accepts now, the
-    sentence of what its spend does not count, and whether it may run any command (``commands_state``; ``mode_ended``
-    is the text of the row that ended its mode, when that is its newest change of mode)."""
+    sentence of what its spend does not count, whether it may run any command (``commands_state``; ``mode_ended``
+    is the text of the row that ended its mode, when that is its newest change of mode), and what its sessions wait on
+    the owner for (``awaiting``, ``nous.goals.awaiting.waiting_items``; None when that could not be read, and then
+    ``awaiting_count`` is None too)."""
+    count = None if awaiting is None else len(awaiting["proposals"]) + len(awaiting["questions"])
     return {
         "enabled": True,
-        **goal_row(goal, tally),
+        **goal_row(goal, tally, count),
         "objective": goal.objective,
         "done_when": goal.done_when,
         "origin_channel": masked_channel(goal.origin_channel),
@@ -612,6 +625,7 @@ def goal_detail(
         "actions": available_actions(goal, tally=tally, now=now, settings=settings),
         "resume_blocked": resume_blocked(goal, spent=tally.spent_total, now=now),
         "spend_note": SPEND_NOTE,
+        "awaiting": awaiting,
     }
 
 
@@ -833,6 +847,28 @@ def build_goal_routes(
             return None
         return clip(found.text, PAUSE_SENTENCE_CHARS)
 
+    async def waiting_items(goal: Goal, now: datetime) -> dict[str, list[dict[str, Any]]] | None:
+        """What ``goal``'s sessions wait on the owner for (``nous.goals.awaiting``), in a transaction of its own; None
+        when that read failed, so the rest of the goal is still sent."""
+        try:
+            async with database.session() as session:
+                return await goal_awaiting.waiting_items(session, agent_id, goal, settings=settings, now=now)
+        except Exception as exc:
+            logger.warning("F114: reading what a goal waits on the owner for failed (%s)", type(exc).__name__)
+            return None
+
+    async def waiting_counts(listed: list[Goal], now: datetime) -> dict[UUID, int | None]:
+        """How many approval requests and questions each goal waits on the owner for: 0 for a goal that is not draft,
+        active or paused (not read), None for every other goal when the read failed."""
+        live = [g.id for g in listed if g.state in LIVE_STATES]
+        try:
+            async with database.session() as session:
+                found = await goal_awaiting.waiting_counts(session, agent_id, live, settings=settings, now=now)
+        except Exception as exc:
+            logger.warning("F114: counting what the goals wait on the owner for failed (%s)", type(exc).__name__)
+            return {g.id: None if g.id in live else 0 for g in listed}
+        return {g.id: found.get(g.id, 0) for g in listed}
+
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
         assert goals is not None
         now, tally = await tallies([goal.id])
@@ -846,6 +882,7 @@ def build_goal_routes(
             journal=await goals.journal(goal.id, limit=journal_limit),
             pause_sentence=await harness_pause_sentence(goal),
             settings=settings,
+            awaiting=await waiting_items(goal, now),
             mode_ended=await mode_ended(goal),
         )
 
@@ -885,10 +922,11 @@ def build_goal_routes(
             return _error(400, f"limit must be a whole number from 1 (at most {LIST_MAX} are sent)")
         try:
             listed, total = await listed_goals(STATE_FILTERS[wanted], min(limit, LIST_MAX))
-            _now, by_goal = await tallies([g.id for g in listed])
+            now, by_goal = await tallies([g.id for g in listed])
         except Exception as exc:
             return failed("listing goals", exc)
-        rows = [goal_row(g, by_goal.get(g.id, Tally())) for g in listed]
+        counts = await waiting_counts(listed, now)
+        rows = [goal_row(g, by_goal.get(g.id, Tally()), counts[g.id]) for g in listed]
         return JSONResponse({"enabled": True, "goals": rows, "total": total})
 
     async def options(request: Request) -> Response:

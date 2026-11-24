@@ -33,7 +33,7 @@
   // Harness dashboard §4.6: one attention poll feeds every nav badge and the
   // mobile menu dot (the badges sit inside a closed drawer on a phone).
   usePoll(attentionPoll);
-  let needsYou = $derived($attentionCounts.questions + $attentionCounts.sends);
+  let needsYou = $derived($attentionCounts.questions + $attentionCounts.sends + $attentionCounts.goals);
 
   // ── Mobile drawer state ───────────────────────────────────────
   let drawerOpen = $state(false);

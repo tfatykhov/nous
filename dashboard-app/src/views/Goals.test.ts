@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
 import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
-import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, activityAnswer, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
+import { get } from 'svelte/store';
+import { COMMANDS, COMMANDS_ON, OPTIONS, PACING, activityAnswer, awaitingProposal, awaitingQuestion, goalDetail, goalRow, goalToolsAnswer } from '../lib/testing/goalFixtures';
+import { attentionOverride } from '../lib/stores/attention';
 import type { Action, GoalDetail } from '../lib/goals';
 
 // F114 goals PR 2: the Goals screen over the /goals routes. The fixtures have the shapes nous/api/goal_routes.py
@@ -1378,5 +1380,117 @@ describe('Goals: the page with the activity panel on', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await vi.waitFor(() => expect(lists()).toBe(lists0 + 2));
     expect(activityReads()).toBe(reads0);
+  });
+});
+
+describe('Goals: what waits for your answer', () => {
+  const P = awaitingProposal();
+  const WAITING = { awaiting_count: 1, awaiting: { proposals: [P], questions: [] } };
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  afterEach(() => {
+    vi.useRealTimers();
+    attentionOverride.set({});
+  });
+
+  it('the list marks a goal that waits, in words and the warn colour; none for 0 or a count not read', async () => {
+    install([
+      { ...A, awaiting_count: 1 },
+      { ...B, awaiting_count: 3 },
+      goalDetail({ id: 'd', ref: 'G-0004', title: 'Plan the trip', state: 'draft', awaiting_count: null, actions: [] }),
+      goalDetail({ id: 'e', ref: 'G-0005', title: 'Water the plants', state: 'active', awaiting_count: 0 }),
+    ]);
+    render(Goals);
+    const nav = await screen.findByRole('navigation', { name: 'Goals' });
+    await within(nav).findByText('Tidy the notes');
+    const one = within(nav).getByText('Waiting for your answer');
+    expect(one.classList.contains('status-pill--warn')).toBe(true);
+    expect(one.closest('a')?.textContent).toContain('Tidy the notes');
+    expect(within(nav).getByText('3 waiting for your answer').closest('a')?.textContent).toContain('Sort the photos');
+    expect(within(nav).getAllByText(/waiting for your answer$/i)).toHaveLength(2);
+  });
+
+  it("a goal that waits shows what waits first in its pane, above the goal's own card", async () => {
+    install([{ ...A, ...WAITING }, B, C]);
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const asks = await within(region).findByRole('region', { name: 'Waiting for you' });
+    expect(region.querySelector('.card')).toBe(asks);
+    const header = within(region).getByRole('heading', { level: 2, name: 'Tidy the notes' });
+    expect(asks.compareDocumentPosition(header) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(asks).getByText('Nous asks to run send_email')).toBeTruthy();
+  });
+
+  it('Approve in the pane sends the decision and the page reads the goal again at once; the line stays', async () => {
+    install([{ ...A, ...WAITING }, B, C]);
+    handlers[`POST /intentions/proposals/${P.id}/decide`] = () => {
+      details['G-0001'] = { ...details['G-0001'], awaiting_count: 0, awaiting: { proposals: [], questions: [] } };
+      return [200, { proposal_id: P.id, short_id: P.short_id, state: 'executed', result: 'sent', error: null, changed: true, woke: false }];
+    };
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const before = reads('/goals/G-0001');
+    await fireEvent.click(await within(region).findByRole('button', { name: 'Approve' }));
+    expect(await within(region).findByText('Approved and executed (cfd2afea).')).toBeTruthy();
+    await waitFor(() => expect(reads('/goals/G-0001')).toBe(before + 1));
+    expect(posts()).toEqual([{ url: `/intentions/proposals/${P.id}/decide`, method: 'POST', body: { decision: 'approve', actor: 'dashboard' } }]);
+    await settle();
+    expect(within(region).getByText('Approved and executed (cfd2afea).')).toBeTruthy();
+    expect(within(region).queryByText(/no longer waiting/)).toBeNull();
+  });
+
+  it("opening another goal carries over nothing of the first goal's requests, typed text or result line", async () => {
+    const Q = awaitingQuestion();
+    install([{ ...A, awaiting_count: 2, awaiting: { proposals: [P], questions: [Q] } }, B, C]);
+    let release!: (a: [number, unknown]) => void;
+    handlers[`POST /intentions/proposals/${P.id}/decide`] = () => new Promise((resolve) => { release = resolve; });
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const first = await pane('Tidy the notes');
+    await fireEvent.input(await within(first).findByLabelText('Your answer'), { target: { value: 'Half an answer' } });
+    await fireEvent.click(within(first).getByRole('button', { name: 'Approve' }));
+    go('#/goals/g/G-0002');
+    const second = await pane('Sort the photos');
+    release([200, { proposal_id: P.id, short_id: P.short_id, state: 'executed', result: 'sent', error: null, changed: true, woke: false }]);
+    await settle();
+    await settle();
+    expect(within(second).queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+    expect(within(second).queryByText('Nous asks to run send_email')).toBeNull();
+    expect(within(second).queryByText('Approved and executed (cfd2afea).')).toBeNull();
+    expect(screen.queryByDisplayValue('Half an answer')).toBeNull();
+  });
+
+  it('a new request shows up on the next poll, in the pane and in the list, with no reload', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    go('#/goals/g/G-0001');
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    expect(within(region).queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+    details['G-0001'] = { ...details['G-0001'], ...WAITING };
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await within(region).findByText('Nous asks to run send_email')).toBeTruthy();
+    const nav = screen.getByRole('navigation', { name: 'Goals' });
+    expect(await within(nav).findByText('Waiting for your answer')).toBeTruthy();
+  });
+
+  it("the Goals badge follows the page's open list, only when it is whole and every count was read", async () => {
+    install([{ ...A, awaiting_count: 2 }, { ...B, awaiting_count: 1 }, C]);
+    render(Goals);
+    await waitFor(() => expect(get(attentionOverride).goals?.value).toBe(3));
+    cleanup();
+    attentionOverride.set({});
+    install([{ ...A, awaiting_count: null }, { ...B, awaiting_count: 1 }, C]);
+    render(Goals);
+    await within(await screen.findByRole('navigation', { name: 'Goals' })).findByText('Tidy the notes');
+    await settle();
+    expect(get(attentionOverride).goals).toBeUndefined();
+    cleanup();
+    install([{ ...A, awaiting_count: 1 }, B, C]);
+    handlers['GET /goals?state=open'] = () => [200, { enabled: true, goals: [rowOf({ ...A, awaiting_count: 1 })], total: 5 }];
+    render(Goals);
+    await within(await screen.findByRole('navigation', { name: 'Goals' })).findByText('Tidy the notes');
+    await settle();
+    expect(get(attentionOverride).goals).toBeUndefined();
   });
 });

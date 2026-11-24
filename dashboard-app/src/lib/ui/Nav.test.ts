@@ -151,6 +151,21 @@ describe('Nav on the rail', () => {
     expect(container.querySelector('a[href="#/work"]')?.getAttribute('aria-label')).toBe('Work, 2 sends in doubt');
   });
 
+  it('the Goals link says what goals wait on the owner for, in its name and in the waiting colour', async () => {
+    const { pushCounts, attentionOverride } = await import('../stores/attention');
+    pushCounts({ goals: 2 });
+    const { container } = render(Nav, { props: { currentRoute: 'overview' } });
+    const goals = container.querySelector('a[href="#/goals"]');
+    expect(goals?.getAttribute('aria-label')).toBe('Goals, 2 waiting for your answer');
+    expect(goals?.querySelector('.nav-badge--waiting')?.textContent).toBe('2');
+    cleanup();
+    pushCounts({ goals: 0 });
+    const none = render(Nav, { props: { currentRoute: 'overview' } }).container.querySelector('a[href="#/goals"]');
+    expect(none?.getAttribute('aria-label')).toBe('Goals');
+    expect(none?.querySelector('.nav-badge')).toBeNull();
+    attentionOverride.set({});
+  });
+
   it('a link is its words only: no icon, no glyph (the owner’s rule; the hidden icons went in PR 7)', () => {
     const { container } = render(Nav, { props: { currentRoute: 'overview' } });
     expect(container.querySelectorAll('a.nav-link svg, a.nav-link .nav-icon')).toHaveLength(0);

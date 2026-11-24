@@ -15,27 +15,32 @@ export const attentionPoll = makePollStore<AttentionData>(
 );
 
 type Stamped = { value: number; at: number };
-export const attentionOverride = writable<{ questions?: Stamped; sends?: Stamped }>({});
+type Overrides = { questions?: Stamped; sends?: Stamped; goals?: Stamped };
+export const attentionOverride = writable<Overrides>({});
 
-export function pushCounts(counts: { questions?: number; sends?: number }): void {
+/** `goals`: the approval requests and questions the goals' sessions wait on the owner for (the Goals badge). */
+export function pushCounts(counts: { questions?: number; sends?: number; goals?: number }): void {
   const at = Date.now();
   attentionOverride.update((o) => ({
     ...o,
     ...(counts.questions !== undefined ? { questions: { value: counts.questions, at } } : {}),
     ...(counts.sends !== undefined ? { sends: { value: counts.sends, at } } : {}),
+    ...(counts.goals !== undefined ? { goals: { value: counts.goals, at } } : {}),
   }));
 }
 
+/** A count the server could not read (`goal_asks_waiting: null`) is 0 here: no badge. */
 export function mergeCounts(
-  data: Pick<AttentionData, 'questions_waiting' | 'sends_in_doubt'> | null,
+  data: Pick<AttentionData, 'questions_waiting' | 'sends_in_doubt' | 'goal_asks_waiting'> | null,
   polledAt: number | null,
-  override: { questions?: Stamped; sends?: Stamped },
-): { questions: number; sends: number } {
+  override: Overrides,
+): { questions: number; sends: number; goals: number } {
   const pick = (polled: number, o: Stamped | undefined) =>
     o && (polledAt === null || o.at >= polledAt) ? o.value : polled;
   return {
     questions: pick(data?.questions_waiting ?? 0, override.questions),
     sends: pick(data?.sends_in_doubt ?? 0, override.sends),
+    goals: pick(data?.goal_asks_waiting ?? 0, override.goals),
   };
 }
 
