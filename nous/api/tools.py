@@ -38,7 +38,7 @@ from nous import judge as outside_judge  # F118: the running judge's accessor on
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
-from nous.api.tool_classes import mcp_tool_background
+from nous.api.tool_classes import MCP_TOOL_PREFIX, mcp_tool_background
 from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build, lineage_runs_runner
 from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
@@ -248,6 +248,35 @@ def _salvage_leaked_args(
     return {**args, **cleaned, **salvaged}, [k for k in missing if k not in salvaged]
 
 
+# The declared types a text value is converted to by _convert_text_scalars.
+_TEXT_CONVERTED_TYPES = frozenset({"integer", "number", "boolean"})
+
+
+def _convert_text_scalars(args: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """``args`` with each text value of an argument whose schema declares exactly ``integer``, ``number`` or
+    ``boolean`` converted, when it parses and meets the schema's enum / minimum / maximum (``_coerce_to_schema_type``).
+
+    A model sometimes sends ``"48"`` for 48 or ``"false"`` for false, and a handler that compares, adds or tests such a
+    value as it arrives fails or misreads it. Text that does not convert (``"two days"``, ``"48.0"`` for an integer,
+    ``""``, ``"1"`` for a boolean, a value out of range) is passed on exactly as sent, as is every value that is not
+    text, every argument of a union, untyped or string type, and every ``_`` key. Returns a new dict when anything
+    changed; ``args`` itself is never modified.
+    """
+    properties = schema.get("properties") or {}
+    converted: dict[str, Any] = {}
+    for key, value in args.items():
+        if not isinstance(value, str) or key.startswith("_"):
+            continue
+        prop = properties.get(key)
+        declared = prop.get("type") if isinstance(prop, dict) else None
+        if not isinstance(declared, str) or declared not in _TEXT_CONVERTED_TYPES:
+            continue
+        new = _coerce_to_schema_type(value, prop)
+        if new is not None:
+            converted[key] = new
+    return {**args, **converted} if converted else args
+
+
 # Structural type mismatches no downstream coercion layer repairs. Deliberately
 # NOT a full JSON-schema validator: pydantic's lax mode happily turns "0.9" into
 # 0.9 and "true" into True, so rejecting scalar-for-scalar here would fail calls
@@ -300,7 +329,10 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
             continue
         expected_scalar = _SCALAR_TYPES.get(declared)
         # Only the reverse structural error: a container where a scalar belongs.
-        # Scalar-for-scalar is left to the handler, which coerces it.
+        # Scalar-for-scalar is never refused here: in dispatch, a text value for an
+        # integer, number or boolean argument of a Nous tool that parses was already
+        # converted (_convert_text_scalars, in ToolDispatcher._repair); any other
+        # mismatch reaches the handler as sent.
         if expected_scalar is not None and isinstance(value, list | dict):
             errors.append(f"{key} must be {declared}, got {_describe_json_type(value)}.")
     return errors
@@ -472,8 +504,10 @@ class ToolDispatcher:
     def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
         """``(args, still missing, salvaged keys)``: the schema-required keys
         a call is missing, with any value the model leaked as an XML
-        <parameter> tag inside another string arg recovered. The ONE repair --
-        ``dispatch`` runs it, and ``repaired_args`` exposes its result."""
+        <parameter> tag inside another string arg recovered, and a text value
+        of an integer, number or boolean argument converted
+        (``_convert_text_scalars``). The ONE repair -- ``dispatch`` runs it,
+        and ``repaired_args`` exposes its result."""
         schema = self._schemas.get(name) or {}
         if "reason" in args and "reason" not in (schema.get("properties") or {}):
             # F108: the reason the model gives for a call (offered on every tool) is the runner's to record, not the
@@ -486,6 +520,10 @@ class ToolDispatcher:
             before = set(missing)
             args, missing = _salvage_leaked_args(name, args, missing, schema)
             salvaged_keys = sorted(before - set(missing))
+        if not name.startswith(MCP_TOOL_PREFIX):
+            # A text number or boolean for a typed argument of Nous's own tools. An MCP client tool's arguments go to
+            # its server as sent: the schema is the server's, and the server checks its own arguments.
+            args = _convert_text_scalars(args, schema)
         return args, missing, salvaged_keys
 
     def repaired_args(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -2357,6 +2395,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             return _tool_error(
                 "recall_deep needs query (search memory by topic) or hours (list the latest conversations), or both."
             )
+        # The dispatcher converts a text number ("48"); text that is not one stops here with what to send.
+        wrong = [
+            f"{key} must be a number{hint}, got {_describe_json_type(value)}"
+            for key, value, hint in (("hours", hours, " of hours, such as 48"), ("limit", limit, " from 1 to 50"))
+            if value is not None and not isinstance(value, int | float)
+        ]
+        if wrong:
+            return _tool_error(f"recall_deep: {'; '.join(wrong)}.")
         parts: list[dict[str, Any]] = []
         if hours is not None:
             parts.append(await _recent_episodes(hours=hours, limit=limit))
