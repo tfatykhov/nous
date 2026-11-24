@@ -277,3 +277,30 @@ async def test_recall_deep_keeps_a_real_fractional_hours_working():
     result = await recall_deep(hours=1.5)
     assert not result.get("is_error")
     assert "No episodes found in the last 1.5 hours." in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("args", "said"),
+    [
+        ({"hours": "99999999999999"}, "hours must be at most 87600"),  # converted, then too long a span
+        ({"hours": 99999999999999}, "hours must be at most 87600"),
+        ({"hours": float("nan")}, "hours must be at most 87600"),
+        ({"hours": True}, "hours must be a number"),
+    ],
+)
+async def test_recall_deep_answers_a_clear_error_for_hours_it_cannot_list(args, said, caplog):
+    brain, heart = MagicMock(), MagicMock()
+    brain.agent_id = "test"
+    dispatcher = ToolDispatcher()
+    dispatcher.register(
+        "recall_deep",
+        create_nous_tools(brain, heart, settings=_recall_settings())["recall_deep"],
+        _RECALL_DEEP_SCHEMA,
+    )
+    with caplog.at_level(logging.DEBUG):
+        text, is_error = await dispatcher.dispatch("recall_deep", args)
+    assert is_error is True
+    assert said in text
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    heart.list_episodes.assert_not_called()

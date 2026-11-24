@@ -2399,8 +2399,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         wrong = [
             f"{key} must be a number{hint}, got {_describe_json_type(value)}"
             for key, value, hint in (("hours", hours, " of hours, such as 48"), ("limit", limit, " from 1 to 50"))
-            if value is not None and not isinstance(value, int | float)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int | float))
         ]
+        if not wrong and hours is not None and not hours <= _RECALL_MAX_HOURS:
+            wrong = [f"hours must be at most {_RECALL_MAX_HOURS} (ten years), got {hours}"]
         if wrong:
             return _tool_error(f"recall_deep: {'; '.join(wrong)}.")
         parts: list[dict[str, Any]] = []
@@ -3039,6 +3041,9 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
     "required": ["content"],
 }
 _LEARN_FACT_PARAMS = _schema_params(_LEARN_FACT_SCHEMA)
+
+# The longest span recall_deep lists: more than any stored conversation is old, and far below what a time span holds.
+_RECALL_MAX_HOURS = 87_600
 
 _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
