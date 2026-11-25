@@ -8,7 +8,7 @@ with no such time leaves it None, and a said-time never goes into ``event_date``
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -22,6 +22,7 @@ from nous.heart.schemas import EpisodeInput, FactInput
 from nous.storage.models import Fact
 
 EPISODE_START = datetime(2024, 4, 11, 9, 30, tzinfo=UTC)
+EPISODE_END = datetime(2024, 4, 11, 11, 45, tzinfo=UTC)
 SAID = datetime(2024, 5, 1, 14, 0, tzinfo=UTC)
 
 
@@ -205,12 +206,12 @@ async def test_a_fact_pulled_from_a_tool_result_in_the_streaming_loop_is_stamped
 
 
 # ---------------------------------------------------------------------------
-# Writers after the episode: the episode's start
+# The other writers after the episode: the latest moment the statement can have been made
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.postgres_only
-async def test_a_session_reflection_lesson_gets_its_episode_start(db, session, mock_embeddings):
+async def test_a_session_reflection_lesson_gets_its_episode_end(db, session, mock_embeddings):
     from nous.brain.brain import Brain
     from nous.cognitive.layer import CognitiveLayer
     from nous.cognitive.schemas import SessionMetadata
@@ -234,16 +235,34 @@ async def test_a_session_reflection_lesson_gets_its_episode_start(db, session, m
         )
         lesson = "The billing service ships on Tuesdays after the weekly review."
         await cognitive.end_session(agent, sid, reflection=f"Summary.\n- learned: {lesson}\n", session=session)
+        ended = await heart.get_episode(ep.id, session=session)
+        assert ended.ended_at is not None and ended.ended_at > EPISODE_START
         rows = (
             (await session.execute(select(Fact).where(Fact.agent_id == agent, Fact.source == "reflection")))
             .scalars()
             .all()
         )
-        assert [(r.content, r.source_episode_id, r.mentioned_at) for r in rows] == [(lesson, ep.id, EPISODE_START)]
+        assert [(r.content, r.source_episode_id, r.mentioned_at) for r in rows] == [(lesson, ep.id, ended.ended_at)]
         assert (rows[0].event_date, rows[0].valid_from, rows[0].valid_to) == (None, None, None)
     finally:
         await heart.close()
         await brain.close()
+
+
+async def test_a_session_reflection_lesson_without_an_episode_gets_the_time_of_the_write():
+    from test_outside_content_shadow import _layer
+
+    from nous.cognitive.schemas import SessionMetadata
+
+    layer = _layer("off")
+    layer._heart.learn = AsyncMock()
+    layer._session_metadata["s1"] = SessionMetadata()
+    before = datetime.now(UTC)
+    await layer.end_session("agent", "s1", reflection="- learned: Deploys need a second reviewer on Fridays.")
+    after = datetime.now(UTC)
+    (fi,) = _learned(layer._heart)
+    assert fi.source == "reflection" and fi.source_episode_id is None
+    assert _within(before, fi, after) and _no_event_time(fi)
 
 
 def _correction_extractor(episode_row):
@@ -292,27 +311,44 @@ def _corrected_event() -> Event:
     )
 
 
-async def test_a_correction_from_the_outcome_signals_gets_its_episode_start():
-    episode = MagicMock(transcript="User: no, staging", structured_summary={}, summary="", started_at=EPISODE_START)
+async def test_a_correction_from_the_outcome_signals_gets_its_episode_end():
+    episode = MagicMock(
+        transcript="User: no, staging",
+        structured_summary={},
+        summary="",
+        started_at=EPISODE_START,
+        ended_at=EPISODE_END,
+    )
     extractor, heart = _correction_extractor(episode)
     with patch("nous.handlers.correction_extractor.call_background_llm", new_callable=AsyncMock) as llm:
         llm.return_value = _CORRECTION
         await extractor.handle(_corrected_event())
     (fi,) = _learned(heart)
     assert fi.source == "correction_extraction"
-    assert fi.mentioned_at == EPISODE_START and _no_event_time(fi)
+    assert fi.mentioned_at == EPISODE_END and _no_event_time(fi)
 
 
-async def test_a_correction_whose_episode_cannot_be_read_is_stored_without_a_time():
-    extractor, heart = _correction_extractor(RuntimeError("connection reset"))
+@pytest.mark.parametrize(
+    "episode_row",
+    [
+        RuntimeError("connection reset"),
+        None,
+        MagicMock(transcript="", structured_summary={}, summary="", ended_at=None),
+    ],
+    ids=["read_fails", "no_row", "no_end"],
+)
+async def test_a_correction_with_no_episode_end_at_hand_gets_the_time_of_the_write(episode_row):
+    extractor, heart = _correction_extractor(episode_row)
     with patch("nous.handlers.correction_extractor.call_background_llm", new_callable=AsyncMock) as llm:
         llm.return_value = _CORRECTION
+        before = datetime.now(UTC)
         await extractor.handle(_corrected_event())
+        after = datetime.now(UTC)
     (fi,) = _learned(heart)
-    assert fi.mentioned_at is None
+    assert _within(before, fi, after)
 
 
-async def test_exemplar_facts_get_their_episode_start():
+async def test_exemplar_facts_get_the_time_of_the_write():
     from test_exemplar_mode import PURE_STREAM, _StubEmbeddings
 
     from nous.handlers.fact_extractor import FactExtractor
@@ -324,7 +360,7 @@ async def test_exemplar_facts_get_their_episode_start():
         _embeddings = _StubEmbeddings()
 
         async def get_episode(self, episode_id, session=None):
-            return SimpleNamespace(started_at=EPISODE_START)
+            return SimpleNamespace(started_at=EPISODE_START, ended_at=EPISODE_END)
 
         async def learn(self, fact_input, **kw):
             captured.append(fact_input)
@@ -340,24 +376,12 @@ async def test_exemplar_facts_get_their_episode_start():
     )
     ext._dedup_via_search = False
     ext._llm = object()
+    before = datetime.now(UTC)
     await ext.extract_and_store(summary={"candidate_facts": []}, episode_id=str(uuid4()), transcript=PURE_STREAM)
+    after = datetime.now(UTC)
     assert len(captured) == 3
     assert all(fi.source == "exemplar_extractor" for fi in captured)
-    assert all(fi.mentioned_at == EPISODE_START and _no_event_time(fi) for fi in captured)
-
-
-async def test_the_compaction_event_names_the_open_episode():
-    from test_outside_content_shadow import _Bus, _layer
-
-    bus = _Bus()
-    layer = _layer("off", bus)
-    layer._heart.bump_episode_compaction_count = AsyncMock()
-    episode = str(uuid4())
-    layer._active_episodes["s1"] = episode
-    snapshot = [{"role": "user", "content": "hello"}]
-    await layer.pre_compaction("agent", "s1", snapshot)
-    (event,) = bus.events
-    assert event.data == {"message_snapshot": snapshot, "episode_id": episode}
+    assert all(_within(before, fi, after) and _no_event_time(fi) for fi in captured)
 
 
 _KNOWLEDGE_SNAPSHOT = [
@@ -367,86 +391,65 @@ _KNOWLEDGE_SNAPSHOT = [
 _KNOWLEDGE_FACT = "The billing service deploys every Tuesday after the weekly review."
 
 
-def _knowledge_llm() -> AsyncMock:
+def _knowledge_llm(content: str = _KNOWLEDGE_FACT) -> AsyncMock:
     client = AsyncMock()
-    reply = [{"subject": "billing", "content": _KNOWLEDGE_FACT, "category": "technical", "confidence": 0.9}]
+    reply = [{"subject": "billing", "content": content, "category": "technical", "confidence": 0.9}]
     client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(reply)}]))
     return client
 
 
-@pytest.mark.postgres_only
-async def test_a_fact_extracted_at_compaction_gets_its_episode_start(db, mock_embeddings):
-    from nous.handlers.knowledge_extractor import KnowledgeExtractor
-    from nous.heart.heart import Heart
-
-    agent = f"test-said-know-{uuid4().hex[:8]}"
-    settings = _own_settings(agent)
-    heart = Heart(db, settings, embedding_provider=mock_embeddings)
-    try:
-        ep = await heart.start_episode(EpisodeInput(summary="Billing deploy schedule."))
-        async with db.session() as s:
-            await s.execute(
-                text("UPDATE heart.episodes SET started_at = :t WHERE id = :i"), {"t": EPISODE_START, "i": ep.id}
-            )
-            await s.commit()
-        extractor = KnowledgeExtractor(heart, settings, MagicMock(), llm_client=_knowledge_llm())
-        event = Event(
-            type="conversation_compacting",
-            agent_id=agent,
-            session_id="s-know",
-            data={"message_snapshot": _KNOWLEDGE_SNAPSHOT, "episode_id": str(ep.id)},
-        )
-        await extractor.handle(event)
-        async with db.session() as s:
-            rows = (await s.execute(select(Fact).where(Fact.agent_id == agent))).scalars().all()
-        assert [(r.content, r.source, r.mentioned_at) for r in rows] == [
-            (_KNOWLEDGE_FACT, "knowledge_extractor", EPISODE_START)
-        ]
-        assert (rows[0].event_date, rows[0].valid_from, rows[0].valid_to) == (None, None, None)
-    finally:
-        async with db.session() as s:
-            await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent})
-            await s.execute(text("DELETE FROM heart.episodes WHERE agent_id = :a"), {"a": agent})
-            await s.commit()
-        await heart.close()
-
-
-async def test_a_fact_extracted_at_compaction_with_no_episode_has_no_time():
+def _knowledge_extractor(heart, content: str = _KNOWLEDGE_FACT, episode_start: datetime = EPISODE_START):
     from nous.handlers.knowledge_extractor import KnowledgeExtractor
 
-    heart = MagicMock()
-    heart.learn = AsyncMock()
+    heart.learn = AsyncMock(return_value=MagicMock())
     heart.find_similar_facts = AsyncMock(return_value=[])
-    heart.get_episode = AsyncMock(side_effect=AssertionError("no episode to read"))
-    settings = Settings(_env_file=None)
-    extractor = KnowledgeExtractor(heart, settings, MagicMock(), llm_client=_knowledge_llm())
-    event = Event(
-        type="conversation_compacting", agent_id="a", session_id="s", data={"message_snapshot": _KNOWLEDGE_SNAPSHOT}
+    # The open episode, which the extractor read before this change. It must not stamp its start.
+    heart.get_episode = AsyncMock(return_value=SimpleNamespace(started_at=episode_start, ended_at=None))
+    return KnowledgeExtractor(heart, Settings(_env_file=None), MagicMock(), llm_client=_knowledge_llm(content))
+
+
+def _compaction_event(snapshot=None) -> Event:
+    return Event(
+        type="conversation_compacting",
+        agent_id="a",
+        session_id="s-know",
+        data={"message_snapshot": snapshot or _KNOWLEDGE_SNAPSHOT, "episode_id": str(uuid4())},
     )
-    await extractor.handle(event)
+
+
+async def test_a_fact_extracted_at_compaction_gets_the_time_of_the_write():
+    heart = MagicMock()
+    extractor = _knowledge_extractor(heart)
+    before = datetime.now(UTC)
+    await extractor.handle(_compaction_event())
+    after = datetime.now(UTC)
     (fi,) = _learned(heart)
-    assert fi.mentioned_at is None
+    assert fi.content == _KNOWLEDGE_FACT and fi.source == "knowledge_extractor"
+    assert _within(before, fi, after) and _no_event_time(fi)
 
 
 # ---------------------------------------------------------------------------
-# The sleep reflection: the latest start of the episodes it reflected on
+# The sleep reflection: the latest end of the episodes it reflected on
 # ---------------------------------------------------------------------------
 
 T_FIRST = datetime(2024, 4, 10, 8, 0, tzinfo=UTC)
 T_LATEST = datetime(2024, 4, 11, 9, 0, tzinfo=UTC)
+T_LATEST_END = datetime(2024, 4, 11, 10, 15, tzinfo=UTC)
 T_NO_SUMMARY = datetime(2024, 4, 11, 20, 0, tzinfo=UTC)
 
 
-def _reflecting_handler(reflection: dict):
+def _reflecting_handler(reflection: dict, episodes: list | None = None):
     from test_sleep_handler import _make_sleep_handler
 
     handler, _brain, heart, _bus, llm_client = _make_sleep_handler()
     heart.list_episodes = AsyncMock(
-        return_value=[
+        return_value=episodes
+        or [
             # Newest first, as list_recent orders them. The episode with no summary is not reflected on.
-            SimpleNamespace(summary="", started_at=T_NO_SUMMARY),
-            SimpleNamespace(summary="Planned the billing release.", started_at=T_LATEST),
-            SimpleNamespace(summary="Debugged the deploy pipeline.", started_at=T_FIRST),
+            SimpleNamespace(summary="", started_at=T_NO_SUMMARY, ended_at=T_NO_SUMMARY),
+            SimpleNamespace(summary="Planned the billing release.", started_at=T_LATEST, ended_at=T_LATEST_END),
+            # Started first, ended after the one above started: the latest end is still T_LATEST_END.
+            SimpleNamespace(summary="Debugged the deploy pipeline.", started_at=T_FIRST, ended_at=T_LATEST),
         ]
     )
     heart.search_facts = AsyncMock(return_value=[])
@@ -464,7 +467,7 @@ def _stats() -> dict:
     return {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
 
 
-async def test_sleep_reflection_facts_get_the_latest_reflected_episode_start():
+async def test_sleep_reflection_facts_get_the_latest_reflected_episode_end():
     reflection = {
         "patterns": [],
         "lessons": [],
@@ -499,13 +502,13 @@ async def test_sleep_reflection_facts_get_the_latest_reflected_episode_start():
         "Deploys freeze on Fridays.",
         "Dana owns staging now.",
     ]
-    assert all(fi.mentioned_at == T_LATEST and _no_event_time(fi) for fi in learned)
+    assert all(fi.mentioned_at == T_LATEST_END and _no_event_time(fi) for fi in learned)
     # The UPDATES replacement leaves the time unset, as supersede does.
     (replacement,) = [c.args[1] for c in heart.supersede_fact.call_args_list]
     assert replacement.content == "Releases are weekly now." and replacement.mentioned_at is None
 
 
-async def test_sleep_reflection_summary_and_lessons_get_the_latest_reflected_episode_start():
+async def test_sleep_reflection_summary_and_lessons_get_the_latest_reflected_episode_end():
     reflection = {
         "patterns": [],
         "lessons": ["Small releases are easier to roll back."],
@@ -518,7 +521,62 @@ async def test_sleep_reflection_summary_and_lessons_get_the_latest_reflected_epi
     assert await handler._phase_reflect(_stats()) is True
     learned = _learned(heart)
     assert [fi.subject for fi in learned] == ["daily_reflection", "lesson_learned"]
-    assert all(fi.mentioned_at == T_LATEST and _no_event_time(fi) for fi in learned)
+    assert all(fi.mentioned_at == T_LATEST_END and _no_event_time(fi) for fi in learned)
+
+
+@pytest.mark.postgres_only
+async def test_sleep_reflection_reads_the_episode_ends_from_list_recent(db, mock_embeddings):
+    """The real list_recent carries each ended episode's end, kept out of model_dump, and the stored fact gets
+    the latest one."""
+    from nous.events import EventBus
+    from nous.handlers.sleep_handler import SleepHandler
+    from nous.heart.heart import Heart
+
+    agent = f"test-said-sleep-{uuid4().hex[:8]}"
+    settings = _own_settings(agent).model_copy(update={"consolidation_audit_enabled": False})
+    heart = Heart(db, settings, embedding_provider=mock_embeddings)
+    now = datetime.now(UTC).replace(microsecond=0)
+    spans = [
+        (now - timedelta(hours=3), now - timedelta(hours=2)),
+        (now - timedelta(hours=2), now - timedelta(minutes=50)),
+    ]
+    try:
+        for i, (start, end) in enumerate(spans):
+            ep = await heart.start_episode(
+                EpisodeInput(summary=f"Release planning part {i} {uuid4().hex}"), dedup=False
+            )
+            async with db.session() as s:
+                await s.execute(
+                    text("UPDATE heart.episodes SET started_at = :s, ended_at = :e, outcome = 'success' WHERE id = :i"),
+                    {"s": start, "e": end, "i": ep.id},
+                )
+                await s.commit()
+        listed = await heart.list_episodes(limit=10, hours=24)
+        assert sorted(e.ended_at for e in listed) == [end for _, end in spans]
+        assert all("ended_at" not in e.model_dump() for e in listed)
+
+        fact = "Release planning now starts every Monday."
+        reflection = {"patterns": [], "lessons": [], "connections": [], "gaps": [], "summary": "", "facts": []}
+        reflection["facts"] = [{"subject": "release planning", "content": fact, "category": "technical"}]
+        llm = AsyncMock()
+        llm.call = AsyncMock(
+            return_value=MagicMock(
+                content=[{"type": "tool_use", "id": "t", "name": "store_reflection", "input": reflection}]
+            )
+        )
+        bus = MagicMock(spec=EventBus)
+        bus.on = MagicMock()
+        handler = SleepHandler(AsyncMock(), heart, settings, bus, llm)
+        assert await handler._phase_reflect(_stats()) is True
+        async with db.session() as s:
+            rows = (await s.execute(select(Fact).where(Fact.agent_id == agent))).scalars().all()
+        assert [(r.content, r.source, r.mentioned_at) for r in rows] == [(fact, "sleep_reflection", spans[1][1])]
+    finally:
+        async with db.session() as s:
+            await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent})
+            await s.execute(text("DELETE FROM heart.episodes WHERE agent_id = :a"), {"a": agent})
+            await s.commit()
+        await heart.close()
 
 
 # ---------------------------------------------------------------------------
@@ -676,3 +734,108 @@ def test_the_preturn_resolver_keeps_the_later_correction_current(case, stamped, 
     ]
     out_older, out_newer = _engine(temporal_resolver_intervals_enabled=intervals)._resolve_recency(facts)
     assert (out_newer.recency_status, out_older.recency_status) == ("current", "superseded")
+
+
+# ---------------------------------------------------------------------------
+# Pins through the real writers: a pair of facts from different writers, stored as the writers store them, keeps
+# the later-said one current in both resolver copies.
+# ---------------------------------------------------------------------------
+
+
+def _frozen_at(moment: datetime) -> type[datetime]:
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+
+    return _Frozen
+
+
+async def _said_by_learn_fact(monkeypatch, moment: datetime, content: str) -> FactInput:
+    from nous.api import tools
+
+    monkeypatch.setattr(tools, "datetime", _frozen_at(moment))
+    heart = MagicMock()
+    heart.learn = AsyncMock(
+        return_value=SimpleNamespace(id=uuid4(), category="technical", subject="alice", contradiction_warning=None)
+    )
+    learn_fact = tools.create_nous_tools(MagicMock(), heart, Settings(_env_file=None))["learn_fact"]
+    await learn_fact(content=content, category="technical", subject="alice", source_episode_id=str(uuid4()))
+    (fi,) = _learned(heart)
+    return fi
+
+
+def _statuses(older: tuple, newer: tuple, intervals: bool) -> list[tuple[str | None, str | None]]:
+    """(newer, older) recency status in the recall_deep copy, then in the pre-turn copy. Each side is
+    (FactInput, learned_at, event day): the row as the writer stored it, dated later by the date backfill."""
+    from test_temporal_read_render import _engine, _pfact, _rsettings, _sfact, _tags
+
+    from nous.api.retrieval_pipeline import _resolve_recency_conflicts
+
+    def dates(fi, learned, day):
+        return {
+            "event_date": day,
+            "valid_from": day,
+            "valid_to": day,
+            "learned_at": learned,
+            "mentioned_at": fi.mentioned_at,
+        }
+
+    tags = _tags(
+        _resolve_recency_conflicts([_pfact(s[0].content, **dates(*s)) for s in (older, newer)], _rsettings(intervals))
+    )
+    out_older, out_newer = _engine(temporal_resolver_intervals_enabled=intervals)._resolve_recency(
+        [_sfact(s[0].content, **dates(*s)) for s in (older, newer)]
+    )
+    return [
+        (tags[newer[0].content][0], tags[older[0].content][0]),
+        (out_newer.recency_status, out_older.recency_status),
+    ]
+
+
+@pytest.mark.parametrize("intervals", [False, True], ids=["intervals_off", "intervals_on"])
+async def test_a_correction_kept_at_compaction_stays_current_over_a_fact_learned_earlier_in_the_episode(
+    monkeypatch, intervals
+):
+    """Episode open since 09:00. learn_fact stores May 10 at 09:05. At 11:30 the user moves it to May 3, no tool is
+    called, and the knowledge extractor stores May 3 at the 13:00 compaction. May 3 stays current."""
+    from nous.handlers import knowledge_extractor
+
+    may_10 = await _said_by_learn_fact(monkeypatch, _at(9, 5), "Alice's dentist appointment is on May 10")
+    monkeypatch.setattr(knowledge_extractor, "datetime", _frozen_at(_at(13)), raising=False)
+    heart = MagicMock()
+    extractor = _knowledge_extractor(heart, "Alice's dentist appointment is on May 3", episode_start=_at(9))
+    await extractor.handle(_compaction_event())
+    (may_3,) = _learned(heart)
+
+    older = (may_10, _at(9, 5), date(2026, 5, 10))
+    newer = (may_3, _at(13), date(2026, 5, 3))
+    assert _statuses(older, newer, intervals) == [("current", "superseded")] * 2
+
+
+async def test_a_sleep_reflection_fact_reads_earlier_than_a_fact_said_after_its_episodes_ended(monkeypatch):
+    """The night's sleep reflects on two episodes, the later ending at 10:00, and stores June 3. An episode that
+    started at 11:00 said June 5 at 11:30 (learn_fact). With statement time read (the intervals flag on), the fact
+    said at 11:30 is current, though the reflection's fact was learned the next night."""
+    reflection = {
+        "patterns": [],
+        "lessons": [],
+        "connections": [],
+        "gaps": [],
+        "summary": "",
+        "facts": [{"subject": "alice", "content": "Alice's flight to Lisbon is on June 3", "category": "technical"}],
+    }
+    reflected = [
+        SimpleNamespace(summary="Booked the Lisbon flight.", started_at=_at(9), ended_at=_at(10)),
+        SimpleNamespace(summary="Planned the trip budget.", started_at=_at(8), ended_at=_at(8, 30)),
+    ]
+    handler, heart = _reflecting_handler(reflection, reflected)
+    assert await handler._phase_reflect(_stats()) is True
+    (june_3,) = _learned(heart)
+    june_5 = await _said_by_learn_fact(monkeypatch, _at(11, 30), "Alice's flight to Lisbon is on June 5")
+
+    assert june_3.mentioned_at == _at(10) < june_5.mentioned_at == _at(11, 30)
+    the_next_night = datetime(2026, 4, 3, 3, 0, tzinfo=UTC)
+    older = (june_3, the_next_night, date(2026, 6, 3))
+    newer = (june_5, _at(11, 30), date(2026, 6, 5))
+    assert _statuses(older, newer, intervals=True) == [("current", "superseded")] * 2

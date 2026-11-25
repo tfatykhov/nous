@@ -137,6 +137,8 @@ class EpisodeSummary(BaseModel):
     # ongoing episode with them. Kept out of model_dump, so payloads are unchanged.
     session_id: str | None = Field(default=None, exclude=True)
     active: bool | None = Field(default=None, exclude=True)
+    # Set by list_recent only (the sleep reflection's statement time). Kept out of model_dump too.
+    ended_at: datetime | None = Field(default=None, exclude=True)
 
 
 # --- Facts ---
@@ -200,11 +202,15 @@ class FactInput(BaseModel):
     valid_from: date | None = None
     valid_to: date | None = None
     # Statement time: when the fact was said. Set by the producers, never invented:
-    # a writer inside the turn passes the turn time, a writer after the episode
-    # the episode's start, and a derived fact the latest statement time of its
-    # sources (facts.latest_statement_time). None means unknown, and readers fall
-    # back to learned_at. Never an event time: it does not go into event_date,
-    # valid_from or valid_to.
+    # - a writer inside the turn passes the turn time;
+    # - the fact and enumerative extractors pass the episode's start;
+    # - the other writers after the episode pass the latest moment the statement
+    #   can have been made: the episode's end, or the time of the write when it
+    #   runs at compaction or as the episode ends;
+    # - a derived fact takes the latest statement time of its sources
+    #   (facts.latest_statement_time).
+    # None means unknown, and readers fall back to learned_at. Never an event
+    # time: it does not go into event_date, valid_from or valid_to.
     mentioned_at: datetime | None = None
 
     @field_validator("event_date", "valid_from", "valid_to", mode="before")

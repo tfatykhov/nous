@@ -955,8 +955,8 @@ class SleepHandler:
             )
             if not episodes_text:
                 return True
-            # The reflection's facts derive from these episodes: their statement time is the latest start.
-            ref_time = latest_statement_time(getattr(ep, "started_at", None) for ep in recent if ep.summary)
+            # The reflection's facts derive from these episodes: said no later than the latest of their ends.
+            ref_time = latest_statement_time(ep.ended_at for ep in recent if ep.summary)
 
             # F031: Orient — gather existing facts related to episode topics
             orient_context = await self._build_orient_context(episodes_text)
@@ -1238,7 +1238,7 @@ class SleepHandler:
 
             await self._heart.supersede_fact(
                 best_match.id,
-                # No mentioned_at, as supersede sets none: the episode start can read earlier than the fact it replaces.
+                # No mentioned_at: it reads as now, so after the fact it replaces, which may postdate these episodes.
                 FactInput(
                     subject=best_match.subject or referenced_content,
                     content=fact["content"],

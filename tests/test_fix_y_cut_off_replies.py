@@ -113,7 +113,10 @@ async def test_the_sleep_reflection_has_room_for_its_answer():
     llm.call = call
     heart = AsyncMock()
     heart.list_episodes = AsyncMock(
-        return_value=[SimpleNamespace(summary="Moved the nightly export."), SimpleNamespace(summary="Renewed a cert.")]
+        return_value=[
+            SimpleNamespace(summary="Moved the nightly export.", ended_at=None),
+            SimpleNamespace(summary="Renewed a cert.", ended_at=None),
+        ]
     )
     heart.search_facts = AsyncMock(return_value=[])
     bus = MagicMock(spec=EventBus)

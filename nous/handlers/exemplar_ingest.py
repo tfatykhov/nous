@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from nous.heart.exemplars import ExemplarPair, parse_exemplars
@@ -18,7 +18,7 @@ async def _embed_and_store_pairs(
     logger: logging.Logger,
     *,
     log_prefix: str,
-    ref_time: datetime | None = None,
+    mentioned_at: datetime | None = None,
 ) -> tuple[int, int, list[UUID]]:
     """Cap + embed + learn an already-ordinaled list of exemplar pairs.
 
@@ -43,7 +43,8 @@ async def _embed_and_store_pairs(
     them to an exact rollback manifest). Callers that need an authoritative
     count of newly stored facts must query the DB.
 
-    ``ref_time`` (the episode start) becomes every pair's ``mentioned_at``.
+    ``mentioned_at`` is stored on every pair (None from the backfill, which
+    runs long after the episode).
     """
     cap = settings.exemplar_max_per_episode
     if len(pairs) > cap:
@@ -72,7 +73,7 @@ async def _embed_and_store_pairs(
             source_ordinal=p.ordinal,
             entity_keys=[],
             entity_extraction_complete=True,  # F085 backfill must skip these
-            mentioned_at=ref_time,
+            mentioned_at=mentioned_at,
         )
         for p in pairs
     ]
@@ -156,8 +157,6 @@ async def ingest_exemplars(
     episode_id: UUID | None,
     agent_id: str,
     logger: logging.Logger,
-    *,
-    ref_time: datetime | None = None,
 ) -> int:
     """Parse an exemplar stream and store each pair as an individually-embedded fact.
 
@@ -174,7 +173,8 @@ async def ingest_exemplars(
         episode_id,
         logger,
         log_prefix="F086 exemplar ingest",
-        ref_time=ref_time,
+        # The live write path runs as the episode ends (episode_summarized): its pairs were said no later than now.
+        mentioned_at=datetime.now(UTC),
     )
     logger.info(
         "F086 exemplar ingest: parsed=%d stored=%d skipped_no_embedding=%d truncated=%s episode=%s",

@@ -420,6 +420,7 @@ class EpisodeManager:
                 # was persisted — a non-dict crashes EpisodeSummary validation
                 # and takes down the whole batch (sleep-cycle procedure learner).
                 structured_summary=e.structured_summary if isinstance(e.structured_summary, dict) else None,
+                ended_at=e.ended_at,
             )
             for e in episodes
         ]

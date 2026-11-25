@@ -2074,8 +2074,6 @@ class CognitiveLayer:
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:
             data: dict[str, Any] = {"message_snapshot": message_snapshot}
-            if episode_id:  # the knowledge extractor stamps its facts with this episode's start
-                data["episode_id"] = episode_id
             if self._outside_tagging_on():
                 # The whole session's list, on purpose: what the model read earlier is still in
                 # its context (and in the summary) when a later stretch is compacted.
@@ -2113,7 +2111,7 @@ class CognitiveLayer:
         # F025 P3-C: Compute transcript before end_episode so it can be persisted
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
 
-        episode_started_at: datetime | None = None  # the statement time of the reflection's facts
+        episode_ended_at: datetime | None = None
         if episode_id:
             episode_min_content_length = self._settings.episode_min_content_length
             episode_lessons_max_chars = self._settings.episode_lessons_max_chars
@@ -2141,8 +2139,8 @@ class CognitiveLayer:
                         transcript=transcript_text or None,  # F025 P3-C
                         session=session,
                     )
-                    started_at = getattr(ended, "started_at", None)
-                    episode_started_at = started_at if isinstance(started_at, datetime) else None
+                    ended_at = getattr(ended, "ended_at", None)
+                    episode_ended_at = ended_at if isinstance(ended_at, datetime) else None
             except Exception:
                 logger.warning("Failed to end episode %s", episode_id)
 
@@ -2160,6 +2158,8 @@ class CognitiveLayer:
                     ep_uuid = UUID(episode_id)
                 except (ValueError, TypeError):
                     ep_uuid = None
+            # Said no later than the episode's end; with no end at hand, no later than now (the session's end).
+            said_by = episode_ended_at or datetime.now(UTC)
             for learned_text in matches:
                 learned_text = learned_text.strip()
                 if not learned_text:
@@ -2186,7 +2186,7 @@ class CognitiveLayer:
                         subject="lesson_learned",
                         confidence=0.7,
                         source_episode_id=ep_uuid,
-                        mentioned_at=episode_started_at,
+                        mentioned_at=said_by,
                     )
                     await self._heart.learn(fact_input, session=session)
                     facts_extracted += 1
