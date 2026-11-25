@@ -1847,6 +1847,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 source_episode_id=episode_uuid,
                 source_decision_id=decision_uuid,
                 tags=tags or [],
+                mentioned_at=datetime.now(UTC),
             )
 
             # Store to Heart
@@ -5799,6 +5800,7 @@ def create_programmatic_tools(
                         confidence=confidence,
                         source="user_direct",  # F023/F038: +0.15 admission bonus
                         source_episode_id=ep_uuid,
+                        mentioned_at=datetime.datetime.now(UTC),  # `datetime` is the module in this scope
                     )
                 )
             )

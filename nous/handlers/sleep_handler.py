@@ -36,7 +36,7 @@ from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.handlers.consolidation_audit import ConsolidationAuditor, preview
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
-from nous.heart.facts import mark_fact_inactive
+from nous.heart.facts import latest_statement_time, mark_fact_inactive
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactDetail, FactInput, FactRejected
 from nous.storage.models import Event as EventRow
@@ -955,6 +955,8 @@ class SleepHandler:
             )
             if not episodes_text:
                 return True
+            # The reflection's facts derive from these episodes: said no later than the latest of their ends.
+            ref_time = latest_statement_time(ep.ended_at for ep in recent if ep.summary)
 
             # F031: Orient — gather existing facts related to episode topics
             orient_context = await self._build_orient_context(episodes_text)
@@ -1004,7 +1006,7 @@ class SleepHandler:
 
                     # F031: UPDATES prefix — supersede existing fact (case-insensitive)
                     if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
-                        updated = await self._handle_updates_prefix(subject, fact, sleep_stats)
+                        updated = await self._handle_updates_prefix(subject, fact, sleep_stats, ref_time=ref_time)
                         if updated:
                             stored += 1
                         continue
@@ -1016,6 +1018,7 @@ class SleepHandler:
                             source="sleep_reflection",
                             confidence=0.8,
                             category=fact.get("category", "concept"),
+                            mentioned_at=ref_time,
                         )
                     )
                     if isinstance(result, FactRejected):
@@ -1043,6 +1046,7 @@ class SleepHandler:
                             source="sleep_reflection",
                             confidence=0.8,
                             category="concept",
+                            mentioned_at=ref_time,
                         )
                     )
                     if isinstance(result, FactRejected):
@@ -1075,6 +1079,7 @@ class SleepHandler:
                             # Was "rule" — lessons are not user directives
                             # (Tier-1 pollution fix, 2026-07-24).
                             category="technical",
+                            mentioned_at=ref_time,
                         )
                     )
                     if isinstance(result, FactRejected):
@@ -1162,11 +1167,14 @@ class SleepHandler:
             rationale=rationale,
         )
 
-    async def _handle_updates_prefix(self, subject: str, fact: dict, sleep_stats: dict) -> bool:
+    async def _handle_updates_prefix(
+        self, subject: str, fact: dict, sleep_stats: dict, *, ref_time: datetime | None = None
+    ) -> bool:
         """F031: Handle UPDATES: prefix — find and supersede the referenced fact.
 
         Case-insensitive prefix detection. Requires similarity >0.80 to prevent
         wrong-fact supersession (review fix from devil's advocate P0-1).
+        ``ref_time`` is the reflection's statement time, for a fact learned as new.
         """
         referenced_content = subject[len("UPDATES:") :].strip()
         if not referenced_content:
@@ -1189,6 +1197,7 @@ class SleepHandler:
                         source="sleep_reflection",
                         confidence=0.8,
                         category=fact.get("category", "concept"),
+                        mentioned_at=ref_time,
                     )
                 )
                 if not isinstance(result, FactRejected):
@@ -1217,6 +1226,7 @@ class SleepHandler:
                         source="sleep_reflection",
                         confidence=0.8,
                         category=fact.get("category", "concept"),
+                        mentioned_at=ref_time,
                     )
                 )
                 if not isinstance(result, FactRejected):
@@ -1228,6 +1238,7 @@ class SleepHandler:
 
             await self._heart.supersede_fact(
                 best_match.id,
+                # No mentioned_at: it reads as now, so after the fact it replaces, which may postdate these episodes.
                 FactInput(
                     subject=best_match.subject or referenced_content,
                     content=fact["content"],

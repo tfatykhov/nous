@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from nous.heart.exemplars import ExemplarPair, parse_exemplars
@@ -17,6 +18,7 @@ async def _embed_and_store_pairs(
     logger: logging.Logger,
     *,
     log_prefix: str,
+    mentioned_at: datetime | None = None,
 ) -> tuple[int, int, list[UUID]]:
     """Cap + embed + learn an already-ordinaled list of exemplar pairs.
 
@@ -40,6 +42,9 @@ async def _embed_and_store_pairs(
     is the distinct fact ids this call touched (codex r8 -- the backfill writes
     them to an exact rollback manifest). Callers that need an authoritative
     count of newly stored facts must query the DB.
+
+    ``mentioned_at`` is stored on every pair (None from the backfill, which
+    runs long after the episode).
     """
     cap = settings.exemplar_max_per_episode
     if len(pairs) > cap:
@@ -68,6 +73,7 @@ async def _embed_and_store_pairs(
             source_ordinal=p.ordinal,
             entity_keys=[],
             entity_extraction_complete=True,  # F085 backfill must skip these
+            mentioned_at=mentioned_at,
         )
         for p in pairs
     ]
@@ -167,6 +173,8 @@ async def ingest_exemplars(
         episode_id,
         logger,
         log_prefix="F086 exemplar ingest",
+        # The pairs were said no later than now: the write runs when the episode is summarized, at its end or later.
+        mentioned_at=datetime.now(UTC),
     )
     logger.info(
         "F086 exemplar ingest: parsed=%d stored=%d skipped_no_embedding=%d truncated=%s episode=%s",

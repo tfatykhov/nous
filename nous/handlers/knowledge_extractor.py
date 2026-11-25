@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from nous.api.compaction import SUMMARY_MESSAGE_PREFIX
@@ -183,6 +184,9 @@ class KnowledgeExtractor:
                     source="knowledge_extractor",
                     confidence=confidence,
                     category=fact.get("category"),
+                    # The compacted messages were said no later than now, the compaction. Taken per fact, so
+                    # the facts of one compaction keep the order they are stored in.
+                    mentioned_at=datetime.now(UTC),
                 )
                 result = await self._heart.learn(fact_input, exclude_ids=exclude_ids or None)
                 # F023: Don't count rejected facts as stored

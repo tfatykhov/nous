@@ -2111,6 +2111,7 @@ class CognitiveLayer:
         # F025 P3-C: Compute transcript before end_episode so it can be persisted
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
 
+        episode_ended_at: datetime | None = None
         if episode_id:
             episode_min_content_length = self._settings.episode_min_content_length
             episode_lessons_max_chars = self._settings.episode_lessons_max_chars
@@ -2131,13 +2132,15 @@ class CognitiveLayer:
                     lessons = None
                     if reflection:
                         lessons = [reflection[:episode_lessons_max_chars]]
-                    await self._heart.end_episode(
+                    ended = await self._heart.end_episode(
                         UUID(episode_id),
                         outcome="success",
                         lessons_learned=lessons,
                         transcript=transcript_text or None,  # F025 P3-C
                         session=session,
                     )
+                    ended_at = getattr(ended, "ended_at", None)
+                    episode_ended_at = ended_at if isinstance(ended_at, datetime) else None
             except Exception:
                 logger.warning("Failed to end episode %s", episode_id)
 
@@ -2155,6 +2158,8 @@ class CognitiveLayer:
                     ep_uuid = UUID(episode_id)
                 except (ValueError, TypeError):
                     ep_uuid = None
+            # Said no later than the episode's end; with no end at hand, no later than now (the session's end).
+            said_by = episode_ended_at or datetime.now(UTC)
             for learned_text in matches:
                 learned_text = learned_text.strip()
                 if not learned_text:
@@ -2181,6 +2186,7 @@ class CognitiveLayer:
                         subject="lesson_learned",
                         confidence=0.7,
                         source_episode_id=ep_uuid,
+                        mentioned_at=said_by,
                     )
                     await self._heart.learn(fact_input, session=session)
                     facts_extracted += 1

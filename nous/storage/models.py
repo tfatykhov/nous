@@ -982,7 +982,8 @@ class Fact(Base):
 
     # 097: event time (valid_from/valid_to, the days the fact was true; an
     # event_date row is the one-day interval) and statement time (mentioned_at,
-    # the source episode's start; NULL = unknown, readers use learned_at).
+    # when the fact was said, see FactInput.mentioned_at; NULL = unknown,
+    # readers use learned_at).
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
     mentioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)

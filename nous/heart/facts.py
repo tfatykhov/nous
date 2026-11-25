@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 from uuid import UUID
@@ -185,6 +185,15 @@ def _temporal_kwargs(f: Fact) -> dict[str, Any]:
     """097: the event time and statement time every FactSummary / FactDetail builder
     copies off the row. One helper so a builder cannot carry two of the three."""
     return {"valid_from": f.valid_from, "valid_to": f.valid_to, "mentioned_at": f.mentioned_at}
+
+
+def latest_statement_time(times: Iterable[datetime | None]) -> datetime | None:
+    """The statement time of a derived fact: the latest of its sources' times, None when none is known.
+
+    The caller passes ``COALESCE(mentioned_at, learned_at)`` for a source fact and ``ended_at`` for a
+    source episode. A value that is not a datetime counts as unknown.
+    """
+    return max((t for t in times if isinstance(t, datetime)), default=None)
 
 
 # Subjects that name a bucket, not an entity: many unrelated facts share them,
@@ -1139,7 +1148,7 @@ class FactManager:
             event_date_classified_at=input.event_date_classified_at,
             # 097: pure sinks too. FactInput's validator already made a dated
             # input a one-day interval; mentioned_at is what the producer set
-            # (None from learn_fact and the REST/MCP paths).
+            # (None from the REST/MCP paths).
             valid_from=input.valid_from,
             valid_to=input.valid_to,
             mentioned_at=input.mentioned_at,
@@ -2861,7 +2870,7 @@ class FactManager:
             return
         values: dict[str, Any] = {}
         if row.mentioned_at is None:
-            values["mentioned_at"] = max(s.mentioned_at or s.learned_at for s in sources)
+            values["mentioned_at"] = latest_statement_time(s.mentioned_at or s.learned_at for s in sources)
         w_on = getattr(self._settings, "temporal_intervals_enabled", False) is True
         if w_on and row.event_date is None and row.valid_from is None:
             valid_from = valid_to = None
