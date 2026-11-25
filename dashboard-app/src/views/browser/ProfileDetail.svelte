@@ -32,6 +32,7 @@
     readError = null;
     try {
       profile = await readProfile(row.key);
+      now = Date.now();
     } catch (err) {
       readError = problemText(err, 'see');
     }
@@ -72,7 +73,15 @@
   }
 
   const key = $derived(row.key);
-  const nextAt = $derived(profile ? nextWriteAt(profile) : null);
+  // "Write it again now" opens when its 24 hours have passed: one timer set for that moment (cleared when the time or
+  // the profile changes, and when the detail closes) moves `now`, so the button and its words follow without polling.
+  let now = $state(Date.now());
+  const nextAt = $derived(profile ? nextWriteAt(profile, now) : null);
+  $effect(() => {
+    if (nextAt === null) return;
+    const timer = setTimeout(() => { now = Date.now(); }, Math.max(0, new Date(nextAt).getTime() - Date.now()));
+    return () => clearTimeout(timer);
+  });
 </script>
 
 <div class="profile">

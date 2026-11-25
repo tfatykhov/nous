@@ -58,6 +58,14 @@ KNOWN_WRITES = {
     ("PUT", "/dashboard/outside-judge/second/key"),
     ("DELETE", "/dashboard/outside-judge/second/key"),
     ("POST", "/dashboard/outside-judge/second/check"),
+    # F119 PR 2: the owner's corrections of entity profiles (Browse, Profiles)
+    ("DELETE", "/entity-profiles/{}/lines/{}"),
+    ("POST", "/entity-profiles/{}/lines/{}/restore"),
+    ("DELETE", "/entity-profiles/{}"),
+    ("POST", "/entity-profiles/{}/restore"),
+    ("POST", "/entity-profiles/{}/not-entity"),
+    ("DELETE", "/entity-profiles/{}/not-entity"),
+    ("POST", "/entity-profiles/rebuild"),
 }
 KNOWN_COMPANION_WRITES = {("POST", "/a2ui/action"), ("POST", "/a2ui/call")}
 

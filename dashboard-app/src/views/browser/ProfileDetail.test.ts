@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Browser from '../Browser.svelte';
@@ -69,6 +70,8 @@ beforeEach(() => {
   calls = [];
   handlers = {
     [FIRST]: () => [200, LIST],
+    // Browse opens on Facts: answered, so no read is retried in the background.
+    'GET /facts?limit=20&offset=0': () => [200, { facts: [], total: 0 }],
     'GET /entity-profiles?limit=20&offset=0&status=removed': () => [200, REMOVED],
     'GET /entity-profiles/quillon': () => [200, detail()],
     'GET /entity-profiles/ledgerwick': () => [200, detail({ key: 'ledgerwick', display_name: 'Ledgerwick',
@@ -305,6 +308,66 @@ describe('Browse, Profiles', () => {
     release();
     await waitFor(() => expect(noteText()).toBe('Quillon Marsh: Line removed.'));
     expect(sent('DELETE')).toHaveLength(1);
+  });
+
+  it('a correction that empties the last page reads the last page that has rows', async () => {
+    const rows = Array.from({ length: 21 }, (_, i) =>
+      row({ key: `key${String(i).padStart(2, '0')}`, display_name: `Name ${String(i).padStart(2, '0')}` }));
+    let changed = false;
+    handlers[FIRST] = () => [200, list(rows.slice(0, 20), { total: changed ? 20 : 21 })];
+    handlers['GET /entity-profiles?limit=20&offset=20'] = () =>
+      [200, changed ? list([], { total: 20, offset: 20 }) : list([rows[20]], { total: 21, offset: 20 })];
+    handlers['GET /entity-profiles/key20'] = () => [200, detail({ key: 'key20', display_name: 'Name 20' })];
+    handlers['DELETE /entity-profiles/key20'] = () => { changed = true; return ok(); };
+    await openProfiles();
+    await fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    const table = await waitFor(() => {
+      const t = document.querySelector('.tab-body table') as HTMLTableElement;
+      expect(within(t).getByText('Name 20')).toBeTruthy();
+      return t;
+    });
+    const panel = await openRow(table, 'Name 20');
+    await fireEvent.click(await waitFor(() => within(panel).getByRole('button', { name: 'Remove this profile' })));
+    await waitFor(() => expect(screen.getByText(/^Page 1 of 1 \(20 items\)/)).toBeTruthy());
+    expect(screen.getByText('Name 00')).toBeTruthy();
+    expect(noteText()).toBe('Name 20: Profile removed. Find it under Removed to restore it.');
+    const reads = gets().filter((u) => u.startsWith('/entity-profiles?'));
+    expect(reads.slice(-2)).toEqual(['/entity-profiles?limit=20&offset=20', '/entity-profiles?limit=20&offset=0']);
+  });
+
+  describe('"Write it again after" opens by itself when its time comes', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      vi.setSystemTime(new Date('2026-11-24T11:00:00Z'));
+      handlers['GET /entity-profiles/quillon'] = () => [200, detail({ written_at: '2026-11-24T10:00:00+00:00' })];
+    });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('one timer, set for that moment, and the button is open when it fires', async () => {
+      const table = await openProfiles();
+      const panel = await openRow(table, 'Quillon Marsh');
+      const waiting = await waitFor(() => within(panel).getByRole('button', { name: 'Write it again after Nov 25 10:00 UTC' }));
+      expect((waiting as HTMLButtonElement).disabled).toBe(true);
+      expect(vi.getTimerCount()).toBe(1); // no polling: the one timer
+
+      vi.advanceTimersByTime(23 * 3_600_000 - 1);
+      await tick();
+      expect(within(panel).queryByRole('button', { name: 'Write it again now' })).toBeNull();
+      vi.advanceTimersByTime(1);
+      const open = await waitFor(() => within(panel).getByRole('button', { name: 'Write it again now' }));
+      expect((open as HTMLButtonElement).disabled).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('closing the profile clears its timer', async () => {
+      const table = await openProfiles();
+      const panel = await openRow(table, 'Quillon Marsh');
+      await waitFor(() => within(panel).getByRole('button', { name: 'Write it again after Nov 25 10:00 UTC' }));
+      expect(vi.getTimerCount()).toBe(1);
+      await fireEvent.click(within(table).getByRole('button', { name: 'Show details for Quillon Marsh' }));
+      await waitFor(() => expect(table.querySelector('tr.detail')).toBeNull());
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   it('an older answer to the list never replaces a newer one', async () => {

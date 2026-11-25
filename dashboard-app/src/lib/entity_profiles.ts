@@ -96,7 +96,8 @@ export const restorePath = (key: string) => `${profilePath(key)}/restore`;
 export const notEntityPath = (key: string) => `${profilePath(key)}/not-entity`;
 export const linePath = (key: string, lineId: string) => `${profilePath(key)}/lines/${encodeURIComponent(lineId)}`;
 export const restoreLinePath = (key: string, lineId: string) => `${linePath(key, lineId)}/restore`;
-export const REBUILD_PATH = `${BASE}/rebuild`;
+// A plain literal: tests/test_dashboard_writes.py reads every write's path from the source.
+export const REBUILD_PATH = '/entity-profiles/rebuild';
 /** A fact's text, through the graph's node route (the one route that reads a fact by its id). */
 export const factPath = (id: string) => `/dashboard/graph/node/${encodeURIComponent(id)}?type=fact`;
 

@@ -154,7 +154,13 @@
     errorProfiles = null;
     try {
       const answer = await readList({ q: searchProfiles.trim(), status: statusProfiles as ListStatus | '', offset: offsetProfiles });
-      if (seq === readProfilesSeq) dataProfiles = answer;
+      if (seq !== readProfilesSeq) return;
+      // A correction took the last row of a later page out of the list: read the last page that has rows instead.
+      if (answer.profiles.length === 0 && answer.total > 0 && offsetProfiles > 0) {
+        offsetProfiles = Math.max(0, Math.ceil(answer.total / PROFILE_PAGE_SIZE) - 1) * PROFILE_PAGE_SIZE;
+        return await loadProfiles(quiet);
+      }
+      dataProfiles = answer;
     }
     catch (e) { if (seq === readProfilesSeq) errorProfiles = e instanceof Error ? e.message : 'Failed to load'; }
     finally { if (seq === readProfilesSeq) loadingProfiles = false; }

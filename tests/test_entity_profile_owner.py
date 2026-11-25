@@ -731,6 +731,35 @@ async def test_a_reply_of_removed_lines_only_keeps_the_lines_the_owner_kept(db, 
 
 
 @pytest.mark.postgres_only
+async def test_a_reply_of_a_line_removed_while_the_model_writes_keeps_the_lines_the_owner_kept(db, session):
+    agent = _agent()
+    f1, f2 = await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2))})
+    writer = _writer(db, agent, llm)
+    await writer.rebuild("zephyrine", session=session)
+    bees, sails = await _lines(session, agent)
+
+    async def remove_now(_prompt):
+        # Between the call and the write: the run settles the reply against the row as it read it before.
+        await writer.store.remove_line("zephyrine", bees["id"], "owner", session=session)
+
+    llm.on_call = remove_now
+    llm.replies["zephyrine"] = _entity(_line("Zephyrine keeps bees.", f1))
+    await session.execute(update(Fact).where(Fact.id == f2.id).values(tags=["changed"]))
+    await _a_day_later(session, agent)
+    first = await writer.run_sleep(session=session)
+
+    assert (first["all_rejected"], first["written"], first["failed_closed"], first["asked"]) == (1, 0, 0, 1)
+    row = await _row(session, agent, "zephyrine")
+    assert list(row.lines) == [sails]  # the line the owner kept, not an empty profile
+    assert [ln["id"] for ln in row.previous_lines] == [bees["id"]]
+    # The new digest was stored: the key is not asked again until its facts change.
+    await _a_day_later(session, agent)
+    again = await writer.run_sleep(session=session)
+    assert (again["unchanged"], again["asked"], len(llm.prompts)) == (1, 0, 2)
+
+
+@pytest.mark.postgres_only
 async def test_an_owner_row_or_an_emptied_profile_the_owner_changed_meanwhile_is_counted_as_left_alone(db, session):
     agent = _agent()
     await _keyed(session, agent, "alder", {}, {}, {})
