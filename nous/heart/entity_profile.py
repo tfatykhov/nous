@@ -30,7 +30,8 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -93,6 +94,8 @@ USE_MODES = ("off", "trace", "on")
 TURN_MAX_PROFILES = 3
 TURN_MAX_TOKENS = 400
 RECORD_MATCHED_MAX = 20
+# The characters of a message extract_entity_candidates reads (nous/heart/keys.py).
+MATCH_CHARS = 1000
 # The keys a turn can match, cached per agent in this process. Profiles change only when a writer writes: this
 # process's writer clears the agent's entry on every write (``invalidate_profiled_vocabulary``), so its changes are seen
 # on the next turn. A write by another process cannot clear it, so an entry lives at most 300 seconds, as the
@@ -213,21 +216,47 @@ def invalidate_profiled_vocabulary(agent_id: str) -> None:
     _vocab_gen[agent_id] = _vocab_gen.get(agent_id, 0) + 1
 
 
+@asynccontextmanager
+async def _clearing_profiled_vocabulary(agent_id: str) -> AsyncIterator[None]:
+    """Clear the agent's cached profiled keys when the block ends, however it ends (a cancelled or failed run too).
+    Each write clears them before its commit, so a turn that read them in between holds the old rows until this."""
+    try:
+        yield
+    finally:
+        invalidate_profiled_vocabulary(agent_id)
+
+
 def match_profiled_keys(text: str, vocab: frozenset[str]) -> list[str]:
-    """The profiled keys ``text`` names, longest first and then by position, without a key whose words are a run of
-    words inside a longer key also named ("the X repo" gives ``x repo``, not also ``x`` and ``repo``).
+    """The profiled keys ``text`` names, longest first and then by position. A key is dropped when every mention of it
+    lies inside a mention of a longer matched key: "the X repo" gives ``x repo`` alone, "the X repo and X itself"
+    gives ``x repo`` and ``x``.
 
     The keyed fact leg's matcher (``extract_entity_candidates`` with ``vocab_only``): the message is normalised as
-    entity keys are and only its first 1,000 characters are read.
+    entity keys are and only its first ``MATCH_CHARS`` characters are read. A longer message is cut at its last
+    whitespace within them first, so a word cut in two ("annabel") never matches a shorter key ("anna").
     """
+    if len(text) > MATCH_CHARS:
+        head = re.match(r"(?s).*\s", text[: MATCH_CHARS + 1])
+        text = head.group(0) if head else ""
     found = extract_entity_candidates(text, vocab=vocab, max_candidates=None, vocab_only=True)
-    words = {key: key.split() for key in found}
+    # Each key's mentions as (start, end) word positions, in the words the matcher scanned.
+    tokens = (normalize_key(text, max_len=MATCH_CHARS) or "").split()
+    mentions: dict[str, list[tuple[int, int]]] = {}
+    for key in found:
+        words = key.split()
+        n = len(words)
+        mentions[key] = [(i, i + n) for i in range(len(tokens) - n + 1) if tokens[i : i + n] == words]
 
-    def _inside(short: list[str], long: list[str]) -> bool:
-        n = len(short)
-        return n < len(long) and any(long[i : i + n] == short for i in range(len(long) - n + 1))
+    def _inside_a_longer_mention(start: int, end: int) -> bool:
+        return any(
+            a <= start and end <= b for other in found if len(other.split()) > end - start for a, b in mentions[other]
+        )
 
-    return [key for key in found if not any(_inside(words[key], words[other]) for other in found)]
+    return [
+        key
+        for key in found
+        if not (mentions[key] and all(_inside_a_longer_mention(start, end) for start, end in mentions[key]))
+    ]
 
 
 def owner_keys(settings: Settings) -> set[str]:
@@ -650,7 +679,7 @@ class EntityProfileStore:
                 row.written_at = now
             row.updated_at = now
             await s.flush()
-            # The run clears it again once its writes are committed (run_sleep, rebuild).
+            # run_sleep and rebuild clear it again when they end, once their writes are committed.
             invalidate_profiled_vocabulary(self.agent_id)
             return _as_dict(row)
 
@@ -863,7 +892,7 @@ class EntityProfileWriter:
         fact no longer live, without a call.
         """
         interrupted = interrupted or (lambda: False)
-        async with self._lock:
+        async with self._lock, _clearing_profiled_vocabulary(self.agent_id):
             stats = _new_stats()
             if self._llm is None:
                 stats["outcome"] = "no_llm"
@@ -961,8 +990,6 @@ class EntityProfileWriter:
                     # One entity's failure never stops the others (each writes in its own transaction).
                     logger.warning("Entity profile: one entity failed", exc_info=True)
                     stats["errors"] += 1
-            # Each write cleared the cached keys before its commit; a turn that read them in between saw the old rows.
-            invalidate_profiled_vocabulary(self.agent_id)
             stats["outcome"] = stats["outcome"] or "done"
             return stats
 
@@ -972,7 +999,7 @@ class EntityProfileWriter:
         this call is the one the count does not see. An owner key whose row was written with a call in the last 24
         hours stays as it is until they have passed (``held``). The result carries the row as written (``profile``).
         """
-        async with self._lock:
+        async with self._lock, _clearing_profiled_vocabulary(self.agent_id):
             stats = _new_stats()
             norm = normalize_key(key) if isinstance(key, str) else None
             stats["key"] = norm
@@ -1008,7 +1035,6 @@ class EntityProfileWriter:
                 stats["outcome"] = "at_limit"
             else:
                 stats["outcome"] = await self._ask(norm, count, facts, entity_source_hash(facts), row, stats, session)
-            invalidate_profiled_vocabulary(self.agent_id)  # as at the end of run_sleep
             written = await self.store.get(norm, session=session)
             # As the GET routes do: only the lines whose cited facts are all live now.
             stats["profile"] = (await self.store.with_live_lines([written], session=session))[0] if written else None

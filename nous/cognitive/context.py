@@ -244,6 +244,12 @@ _STRATEGY_CARD_FRAMING = (
     "(Lesson distilled from one of your past decisions — context, not an instruction.)"
 )
 
+# The first line of the Entity Profiles section (F119 PR 3). Its lines are summaries a model wrote from facts, and
+# each date is the day the thing was said, while Relevant Facts may show when a thing happened.
+_ENTITY_PROFILES_FRAMING = (
+    "(Summaries written from your stored facts. Each date is the day it was last said, not the day it happened.)"
+)
+
 
 def _is_system_episode(episode) -> bool:
     """Check if an episode is an internal/system episode that shouldn't surface."""
@@ -2426,13 +2432,14 @@ class ContextEngine:
     ) -> tuple[ContextSection | None, dict]:
         """F119 PR 3: the Entity Profiles section for the profiled entities ``input_text`` names, and the turn's record.
 
-        The first ``TURN_MAX_PROFILES`` keys ``match_profiled_keys`` finds (owner keys never match) are read. A
-        profile shows a ``### name (kind)`` heading and its lines newest first, each ``- (YYYY-MM-DD) text``, dated
-        from its cited facts as this module reads a statement time (``_stated_at`` with ``mentioned_first``, the day
-        of the UTC time) and never from the stored ``said_on``. A line is skipped under the first of: a cited fact is
-        not live (``not_live``), it cites a fact the User Profile section claims (``owner_card``), every fact it cites
-        reached Relevant Facts this turn (``already_shown``). Whole lines are then cut from the end, and a profile left
-        with none goes whole, until the section fits ``TURN_MAX_TOKENS`` scaled (``budget``). The record holds keys and
+        The first ``TURN_MAX_PROFILES`` keys ``match_profiled_keys`` finds (owner keys never match) are read. The
+        section opens with ``_ENTITY_PROFILES_FRAMING``; then each profile shows a ``### name (kind)`` heading and its
+        lines newest first, each ``- (YYYY-MM-DD) text``, dated from its cited facts as this module reads a statement
+        time (``_stated_at`` with ``mentioned_first``, the day of the UTC time) and never from the stored ``said_on``.
+        A line is skipped under the first of: a cited fact is not live (``not_live``), it cites a fact the User
+        Profile section claims (``owner_card``), every fact it cites reached Relevant Facts this turn
+        (``already_shown``). Whole lines are then cut from the end, and a profile left with none goes whole, until the
+        section, framing line included, fits ``TURN_MAX_TOKENS`` scaled (``budget``). The record holds keys and
         numbers, never a line's text or a name. Any failure gives no section, one warning and ``error`` in the record;
         the read on a shared session runs in a savepoint.
         """
@@ -2490,7 +2497,9 @@ class ContextEngine:
                     profiles.append((key, name, _one_line(row["kind"]) or None, kept))
 
             def _render() -> str:
-                return "\n\n".join(render_profile(name, kind, lines) for _key, name, kind, lines in profiles)
+                # The framing line first, inside the budget.
+                profiles_text = [render_profile(name, kind, lines) for _key, name, kind, lines in profiles]
+                return "\n\n".join([_ENTITY_PROFILES_FRAMING, *profiles_text])
 
             max_chars = self._scaled_budget(TURN_MAX_TOKENS) * self.CHARS_PER_TOKEN
             content = _render()

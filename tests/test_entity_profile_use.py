@@ -8,11 +8,14 @@ of its own). The names in these tests are made up.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import text, update
@@ -22,11 +25,12 @@ from test_tool_call_recording import PATHS, _drive, _runner, _scripted_api
 from test_turn_record import _agent, _context, _delete, _json, _rows, _turn, _TurnSpy
 
 from nous.api.execution_context import CONTEXT_KINDS, ExecutionContext
-from nous.cognitive.context import _stated_at
+from nous.cognitive.context import _ENTITY_PROFILES_FRAMING, _stated_at
 from nous.cognitive.intent import RetrievalPlan, RetrievalQuery
 from nous.cognitive.schemas import BuildResult
+from nous.config import Settings
 from nous.heart import entity_profile as ep
-from nous.heart.entity_profile import EntityProfileStore, match_profiled_keys, use_mode
+from nous.heart.entity_profile import EntityProfileStore, EntityProfileWriter, match_profiled_keys, use_mode
 from nous.heart.profile_card import ProfileCardStore
 from nous.heart.schemas import FactSummary
 from nous.heart.temporal import as_date
@@ -61,9 +65,23 @@ def test_a_key_is_dropped_only_as_whole_words_inside_a_longer_key():
     assert match_profiled_keys("orrin repo", frozenset({"orrin", "repo", "orrin repo"})) == ["orrin repo"]
 
 
+def test_a_key_mentioned_on_its_own_as_well_stays():
+    # every mention of "repo" is inside "orrin repo"; one of "orrin" is not
+    assert match_profiled_keys("the Orrin repo and Orrin itself", VOCAB) == ["orrin repo", "orrin"]
+    assert match_profiled_keys("Orrin is fast; the Orrin repo is slow", VOCAB) == ["orrin repo", "orrin"]
+    assert match_profiled_keys("the Orrin repo, the Orrin repo again", VOCAB) == ["orrin repo"]
+
+
 def test_only_the_first_1000_characters_of_a_message_are_read():
     assert match_profiled_keys("quill " + "x " * 600, VOCAB) == ["quill"]
     assert match_profiled_keys("x " * 600 + "quill", VOCAB) == []
+
+
+def test_a_word_cut_at_the_limit_never_matches_a_shorter_key():
+    # 1,003 characters: the limit falls inside "annabel", whose first four letters are a key
+    assert match_profiled_keys("x " * 498 + "annabel", frozenset({"anna"})) == []
+    # a word that ends right at the limit is whole and still matches
+    assert match_profiled_keys("x " * 498 + "anna and more", frozenset({"anna"})) == ["anna"]
 
 
 @pytest.mark.parametrize(
@@ -329,7 +347,22 @@ async def _orrin(db, agent: str) -> tuple[Fact, Fact]:
     return f1, f2
 
 
-ORRIN = "### Orrin (project)\n- (2026-03-09) Orrin ships weekly.\n- (2026-03-05) Orrin moved to the new build host."
+FRAMING = "(Summaries written from your stored facts. Each date is the day it was last said, not the day it happened.)"
+
+
+def _shown(*profiles: str) -> str:
+    """The section's content: the framing line, then each profile, a blank line apart."""
+    return "\n\n".join([FRAMING, *profiles])
+
+
+ORRIN = _shown(
+    "### Orrin (project)\n- (2026-03-09) Orrin ships weekly.\n- (2026-03-05) Orrin moved to the new build host."
+)
+
+
+def test_the_framing_line_is_the_engines():
+    assert FRAMING == _ENTITY_PROFILES_FRAMING
+    assert len(FRAMING) // 4 <= 30  # about 25 tokens
 
 
 def _no_store(monkeypatch) -> None:
@@ -531,7 +564,7 @@ async def test_only_lines_whose_cited_facts_are_all_live_are_shown(db, mock_embe
             await session.commit()
         result = await _build(engine, s, "juniper and yew")
         assert result.entity_profiles["matched"] == ["juniper"]
-        assert _section(result).content == "### Juniper (project)\n- (2026-03-01) Live line."
+        assert _section(result).content == _shown("### Juniper (project)\n- (2026-03-01) Live line.")
         assert result.entity_profiles["skipped"] == {**ZERO_SKIPS, "not_live": 9}
     finally:
         await heart.close()
@@ -570,7 +603,7 @@ async def test_a_line_citing_a_fact_the_profile_card_cites_is_skipped(db, mock_e
         )
         result = await _build(engine, s, "anything new at tern?")
         assert "The user sails on Lake Tern." in result.system_prompt  # the card is in the prompt
-        assert _section(result).content == "### Tern (place)\n- (2026-03-02) Tern has a club."
+        assert _section(result).content == _shown("### Tern (place)\n- (2026-03-02) Tern has a club.")
         assert result.entity_profiles["skipped"] == {**ZERO_SKIPS, "owner_card": 1}
     finally:
         await heart.close()
@@ -602,7 +635,7 @@ async def test_a_line_is_skipped_only_when_its_facts_reached_relevant_facts(db, 
         assert "wren builds on tuesdays" in facts_section.content
         assert "release notes in the docs folder" not in facts_section.content
         assert {str(shown.id), str(cut.id)} <= set(result.recalled_ids["fact"])  # both recalled, one cut
-        assert _section(result).content == (
+        assert _section(result).content == _shown(
             "### Wren (project)\n- (2026-03-02) Wren keeps notes in the docs folder.\n"
             "- (2026-03-02) Wren builds and keeps notes."
         )
@@ -629,7 +662,7 @@ async def test_without_a_relevant_facts_section_nothing_counts_as_shown(db, mock
         result = await _build(engine, s, "wren")
         assert all(sec.label != "Relevant Facts" for sec in result.sections)
         assert str(shown.id) in result.recalled_ids["fact"]  # recalled before the format raised
-        assert _section(result).content == "### Wren (project)\n- (2026-03-01) Wren builds on Tuesdays."
+        assert _section(result).content == _shown("### Wren (project)\n- (2026-03-01) Wren builds on Tuesdays.")
     finally:
         await heart.close()
 
@@ -639,8 +672,10 @@ async def test_the_section_is_cut_by_whole_lines_then_whole_profiles(db, mock_em
     engine, heart, s = await _engine(db, mock_embeddings, settings, "on")
     try:
         facts = await _facts(db, s.agent_id, *(f"fact {i}" for i in range(17)))
+        # 148-character lines: within the 1,600 characters, golf's 8 lines and two of hotel's would fit without the
+        # framing line, and only one of hotel's with it, which the section counts
         lines = {
-            key: [_line(f"{key.title()} line {i:02d} " + "x" * 130, facts[n + i]) for i in range(count)]
+            key: [_line(f"{key.title()} line {i:02d} " + "x" * 120, facts[n + i]) for i in range(count)]
             for key, n, count in (("golf", 0, 8), ("hotel", 8, 8), ("india", 16, 1))
         }
         for key, key_lines in lines.items():
@@ -650,8 +685,9 @@ async def test_the_section_is_cut_by_whole_lines_then_whole_profiles(db, mock_em
         cap = engine._scaled_budget(ep.TURN_MAX_TOKENS) * 4
         assert len(content) <= cap
         rendered = content.split("\n")
+        assert rendered[0] == FRAMING
         stored = {line["text"] for key_lines in lines.values() for line in key_lines}
-        for line in rendered:  # never a cut line
+        for line in rendered[1:]:  # never a cut line
             assert line == "" or line.startswith("### ") or line.split(") ", 1)[1] in stored, line
         headings = [line for line in rendered if line.startswith("### ")]
         assert headings == ["### Golf (project)", "### Hotel (project)"]  # india, last, went whole
@@ -685,9 +721,8 @@ async def test_a_line_is_dated_as_the_context_engine_reads_a_statement_time(db, 
             stored = await session.get(Fact, said.id)
         day = as_date(_stated_at(stored, mentioned_first=True)).isoformat()
         assert day == "2026-03-11" == ep._stated_on(stored)  # the writer's date of the same fact
-        assert (
-            _section(await _build(engine, s, "pike")).content
-            == f"### Pike (project)\n- ({day}) Pike opened a second office."
+        assert _section(await _build(engine, s, "pike")).content == _shown(
+            f"### Pike (project)\n- ({day}) Pike opened a second office."
         )
     finally:
         await heart.close()
@@ -704,7 +739,7 @@ async def test_a_naive_statement_time_is_read_as_utc(db, mock_embeddings, settin
         monkeypatch.setattr(EntityProfileStore, "profiled_vocabulary", AsyncMock(return_value=frozenset({"pike"})))
         monkeypatch.setattr(EntityProfileStore, "turn_profiles", AsyncMock(return_value={"pike": row}))
         content = _section(await _build(engine, s, "pike")).content
-        assert content == f"### Pike (place)\n- ({as_date(_stated_at(fact, mentioned_first=True))}) Pike line."
+        assert content == _shown(f"### Pike (place)\n- ({as_date(_stated_at(fact, mentioned_first=True))}) Pike line.")
         assert "(2026-03-10)" in content
     finally:
         await heart.close()
@@ -760,8 +795,8 @@ async def test_the_writers_write_is_seen_on_the_next_turn(db, mock_embeddings, s
             display_name="Lima",
             kind="place",
         )
-        assert (
-            _section(await _build(engine, s, "lima")).content == "### Lima (place)\n- (2026-03-01) Lima has a harbour."
+        assert _section(await _build(engine, s, "lima")).content == _shown(
+            "### Lima (place)\n- (2026-03-01) Lima has a harbour."
         )
     finally:
         await heart.close()
@@ -785,6 +820,86 @@ async def test_a_row_written_by_another_process_is_seen_after_the_cache_ages(
         assert (await _build(engine, s, "oslo")).entity_profiles["matched"] == ["oslo"]
     finally:
         await heart.close()
+
+
+@pg
+async def test_the_record_keeps_20_matched_keys_and_the_turn_reads_3(db, mock_embeddings, settings, monkeypatch):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, "on")
+    try:
+        keys = [f"zinnia{i:02d}" for i in range(25)]
+        rows = AsyncMock(return_value={})
+        monkeypatch.setattr(EntityProfileStore, "profiled_vocabulary", AsyncMock(return_value=frozenset(keys)))
+        monkeypatch.setattr(EntityProfileStore, "turn_profiles", rows)
+        result = await _build(engine, s, " ".join(keys))
+        assert ep.RECORD_MATCHED_MAX == 20
+        assert result.entity_profiles["matched"] == keys[:20]
+        assert rows.await_args.args[0] == keys[:3]
+        assert _section(result) is None
+    finally:
+        await heart.close()
+
+
+# ---- the cached keys (no database) ------------------------------------------------------------------------------
+
+
+class _RacingDatabase:
+    """A database whose key query returns ``kilo``; with ``race`` a writer clears the cache while it runs."""
+
+    def __init__(self, agent: str, race: bool) -> None:
+        self.agent = agent
+        self.race = race
+
+    @asynccontextmanager
+    async def session(self):
+        yield SimpleNamespace(execute=self._execute)
+
+    async def _execute(self, *_args, **_kwargs):
+        if self.race:
+            ep.invalidate_profiled_vocabulary(self.agent)
+        return SimpleNamespace(scalars=lambda: ["kilo"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race", [False, True])
+async def test_keys_read_while_a_write_clears_them_are_not_cached(race):
+    agent = f"test-upf-{uuid.uuid4().hex[:8]}"
+    store = EntityProfileStore(_RacingDatabase(agent, race), agent)
+    assert await store.profiled_vocabulary() == frozenset({"kilo"})  # the turn still gets what it read
+    assert (agent in ep._vocab_cache) is not race  # but the next turn reads again
+
+
+def _writer_that_stops(agent: str, monkeypatch, error: type[BaseException] | None) -> EntityProfileWriter:
+    writer = EntityProfileWriter(MagicMock(), Settings(_env_file=None, agent_id=agent), MagicMock())
+
+    async def _stop(*_args, **_kwargs):
+        raise error("stopped")
+
+    if error is None:  # a run with nothing to do, to its end
+        monkeypatch.setattr(writer, "_candidates", AsyncMock(return_value=[]))
+        monkeypatch.setattr(writer, "_source_facts", AsyncMock(return_value=[]))
+        monkeypatch.setattr(writer, "_fact_count", AsyncMock(return_value=0))
+        for name, value in (("profiled_keys", []), ("rows", {}), ("written_last_day", 0), ("get", None)):
+            monkeypatch.setattr(writer.store, name, AsyncMock(return_value=value))
+    else:
+        monkeypatch.setattr(writer, "_candidates", _stop)
+        monkeypatch.setattr(writer, "_source_facts", _stop)
+    return writer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, asyncio.CancelledError, RuntimeError])
+async def test_a_run_clears_the_cached_keys_however_it_ends(monkeypatch, error):
+    agent = f"test-upf-{uuid.uuid4().hex[:8]}"
+    writer = _writer_that_stops(agent, monkeypatch, error)
+    for run in (lambda: writer.run_sleep(session=MagicMock()), lambda: writer.rebuild("kilo", session=MagicMock())):
+        # keys a turn read while one of the run's writes was being committed
+        ep._vocab_cache[agent] = (frozenset({"stale"}), time.monotonic())
+        if error is None:
+            await run()
+        else:
+            with pytest.raises(error):
+                await run()
+        assert agent not in ep._vocab_cache
 
 
 # ---- the section marker -----------------------------------------------------------------------------------------
