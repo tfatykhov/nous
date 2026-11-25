@@ -642,6 +642,20 @@ async def test_a_not_entity_verdict_is_asked_again_after_thirty_days(db, session
 
 
 @pytest.mark.postgres_only
+async def test_a_not_entity_verdict_whose_facts_did_not_change_is_still_asked_again_after_thirty_days(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {})
+    llm = FakeLLM({"spreadsheet": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+
+    await _days_later(session, agent, 29)
+    assert (await writer.run_sleep(session=session))["unchanged"] == 1 and len(llm.prompts) == 1
+    await _days_later(session, agent, 31)
+    assert (await writer.run_sleep(session=session))["not_entity"] == 1 and len(llm.prompts) == 2
+
+
+@pytest.mark.postgres_only
 async def test_the_owners_rebuild_asks_about_a_resting_key(db, session):
     agent = _agent()
     await _keyed(session, agent, "spreadsheet", {}, {})

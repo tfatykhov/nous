@@ -773,7 +773,19 @@ class EntityProfileWriter:
                     async with _session_scope(self._db, session) as s:
                         facts = await self._source_facts(s, key)
                     digest = entity_source_hash(facts)
-                    if row is not None and row["status"] != "owner" and row["source_hash"] == digest:
+                    # A not_entity verdict is asked again after its rest or once its facts have doubled, whether or
+                    # not the facts shown changed (the digest covers only the newest ones).
+                    verdict_due = (
+                        row is not None
+                        and row["status"] == "not_entity"
+                        and (count >= NOT_ENTITY_GROWTH * row["fact_count"] or judged <= now - NOT_ENTITY_REASK)
+                    )
+                    if (
+                        row is not None
+                        and row["status"] != "owner"
+                        and row["source_hash"] == digest
+                        and not verdict_due
+                    ):
                         stats["unchanged"] += 1
                         continue
                     if not facts:

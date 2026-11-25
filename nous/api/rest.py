@@ -941,6 +941,12 @@ def create_app(
         model calls are used. An owner key written with a call in the last 24 hours answers ``held`` (200)."""
         from nous.heart.keys import normalize_key
 
+        # The body is read first: nothing is awaited between the check below and the writer, so two requests whose
+        # bodies arrive together cannot both pass it.
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
         try:
             # sleep_handler is a lazy proxy in prod: reading it raises RuntimeError while the component is unset.
             writer = getattr(sleep_handler, "_entity_profile_writer", None) if sleep_handler else None
@@ -951,10 +957,6 @@ def create_app(
             return JSONResponse({"error": "the entity profile writer is off"}, status_code=409)
         if running:
             return JSONResponse({"error": "a sleep cycle or another rebuild is running"}, status_code=409)
-        try:
-            body = await request.json()
-        except Exception:
-            body = None
         raw = body.get("key") if isinstance(body, dict) else None
         key = normalize_key(raw) if isinstance(raw, str) else None
         if not key:
