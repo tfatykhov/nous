@@ -40,8 +40,8 @@ _DELETE_MODEL_CALLS = text(
     "DELETE FROM nous_system.model_call_log "
     "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)"
 )
-# F120: a watched call's row (migration 124) goes with its call: the same agent and age, right after it in a transaction of its own. No
-# foreign key, so it is deleted by name. Indexed on (agent_id, started_at DESC).
+# F120: a watched call's row (migration 124) goes with its call: the same agent and age, right after it in a
+# transaction of its own. No foreign key, so it is deleted by name. Indexed on (agent_id, started_at DESC).
 _DELETE_WATCH_ROWS = text(
     "DELETE FROM nous_system.tool_loading_watch "
     "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)"
