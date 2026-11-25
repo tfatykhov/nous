@@ -465,6 +465,29 @@ async def test_each_owner_route_and_its_undo(db):
 
 
 @pytest.mark.postgres_only
+async def test_the_routes_never_read_or_change_another_agents_profile(db):
+    mine, theirs = _agent(), _agent()
+    try:
+        await _commit_profile(db, theirs)
+        before = await EntityProfileStore(db, theirs).get("zephyrine")
+        app = _app(db, mine)
+        for method, path in (
+            ("DELETE", "/entity-profiles/zephyrine/lines/l1"),
+            ("DELETE", "/entity-profiles/zephyrine"),
+            ("POST", "/entity-profiles/zephyrine/restore"),
+            ("POST", "/entity-profiles/zephyrine/not-entity"),
+            ("DELETE", "/entity-profiles/zephyrine/not-entity"),
+            ("GET", "/entity-profiles/zephyrine"),
+        ):
+            assert (await _call(app, method, path)).status_code == 404, (method, path)
+        listed = (await _call(app, "GET", "/entity-profiles?status=removed")).json()
+        assert listed["profiles"] == [] and set(listed["counts"].values()) == {0}
+        assert await EntityProfileStore(db, theirs).get("zephyrine") == before
+    finally:
+        await _purge(db, theirs)
+
+
+@pytest.mark.postgres_only
 async def test_restoring_a_line_on_a_dead_fact_or_into_no_profile_is_409(db):
     agent = _agent()
     try:
