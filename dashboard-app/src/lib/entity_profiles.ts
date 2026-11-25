@@ -245,7 +245,7 @@ export function rebuildText(outcome: string, nextAt?: string | null): string {
     owner_not_entity: 'You said this is not an entity. Take that back first.',
     no_llm: 'No model is set up to write profiles on this server.',
     skipped: 'Nothing was written: the profile was removed, or called not an entity, while it was being written.',
-    all_rejected: 'Every line Nous wrote is one you removed, so the profile is empty now. It is written again when its facts change.',
+    all_rejected: 'Every line Nous wrote is one you removed, so the profile keeps only its own lines that are still live. It is written again when its facts change.',
   };
   return words[outcome] ?? `Done (${outcome}).`;
 }

@@ -872,6 +872,44 @@ class EntityProfileStore:
                 row.updated_at = datetime.now(UTC)
                 await s.flush()
 
+    async def keep_live_lines(
+        self, key: str, *, reply: dict | None = None, session: AsyncSession | None = None
+    ) -> tuple[str, int]:
+        """Keep the profile's own lines whose cited facts are all active and unsuperseded, read and written under one
+        row lock, so a line the owner puts back meanwhile is never lost. Also returns how many lines were dropped.
+
+        Without ``reply`` (a prune): ``unchanged`` and no write when no line died; otherwise the live lines are
+        written with the row's own digest, counts, name and kind, and ``written_at`` does not move. With ``reply`` (a
+        reply every line of which was one the owner removed): the live lines are written with the reply's ``digest``,
+        ``fact_count``, ``source_count``, ``display_name`` and ``kind``, as a write after a model call; with no live
+        line left the profile is empty. ``left_alone`` for a row the owner removed or called not an entity;
+        ``written``.
+        """
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            if row is not None and (not row.active or row.owner_verdict is not None):
+                return "left_alone", 0
+            lines = [line for line in (row.lines if row is not None else []) if isinstance(line, dict)]
+            live = await self.live_ids({i for line in lines for i in _cites(line)}, session=s)
+            kept = [line for line in lines if _cites(line) and _cites(line) <= live]
+            dropped = len(lines) - len(kept)
+            if reply is None:
+                if row is None or dropped == 0:
+                    return "unchanged", 0
+                fields = {
+                    "digest": row.source_hash,
+                    "fact_count": row.fact_count,
+                    "source_count": row.source_count,
+                    "display_name": row.display_name,
+                    "kind": row.kind,
+                    "called": False,
+                }
+            else:
+                fields = {**reply, "called": True}
+            digest = fields.pop("digest")
+            done = await self.write(key, "profile", digest, lines=kept, session=s, **fields)
+            return ("left_alone" if done is None else "written"), dropped
+
     # The owner's corrections. Each is recorded in the row itself, as the profile card's delete_entry records a deleted
     # line, and none moves written_at (the day's call count) or updated_at (the rests of not_entity and failed rows).
 
@@ -1077,41 +1115,26 @@ class EntityProfileWriter:
 
     async def _prune(self, key: str, row: dict | None, stats: dict[str, Any], session: AsyncSession | None) -> None:
         """No new lines for a profile whose facts changed: drop the stored lines that cite a fact no longer live,
-        without a call and without moving ``written_at`` (the digest is kept, so the profile stays due). The row is read
-        again first, so a line the owner put back since the run read it is kept."""
+        without a call and without moving ``written_at`` (the digest is kept, so the profile stays due). The lines are
+        read and written under one row lock (``keep_live_lines``), so a line the owner put back since the run read the
+        row is kept."""
         if row is None or row["status"] != "profile" or not row["lines"]:
             return
-        async with _session_scope(self._db, session) as s:
-            row = await self.store.get(key, session=s)
-            if row is None or row["status"] != "profile" or not row["lines"]:
-                return
-            live = await self.store.live_ids({i for line in row["lines"] for i in _cites(line)}, session=s)
-            kept = [line for line in row["lines"] if _cites(line) and _cites(line) <= live]
-            if len(kept) == len(row["lines"]):
-                return
-            done = await self.store.write(
-                key,
-                "profile",
-                row["source_hash"],
-                fact_count=row["fact_count"],
-                source_count=row["source_count"],
-                lines=kept,
-                display_name=row["display_name"],
-                kind=row["kind"],
-                called=False,
-                session=s,
-            )
-        if done is not None:
-            stats["stale_dropped"] += len(row["lines"]) - len(kept)
+        outcome, dropped = await self.store.keep_live_lines(key, session=session)
+        if outcome == "written":
+            stats["stale_dropped"] += dropped
 
-    async def _save_owner(self, key: str, fact_count: int, session: AsyncSession | None) -> None:
+    async def _save_owner(self, key: str, fact_count: int, session: AsyncSession | None) -> bool:
+        """Store ``key`` as an owner row; False when the write left a removed or owner-verdict row alone."""
         async with _session_scope(self._db, session) as s:
-            await self.store.write(key, "owner", "", fact_count=fact_count, source_count=0, lines=[], session=s)
+            done = await self.store.write(key, "owner", "", fact_count=fact_count, source_count=0, lines=[], session=s)
+        return done is not None
 
-    async def _clear(self, key: str, digest: str, row: dict | None, session: AsyncSession | None) -> None:
+    async def _clear(self, key: str, digest: str, row: dict | None, session: AsyncSession | None) -> bool:
+        """Empty a profile none of whose facts is left; False when the write left the row alone."""
         name, kind = (row["display_name"], row["kind"]) if row is not None else (None, None)
         async with _session_scope(self._db, session) as s:
-            await self.store.write(
+            done = await self.store.write(
                 key,
                 "profile",
                 digest,
@@ -1123,6 +1146,7 @@ class EntityProfileWriter:
                 called=False,
                 session=s,
             )
+        return done is not None
 
     async def run_sleep(
         self, interrupted: Callable[[], bool] | None = None, session: AsyncSession | None = None
@@ -1191,8 +1215,10 @@ class EntityProfileWriter:
                         if held:
                             stats["held"] += 1
                         elif row is None or row["status"] != "owner":
-                            await self._save_owner(key, count, session)
-                            stats["owner"] += 1
+                            if await self._save_owner(key, count, session):
+                                stats["owner"] += 1
+                            else:
+                                await self._left_alone(key, stats, session)
                         continue
                     async with _session_scope(self._db, session) as s:
                         facts = await self._source_facts(s, key)
@@ -1215,8 +1241,10 @@ class EntityProfileWriter:
                     if not facts:
                         # Every fact of a profiled key is gone: empty the profile without a call (its lines move to
                         # previous_lines), held or not.
-                        await self._clear(key, digest, row, session)
-                        stats["cleared"] += 1
+                        if await self._clear(key, digest, row, session):
+                            stats["cleared"] += 1
+                        else:
+                            await self._left_alone(key, stats, session)
                         continue
                     if held:
                         stats["held"] += 1
@@ -1278,9 +1306,11 @@ class EntityProfileWriter:
                 stats["outcome"] = "held"
                 stats["next_at"] = (written_at + _DAY).isoformat()
             elif norm in owner_keys(self._settings):
-                await self._save_owner(norm, count, session)
-                stats["owner"] = 1
-                stats["outcome"] = "owner"
+                if await self._save_owner(norm, count, session):
+                    stats["owner"] = 1
+                    stats["outcome"] = "owner"
+                else:
+                    stats["outcome"] = await self._left_alone(norm, stats, session)
             elif not facts:
                 stats["outcome"] = "no_facts"
             elif self._llm is None:
@@ -1312,9 +1342,10 @@ class EntityProfileWriter:
         and the key held for 24 hours. If that write fails, no call is made. A call that gets no reply (the API was
         down, rate limited or timed out) leaves the row as reserved; only an unusable reply makes an ``asked`` row
         ``failed``, to rest 7 days. A reply every line of which is one the owner removed (none dropped for another
-        reason) is stored as an empty profile with the new digest (``all_rejected``), so the key is not asked again
-        until its facts change. ``skipped``: the owner removed the profile or called the key not an entity before the
-        call or while the model was writing, and nothing was written.
+        reason) keeps the profile's own lines that are still live (an empty profile when none is), with the new
+        digest (``all_rejected``), so the key is not asked again until its facts change. ``skipped``: the owner removed
+        the profile or called the key not an entity before the call or while the model was writing, and nothing was
+        written.
         """
         sources = len(facts)
         async with _session_scope(self._db, session) as s:
@@ -1382,20 +1413,18 @@ class EntityProfileWriter:
                 and counts.get("rejected_dropped")
                 and not any(counts.get(k) for k in ("dropped", "inferred_dropped", "trimmed"))
             ):
-                # Every line the model wrote is one the owner removed: the profile is empty now, with the new digest,
-                # so the key is not asked again (one counted call a day) until its facts change.
-                done = await self.store.write(
-                    key,
-                    "profile",
-                    digest,
-                    fact_count=fact_count,
-                    source_count=sources,
-                    lines=[],
-                    display_name=name,
-                    kind=kind,
-                    session=s,
-                )
-                if done is None:
+                # Every line the model wrote is one the owner removed: the profile keeps its own lines that are still
+                # live (none: it is empty), with the new digest, so the key is not asked again (one counted call a
+                # day) until its facts change.
+                reply_fields = {
+                    "digest": digest,
+                    "fact_count": fact_count,
+                    "source_count": sources,
+                    "display_name": name,
+                    "kind": kind,
+                }
+                done, _dropped = await self.store.keep_live_lines(key, reply=reply_fields, session=s)
+                if done == "left_alone":
                     return await self._left_alone(key, stats, s)
                 stats["all_rejected"] += 1
                 return "all_rejected"

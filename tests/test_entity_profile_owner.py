@@ -689,6 +689,70 @@ async def test_a_reply_made_only_of_removed_lines_empties_the_profile_once_and_i
 
 
 @pytest.mark.postgres_only
+async def test_a_reply_of_removed_lines_only_keeps_the_lines_the_owner_kept(db, session):
+    agent = _agent()
+    f1, f2, f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
+    llm = FakeLLM(
+        {
+            "zephyrine": _entity(
+                _line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2), _line("Zephyrine rows.", f3)
+            )
+        }
+    )
+    writer = _writer(db, agent, llm)
+    await writer.rebuild("zephyrine", session=session)
+    bees, sails, rows = await _lines(session, agent)
+    await writer.store.remove_line("zephyrine", bees["id"], "owner", session=session)
+    # Its facts change (a tag; the fact of "rows" dies), the 24 hours pass, and the model writes only the removed
+    # line's text.
+    await session.execute(update(Fact).where(Fact.id == f2.id).values(tags=["changed"]))
+    await session.execute(update(Fact).where(Fact.id == f3.id).values(active=False))
+    llm.replies["zephyrine"] = _entity(_line("Zephyrine keeps bees.", f1))
+    await _a_day_later(session, agent)
+
+    first = await writer.run_sleep(session=session)
+    assert (first["all_rejected"], first["failed_closed"], first["asked"]) == (1, 0, 1)
+    row = await _row(session, agent, "zephyrine")
+    # The line the owner kept is still there, the same line; the one on a dead fact is not.
+    assert (row.status, list(row.lines)) == ("profile", [sails])
+    assert [ln["id"] for ln in row.previous_lines] == [bees["id"], rows["id"]]
+    for _cycle in range(2):
+        await _a_day_later(session, agent)
+        stats = await writer.run_sleep(session=session)
+        assert (stats["unchanged"], stats["asked"]) == (1, 0)
+    assert len(llm.prompts) == 2
+
+
+@pytest.mark.postgres_only
+async def test_an_owner_row_or_an_emptied_profile_the_owner_changed_meanwhile_is_counted_as_left_alone(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "alder", {}, {}, {})
+    gone = await _keyed(session, agent, "birchwood", {}, {})
+    await _keyed(session, agent, "pat", {}, {})
+    store = EntityProfileStore(db, agent)
+    line = _stored_line("b1", "Birchwood one.", str(gone[0].id))
+    await store.write("birchwood", "profile", "h", fact_count=2, source_count=2, lines=[line], session=session)
+    await store.write("pat", "profile", "h", fact_count=2, source_count=2, lines=[], session=session)
+    await _a_day_later(session, agent)
+    # Every fact of birchwood is gone (it would be emptied without a call), and pat is now named an owner key (it
+    # would become an owner row without a call).
+    await session.execute(update(Fact).where(Fact.id.in_([f.id for f in gone])).values(active=False))
+
+    async def owner_acts(prompt):
+        if '"alder"' in prompt:
+            await store.set_owner_verdict("birchwood", True, "owner", session=session)
+            await store.set_active("pat", False, session=session)
+
+    llm = FakeLLM({"alder": {"verdict": "not_entity"}}, on_call=owner_acts)
+    stats = await _writer(db, agent, llm, entity_profile_owner_keys=["Pat"]).run_sleep(session=session)
+
+    assert (stats["cleared"], stats["owner"]) == (0, 0)
+    assert (stats["owner_not_entity"], stats["inactive"]) == (1, 1)
+    assert (await _row(session, agent, "birchwood")).lines == [line]
+    assert (await _row(session, agent, "pat")).status == "profile"
+
+
+@pytest.mark.postgres_only
 async def test_a_line_is_not_put_back_past_the_profiles_bounds(db, session):
     agent = _agent()
     _facts, writer, _llm = await _profile(db, session, agent)

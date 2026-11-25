@@ -96,7 +96,9 @@ describe('words', () => {
       "Not written: it was written in the last 24 hours, and the day's limit has no exception. It can be written again after Nov 25 09:00 UTC.",
     );
     expect(rebuildText('skipped')).toBe('Nothing was written: the profile was removed, or called not an entity, while it was being written.');
-    expect(rebuildText('all_rejected')).toMatch(/^Every line Nous wrote is one you removed/);
+    expect(rebuildText('all_rejected')).toBe(
+      'Every line Nous wrote is one you removed, so the profile keeps only its own lines that are still live. It is written again when its facts change.',
+    );
   });
 
   it('a profile written with a call in the last 24 hours can be written again only once they have passed', () => {
