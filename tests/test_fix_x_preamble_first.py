@@ -244,6 +244,11 @@ _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "passes on, unchanged, the payload call_background_llm_structured built with the preamble at block 0 "
         "(F119: the wrapper only notes that a reply came back)",
     ),
+    ("nous/api/tool_loading_routes.py", "_parse", "request.stream"): (
+        1,
+        "not a request: the body of an incoming request to the tool-loading route (F120), read from Starlette's "
+        "stream and refused past 16384 bytes",
+    ),
 }
 _REQUEST_METHODS = frozenset({"call", "stream", "call_streaming_aggregated"})
 

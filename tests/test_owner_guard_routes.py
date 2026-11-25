@@ -22,6 +22,7 @@ PROXY = {"X-Nous-Proxy-Secret": PROXY_VALUE}
 FORBIDDEN = {"error": "forbidden"}
 NOT_JSON = {"error": "Content-Type must be application/json"}
 JUDGE_SECOND_OFF = {"error": "The second judge's settings are off on this server.", "enabled": False}
+TOOL_LOADING_OFF = {"error": "Tool loading is off on this server.", "enabled": False}
 
 
 def _settings(owner: bool = True, proxy: bool = True) -> SimpleNamespace:
@@ -243,6 +244,8 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
             ("POST", "/dashboard/outside-judge/second/check"),
         )
     },
+    # F120: tool loading, with the setting off (the default): refused before the body is read
+    ("PUT", "/dashboard/tool-loading"): (b"{}", 409, TOOL_LOADING_OFF),
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
@@ -268,6 +271,8 @@ JUDGE_SECOND_ROUTE_SET = {
     ("DELETE", "/dashboard/outside-judge/second/key"),
     ("POST", "/dashboard/outside-judge/second/check"),
 }
+# F120: tool loading, watch only (nous/api/tool_loading_routes.py)
+TOOL_LOADING_ROUTE_SET = {("GET", "/dashboard/tool-loading"), ("PUT", "/dashboard/tool-loading")}
 AUTONOMY_ROUTE_SET = {
     ("GET", "/autonomy/limits"),
     ("PUT", "/autonomy/limits/{key}"),
@@ -475,6 +480,8 @@ GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
     "/dashboard/outside-judge": (200, {"enabled": False}),
     # F118 PR 3: the second judge's settings, with the setting off (the default): no session either.
     "/dashboard/outside-judge/second": (200, {"enabled": False}),
+    # F120: tool loading, with the setting off (the default): no session either.
+    "/dashboard/tool-loading": (200, {"enabled": False}),
     "/context/log/abc/payload": (404, {"error": "Not enabled"}),
     "/context/log/abc/sections": (404, {"error": "Not enabled"}),
 }
@@ -530,11 +537,17 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         for method in route.methods - {"HEAD"}
     }
     assert guarded == (
-        REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET | AUTONOMY_ROUTE_SET | JUDGE_SECOND_ROUTE_SET
+        REST_ROUTE_SET
+        | INTENTION_ROUTE_SET
+        | GOAL_ROUTE_SET
+        | AUTONOMY_ROUTE_SET
+        | JUDGE_SECOND_ROUTE_SET
+        | TOOL_LOADING_ROUTE_SET
     )
     assert len(GOAL_ROUTE_SET) == 24
     assert len(AUTONOMY_ROUTE_SET) == 7
     assert len(JUDGE_SECOND_ROUTE_SET) == 5
+    assert len(TOOL_LOADING_ROUTE_SET) == 2
 
 
 @pytest.mark.parametrize("path", [*GOAL_READS, *AUTONOMY_READS])

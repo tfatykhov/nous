@@ -102,6 +102,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "judge_second_settings"),
         # F119 per-entity profiles, one row per agent and entity key (migration 123)
         ("nous_system", "entity_profile"),
+        # F120 tool loading, watch only: what a watched model call would have left out (migration 124)
+        ("nous_system", "tool_loading_watch"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

@@ -3,7 +3,8 @@
 ``sweep_tool_calls`` deletes this agent's ``nous_system.tool_call_log`` and ``nous_system.agent_turn_log`` rows that
 started more than ``NOUS_TOOL_CALL_RETENTION_DAYS`` days ago; ``sweep_model_calls`` deletes its
 ``nous_system.model_call_log`` rows that started more than ``NOUS_MODEL_CALL_RETENTION_DAYS`` days ago, and their
-``model_call_attempt`` rows go with them (``ON DELETE CASCADE``); ``sweep_model_call_text`` deletes its
+``model_call_attempt`` rows go with them (``ON DELETE CASCADE``), and its ``nous_system.tool_loading_watch`` rows (F120,
+migration 124) of the same age; ``sweep_model_call_text`` deletes its
 ``nous_system.model_call_block_ref`` rows older than ``NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`` days, then its
 ``nous_system.model_text_block`` rows that no call references and no store has used for an hour;
 ``sweep_tool_call_text`` sets ``tool_call_log.result_text`` (the full result of a call, migration 104) to NULL on rows
@@ -16,9 +17,12 @@ per-turn log past ``NOUS_PROMISE_GATE_LOG_RETENTION_DAYS``, in batches, on a loo
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 # Agent-scoped: the tables are, and the retention setting is per process, so an unscoped DELETE would let one agent
 # remove the rows of another that keeps them longer. Both tables index (agent_id, started_at DESC) for this (migration
@@ -34,6 +38,12 @@ _DELETE_TURNS = text(
 # The same scoping, on (agent_id, started_at DESC) (migration 101). A minute bucket row starts at its minute.
 _DELETE_MODEL_CALLS = text(
     "DELETE FROM nous_system.model_call_log "
+    "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)"
+)
+# F120: a watched call's row (migration 124) goes with its call: the same agent and age, right after it in a
+# transaction of its own. No foreign key, so it is deleted by name. Indexed on (agent_id, started_at DESC).
+_DELETE_WATCH_ROWS = text(
+    "DELETE FROM nous_system.tool_loading_watch "
     "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)"
 )
 # The full result (migration 104) goes by the text retention; the row and its preview stay. IS NOT NULL keeps the
@@ -105,17 +115,27 @@ async def sweep_tool_call_text(database: Any, agent_id: str, days: int) -> dict[
 
 async def sweep_model_calls(database: Any, agent_id: str, days: int) -> dict[str, int]:
     """Delete ``agent_id``'s model-call rows (calls and minute buckets) that started more than ``days`` days ago;
-    their attempt rows go with them (``ON DELETE CASCADE``).
+    their attempt rows go with them (``ON DELETE CASCADE``). Its tool-loading watch rows (F120) of the same age are
+    deleted after that, in a transaction of their own: a fault there is logged and never keeps the model-call rows.
 
-    Returns the call rows deleted (the cascaded attempts are not counted). Raises ``ValueError`` for ``days`` below 1
-    (a zero-day interval would delete every row), and whatever the database raises (then nothing is deleted).
+    Returns the rows deleted per table (the cascaded attempts are not counted; 0 watch rows when their delete failed).
+    Raises ``ValueError`` for ``days`` below 1 (a zero-day interval would delete every row), and whatever the database
+    raises for the model-call rows (then nothing is deleted).
     """
     if days < 1:
         raise ValueError(f"model-call retention must be at least 1 day, got {days}")
+    params = {"agent_id": agent_id, "d": days}
     async with database.session() as session:
-        calls = await session.execute(_DELETE_MODEL_CALLS, {"agent_id": agent_id, "d": days})
+        calls = await session.execute(_DELETE_MODEL_CALLS, params)
         await session.commit()
-    return {"model_call_log": calls.rowcount}
+    watched = 0
+    try:
+        async with database.session() as session:
+            watched = (await session.execute(_DELETE_WATCH_ROWS, params)).rowcount
+            await session.commit()
+    except Exception as exc:
+        logger.warning("F120: deleting old tool-loading watch rows failed (%s); they stay", type(exc).__name__)
+    return {"model_call_log": calls.rowcount, "tool_loading_watch": watched}
 
 
 async def sweep_model_call_text(database: Any, agent_id: str, days: int) -> dict[str, int]:

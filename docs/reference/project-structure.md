@@ -219,6 +219,7 @@ nous/
 │       ├── goal_routes.py # F114 PR 2: the owner's /goals routes (list, options, one goal, a new draft, one POST per owner action; F115 per-goal tools: GET, PUT and DELETE /goals/{ref}/tools; a goal that may run any command: POST /goals `commands`, POST /goals/{ref}/contained, GET /goals/commands; the default goal prompt: GET, PUT and DELETE /goals/prompt), every one behind the owner guard; a goal's actions are the store's own rules
 │       ├── autonomy_routes.py # F115: the owner's /autonomy routes (the limits, the record of changes, the tools and their settings for background work), every one behind the owner guard
 │       ├── judge_second_routes.py # F118 PR 3: the owner's /dashboard/outside-judge/second routes (read, change, save and remove the key, check), every one behind the owner guard, the body bounded and typed strictly; imports nothing of the judge (the manager is passed in); with NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED off the read answers {"enabled": false} and the changes 409
+│       ├── tool_loading_routes.py # F120: the owner's GET and PUT /dashboard/tool-loading (the setting, the per-kind numbers from tool_loading_watch joined to model_call_log and from tool_call_log, the tool table), both behind the owner guard
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
 │       ├── owner_guard.py # Owner routes require the owner's or the proxy's secret: the check and the route wrapper (OwnerGuard), and which proof grants which capability
@@ -242,6 +243,7 @@ nous/
 │       ├── execution_context.py # Harness 1a: who is calling (interactive, dag_node, …)
 │       ├── tool_classes.py     # Harness 2a: every tool's class, declared once
 │       ├── tool_policy.py      # Harness 2a: per-context policy at the choke point; F099: the internal_only allowed set, denylist and per-call rules
+│       ├── tool_loading.py     # F120 tool loading, watch only (pure): the owner's setting and its parser, the kinds of call, the pinned tools, the core/left-out split and the per-call record of what a model call would leave out
 │       ├── idempotency.py      # Harness 2b: logical-send keys for external sends
 │       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2: images and mp4/webm video
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)
