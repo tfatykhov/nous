@@ -37,7 +37,9 @@ describe('tool loading: the words', () => {
     expect(MODE_HELP.on).toContain('What a turn may use is as before.');
     expect(SAVES_AT_ONCE_TEXT).toContain('(in On, from the next turn)');
     expect(NO_DEFERRING_TEXT).toMatch(/^On does nothing on this server/);
-    expect(Object.keys(WHY_WORDS).sort()).toEqual(['client', 'model', 'nothing', 'turn']);
+    expect(Object.keys(WHY_WORDS).sort()).toEqual(['client', 'fault', 'model', 'name', 'nothing', 'turn']);
+    expect(WHY_WORDS.name).toBe('a tool they could use is already named load_tools, like the loader');
+    expect(WHY_WORDS.fault).toBe('tool loading failed when their turn began');
     expect(MODE_HELP.watch).toBe(
       'Every tool is still sent in full. Each model call of a kind switched on below records what it would have left out.',
     );

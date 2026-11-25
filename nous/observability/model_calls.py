@@ -429,6 +429,9 @@ class CallContext:
     # F120 On: the turn's nous.api.tool_loading.ToolWindow when its calls defer tools, set like tool_loading_kind; the
     # runner builds the call's record from it. Not a column.
     tool_window: Any = None
+    # F120 On: why the turn's calls do not defer, when the runner knew it at the turn's start (opening its window
+    # failed: nous.api.tool_loading.WHY_FAULT); the call's record carries it. Not a column.
+    tool_loading_why: str | None = None
 
 
 def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:

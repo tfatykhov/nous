@@ -602,3 +602,30 @@ async def test_on_is_stored_like_the_other_modes(db):
         assert RuntimeConfig.get().get_tool_loading(agent).mode == "on"
     finally:
         await _cleanup(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_every_reason_a_call_in_on_was_sent_in_full_reaches_the_card(db):
+    from nous.api import tool_loading
+
+    agent = _agent()
+    now = datetime.now(UTC)
+    reasons = {
+        tool_loading.WHY_CLIENT: 6,
+        tool_loading.WHY_MODEL: 5,
+        tool_loading.WHY_NAME: 4,
+        tool_loading.WHY_NOTHING: 3,
+        tool_loading.WHY_TURN: 2,
+        tool_loading.WHY_FAULT: 1,
+    }
+    try:
+        async with db.engine.begin() as conn:
+            for why, count in reasons.items():
+                for _ in range(count):
+                    await _call(conn, agent, uuid.uuid4(), _on_record("heartbeat", "read", why=why), ["bash"], now)
+        body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
+        heartbeat = next(row for row in body["numbers"] if row["key"] == "heartbeat")["on_mode"]
+        assert heartbeat["not_applied"] == [{"why": why, "calls": count} for why, count in reasons.items()]
+        assert (heartbeat["calls"], heartbeat["applied"], heartbeat["saved_per_call"]) == (21, 0, 0)
+    finally:
+        await _cleanup(db, agent)

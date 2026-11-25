@@ -137,14 +137,15 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 READ_RATIO = 0.1
 WRITE_RATIO = 1.25
 
-# The list that would replace the left-out tools: one line per tool of Nous, the names of each other server's tools.
+# The list that replaces the left-out tools (the loader's description): one line per tool of Nous, and per other server
+# the full name of each of its tools, every name as the loader takes it.
 INDEX_HEADER = (
     "Some of your tools are not attached to save space. To use one, call load_tools with its name; its full "
     "definition is attached from your next step. You can load several at once. A name listed here is a real tool you "
     "may use."
 )
+INDEX_SERVERS_LINE = "Tools of other servers (load one by its full name, as listed):"
 INDEX_LINE_CHARS = 90
-INDEX_NAMES_PER_SERVER = 40
 LOADER_NAME = "load_tools"
 LOADER_MAX_NAMES = 20
 LOADER_SCHEMA: Mapping[str, Any] = MappingProxyType(
@@ -172,11 +173,14 @@ OUTCOME_NOTHING_LOADED = "nothing_loaded"
 OUTCOME_NOT_LOADED = "not_loaded"
 LOADER_OUTCOMES: tuple[str, ...] = (OUTCOME_LOADED, OUTCOME_NOTHING_LOADED, OUTCOME_NOT_LOADED)
 # Why On sent a call of a switched-on kind in full (``why_not``): the model client cannot defer, the call's model is
-# not in DEFERRING_MODELS, every tool is kept, or the turn began before On was chosen.
+# not in DEFERRING_MODELS, a tool the turn may use is named like the loader, every tool is kept, the turn began before
+# On was chosen, or opening the turn's window failed.
 WHY_CLIENT = "client"
 WHY_MODEL = "model"
+WHY_NAME = "name"
 WHY_NOTHING = "nothing"
 WHY_TURN = "turn"
+WHY_FAULT = "fault"
 # Why a turn that deferred sent its later calls in full: the API refused a request (a 400), or the window's own code
 # failed.
 FALLBACK_REFUSED = "refused"
@@ -184,6 +188,10 @@ FALLBACK_FAULT = "fault"
 LOADER_BAD_INPUT = f"Nothing was loaded: {LOADER_NAME} takes names, a list of the tool names its description lists."
 LOADER_ALL_ATTACHED = (
     "Nothing needs loading: every tool is attached in full from your next step. Call the one you need."
+)
+LOADER_UNREADABLE = (
+    f"Nothing was loaded: this call's input could not be read. Call {LOADER_NAME} as "
+    '{"names": ["tool_name"]}, with names from its description.'
 )
 
 
@@ -300,26 +308,32 @@ def first_sentence(description: Any) -> str:
     return text
 
 
+def _server_of(name: str) -> tuple[str, str] | None:
+    """``(server, short name)`` of another server's tool (``mcp__<server>__<tool>``), else None."""
+    if not name.startswith(MCP_TOOL_PREFIX):
+        return None
+    server, _, short = name[len(MCP_TOOL_PREFIX) :].partition("__")
+    return server, short or name
+
+
 def index_text(deferred: Sequence[Mapping[str, Any]]) -> str:
-    """The list of names that would replace ``deferred`` (sorted, so a reload never changes it): a line per tool of
-    Nous, and per other server its tool names, at most ``INDEX_NAMES_PER_SERVER``."""
+    """The list of names that replaces ``deferred`` (sorted, so a reload never changes it): a line per tool of Nous,
+    and per other server the full name of every one of its tools, each as the loader takes it."""
     nous_lines: list[str] = []
     servers: dict[str, list[str]] = {}
     for tool in deferred:
         name = str(tool.get("name", ""))
-        if name.startswith(MCP_TOOL_PREFIX):
-            server, _, short = name[len(MCP_TOOL_PREFIX) :].partition("__")
-            servers.setdefault(server, []).append(short or name)
+        of = _server_of(name)
+        if of is not None:
+            servers.setdefault(of[0], []).append(name)
         else:
             nous_lines.append(f"- {name}: {first_sentence(tool.get('description'))}")
     lines = [INDEX_HEADER, "", "Tools:", *sorted(nous_lines)]
     if servers:
-        lines += ["", "Tools of other servers (call one by its full name, mcp__<server>__<tool>):"]
+        lines += ["", INDEX_SERVERS_LINE]
         for server in sorted(servers):
             names = sorted(servers[server])
-            shown = names[:INDEX_NAMES_PER_SERVER]
-            more = f", and {len(names) - len(shown)} more" if len(names) > len(shown) else ""
-            lines.append(f"- {server} ({len(names)} tools): {', '.join(shown)}{more}")
+            lines.append(f"- {server} ({len(names)} tools): {', '.join(names)}")
     return "\n".join(lines)
 
 
@@ -418,11 +432,14 @@ def why_not(
     config: ToolLoadingConfig, tools: Sequence[Mapping[str, Any]] | None, *, deferring_client: bool, model: str | None
 ) -> str | None:
     """Why a call in On that sends ``tools`` to ``model`` cannot defer any, or None when it can: the model client
-    cannot (only the SDK client was tested), the model is not in ``DEFERRING_MODELS``, or every tool is kept."""
+    cannot (only the SDK client was tested), the model is not in ``DEFERRING_MODELS``, a tool is already named like
+    the loader (a request may not name two tools alike), or every tool is kept."""
     if not deferring_client:
         return WHY_CLIENT
     if model not in DEFERRING_MODELS:
         return WHY_MODEL
+    if any(tool.get("name") == LOADER_NAME for tool in tools or ()):
+        return WHY_NAME
     kept = config.kept()
     if not any(tool.get("name") not in kept for tool in tools or ()):
         return WHY_NOTHING
@@ -454,6 +471,16 @@ def _references(block: Any) -> list[str]:
 def holds_reference(block: Any) -> bool:
     """Whether ``block`` is a tool result that loaded tools (holds ``tool_reference`` blocks)."""
     return bool(_references(block))
+
+
+def carries_reference(messages: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether any of ``messages`` holds a tool result that loaded tools."""
+    return any(
+        holds_reference(block)
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+    )
 
 
 def references_outside(
@@ -533,6 +560,8 @@ class ToolWindow:
     fallback: list[dict[str, Any]]
     deferred: frozenset[str]
     in_full: frozenset[str]
+    # Each short name of another server's deferred tool, and the full names that have it.
+    short_names: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     loaded: list[str] = field(default_factory=list)
     loads: int = 0
     fault: str | None = None
@@ -551,6 +580,12 @@ class ToolWindow:
         self.unloaded = frozenset() if self.broken else self.deferred - frozenset(self.loaded)
         self.loaded_at_request = len(self.loaded)
         return self.fallback if self.broken else self.tools
+
+    def request_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The messages of the request about to be built: the turn's own, or after a fault a copy with words in place
+        of every reference (every tool is in full then, so nothing is lost, and no reference is left for the API to
+        refuse). ``messages`` itself is never changed."""
+        return references_outside(messages, None) if self.broken else messages
 
     def refused(self, status: int | None) -> bool:
         """Whether a request the API refused with ``status`` is sent once more with every tool in full: a 400, the
@@ -576,6 +611,14 @@ class ToolWindow:
         else:
             return None
         return self._counted(found)
+
+    def unreadable(self) -> LoaderAnswer:
+        """The answer to a loader call whose input could not be read (malformed JSON): text with ``is_error`` that says
+        how to call it. Counted like any other loader call."""
+        answer = LoaderAnswer(
+            content=LOADER_UNREADABLE, is_error=True, outcome=OUTCOME_NOTHING_LOADED, text=LOADER_UNREADABLE
+        )
+        return self._counted(answer)
 
     def fault_answer(self, name: str) -> LoaderAnswer | None:
         """``answer`` once the window's own code failed on this call (the window is broken): plain words."""
@@ -616,8 +659,18 @@ class ToolWindow:
         found: list[str] = []
         present: list[str] = []
         missing: list[str] = []
+        ambiguous: list[str] = []
         for asked in dict.fromkeys(names[:LOADER_MAX_NAMES]):
             name = resolve(asked)
+            if name not in self.deferred and name not in self.in_full:
+                # Another server's tool asked by its short name: the one deferred tool that has it. Every name a
+                # match can give is one this turn may use.
+                matches = self.short_names.get(name, ())
+                if len(matches) > 1:
+                    full = " or ".join(matches)
+                    ambiguous.append(f"{_echo([asked])} names {len(matches)} tools: load one by its full name, {full}.")
+                    continue
+                name = matches[0] if matches else name
             if name in self.deferred and name not in self.loaded and name not in found:
                 found.append(name)
             elif name in self.in_full or name in self.loaded or name in found:
@@ -629,6 +682,7 @@ class ToolWindow:
             notes.append(f"Already in your tool list: {_echo(present)}.")
         if missing:
             notes.append(f"Not available: {_echo(missing)}.")
+        notes += ambiguous
         if len(names) > LOADER_MAX_NAMES:
             notes.append(f"Only the first {LOADER_MAX_NAMES} names of a call are read.")
         if not found:
@@ -650,10 +704,16 @@ def open_window(config: ToolLoadingConfig, kind: str, tools: Sequence[Mapping[st
     kept = config.kept()
     deferred = [tool for tool in tools if tool.get("name") not in kept]
     loader = loader_tool(deferred)
+    short_names: dict[str, list[str]] = {}
+    for tool in deferred:
+        of = _server_of(str(tool.get("name", "")))
+        if of is not None:
+            short_names.setdefault(of[1], []).append(str(tool.get("name")))
     return ToolWindow(
         kind=kind,
         tools=[*({**tool, "defer_loading": True} if tool.get("name") not in kept else tool for tool in tools), loader],
         fallback=[*tools, loader],
         deferred=frozenset(str(tool.get("name")) for tool in deferred),
         in_full=frozenset(str(tool.get("name")) for tool in tools if tool.get("name") in kept) | {LOADER_NAME},
+        short_names={short: tuple(sorted(names)) for short, names in short_names.items()},
     )

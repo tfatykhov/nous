@@ -13,7 +13,8 @@ line per check: the check, OK or REFUSED, the stop reason, each reply block's ty
 input's keys, a text by its first words) and the usage numbers; a refusal by its HTTP status and the API's message. It
 never prints a header, a key, a token or more of a message than its first words.
 
-What passing means: S2, S2b, S3, S5, S6.2, S6c.3, S8.3, S10, S12b, S12c and S15 are OK, and S4, S6.1, S6.3, S8.1 and
+What passing means: S2, S2b, S3, S5, S6.2, S6c.3, S8.3, S10, S12b, S12c, S12d and S15 are OK (S12d.3 and .4 say
+"partial" when the model made fewer than the three calls asked for), and S4, S6.1, S6.3, S8.1 and
 S8.2 are REFUSED (a reference to a tool the request does not send, and a reference beside text or in an error result,
 are refused; Nous never sends either). S1 and S1b (a forced tool choice) are refused by some models with or without
 deferral; Nous does not force a tool when thinking is on. S7 and S9 describe the model's behaviour and pass either
@@ -394,6 +395,66 @@ async def main():
                 "S12c the same, then a text block after the results",
                 *await call(client, base(head + [{"role": "user", "content": [*together, note]}], thinking=None)),
             )
+
+        # S12d: S12b and S12c in production's shape: the payload builder marks the last block of the last user message
+        # with cache_control. A hand-built assistant message cannot carry thinking (its blocks need the API's
+        # signatures), so .1 and .2 are hand-built with thinking off, and .3 and .4 answer the three calls of a real
+        # first response with adaptive thinking (its assistant message passed back unchanged).
+        if want("S12d"):
+            mark = {"cache_control": {"type": "ephemeral"}}
+            a = {
+                "type": "tool_use",
+                "id": "toolu_smoke_d_0001",
+                "name": "load_tools",
+                "input": {"names": ["get_weather"]},
+            }
+            b = {"type": "tool_use", "id": "toolu_smoke_d_0002", "name": "echo", "input": {"text": "hi"}}
+            c = {"type": "tool_use", "id": "toolu_smoke_d_0003", "name": "get_stock", "input": {"ticker": "ACME"}}
+            head = [
+                {"role": "user", "content": ASK + " Also echo hi and get the price of ACME."},
+                {"role": "assistant", "content": [a, b, c]},
+            ]
+            marked = [result(a, [REF_W]), result(b, "hi"), result(c, NOT_LOADED, is_error=True, **mark)]
+            line(
+                "S12d.1 S12b with cache_control on its last block",
+                *await call(client, base(head + [{"role": "user", "content": marked}], thinking=None)),
+            )
+            unmarked = [result(a, [REF_W]), result(b, "hi"), result(c, NOT_LOADED, is_error=True)]
+            note = {"type": "text", "text": "load_tools: Not available: no_such_tool.", **mark}
+            line(
+                "S12d.2 S12c with cache_control on the text after the results",
+                *await call(client, base(head + [{"role": "user", "content": [*unmarked, note]}], thinking=None)),
+            )
+            ask = [
+                {
+                    "role": "user",
+                    "content": 'In one step, call load_tools with ["get_weather"], call echo with "hi", and call echo '
+                    'again with "bye". Make all three calls now, together.',
+                }
+            ]
+            ok, content, stop, u, err = await call(client, base(ask))
+            uses = [block for block in content or [] if block.get("type") == "tool_use"]
+            print(f"S12d.3 first response (adaptive thinking) | {blocks(content)} | {len(uses)} calls")
+            if ok and uses:
+                answers, plain = [], False
+                for use in uses:
+                    if use.get("name") == "load_tools":
+                        answers.append(result(use, [REF_W]))
+                    elif not plain:
+                        answers.append(result(use, "hi"))
+                        plain = True
+                    else:
+                        answers.append(result(use, "echo failed: smoke check.", is_error=True))
+                shape = "complete" if len(uses) >= 3 and any(u.get("name") == "load_tools" for u in uses) else "partial"
+                last = {**answers[-1], **mark}
+                m = ask + [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": [*answers[:-1], last]},
+                ]
+                line(f"S12d.3 the three results, cache_control on the last ({shape})", *await call(client, base(m)))
+                tail = {"type": "text", "text": "load_tools: Not available: no_such_tool.", **mark}
+                m = ask + [{"role": "assistant", "content": content}, {"role": "user", "content": [*answers, tail]}]
+                line(f"S12d.4 the same, then a marked text block ({shape})", *await call(client, base(m)))
 
         # S15/S16/S10: 100 deferred tools with an index; does the model load unprompted; cost of the stubs; a load of 20
         if want("S15"):

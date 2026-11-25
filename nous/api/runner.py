@@ -3067,7 +3067,9 @@ class AgentRunner:
             config = RuntimeConfig.get().get_tool_loading(self._settings.agent_id)
             why = None
             if config.mode == tool_loading.MODE_ON:
-                why = tool_loading.why_not(config, tools, deferring_client=self._defers_tools(), model=model)
+                why = getattr(call_context, "tool_loading_why", None) or tool_loading.why_not(
+                    config, tools, deferring_client=self._defers_tools(), model=model
+                )
             return tool_loading.call_record(config, kind, tools, why)
         except Exception as exc:  # noqa: BLE001 -- watching must never change a call
             if not _tool_loading_fault_logged:
@@ -3102,7 +3104,7 @@ class AgentRunner:
         its calls defer tools: the mode is On, the turn's kind is switched on, and ``tool_loading.why_not`` finds
         nothing against ``tools`` (every tool the turn may use) on ``model``. Else ``call_context`` itself, and the
         turn is as today. Decided once, at the turn's start: the turn's array is fixed from then on. A fault gives
-        ``call_context`` and is logged once."""
+        ``call_context`` with ``tool_loading.WHY_FAULT`` as the reason its calls record, and is logged once."""
         kind = getattr(call_context, "tool_loading_kind", None)
         if kind is None or not tools:
             return call_context
@@ -3115,7 +3117,7 @@ class AgentRunner:
             return dataclasses.replace(call_context, tool_window=tool_loading.open_window(config, kind, tools))
         except Exception as exc:  # noqa: BLE001 -- the turn goes on as today
             self._tool_window_fallback(None, tool_loading.FALLBACK_FAULT, exc)
-            return call_context
+            return dataclasses.replace(call_context, tool_loading_why=tool_loading.WHY_FAULT)
 
     @staticmethod
     def _tool_window_fallback(window: tool_loading.ToolWindow | None, why: str, exc: BaseException | None) -> None:
@@ -3145,13 +3147,15 @@ class AgentRunner:
         call_index: int,
         session_id: str | None,
         started_at: datetime | None,
+        unreadable: bool = False,
     ) -> tool_loading.LoaderAnswer | None:
         """F120 On, both tool loops: the answer to a call the turn's window takes (the loader, or a deferred tool not
         loaded when the request was built, which never runs), or None for a call that goes on as today. Runs after
-        the alias step and before every check. The answer opens no ledger row and is no tool failure: it is recorded
-        in ``tool_call_log`` with its own outcome and ``is_error`` false, and nowhere else."""
+        the alias step and before every check; a loader call whose input could not be read (``unreadable``) is taken
+        before the malformed-input answer. The answer opens no ledger row and is no tool failure: it is recorded in
+        ``tool_call_log`` with its own outcome and ``is_error`` false, and nowhere else."""
         try:
-            answer = window.answer(name, tool_input, self._alias_target)
+            answer = window.unreadable() if unreadable else window.answer(name, tool_input, self._alias_target)
         except Exception as exc:  # noqa: BLE001 -- the turn goes on with every tool in full
             self._tool_window_fallback(window, tool_loading.FALLBACK_FAULT, exc)
             answer = window.fault_answer(name)
@@ -3180,14 +3184,20 @@ class AgentRunner:
         self, window: tool_loading.ToolWindow, call_kwargs: dict[str, Any], call_context: CallContext
     ) -> ApiResponse:
         """F120 On: one request of ``_tool_loop`` with the turn's window's tools. When the API refuses it with a 400 it
-        is sent once more with every tool in full, as is every later request of the turn (``ToolWindow.refused``)."""
+        is sent once more with every tool in full and no reference, as is every later request of the turn
+        (``ToolWindow.refused``, ``ToolWindow.request_messages``)."""
+
+        def request() -> dict[str, Any]:
+            tools = window.request_tools()
+            return {**call_kwargs, "tools": tools, "messages": window.request_messages(call_kwargs["messages"])}
+
         try:
-            return await self._call_api(**{**call_kwargs, "tools": window.request_tools()}, call_context=call_context)
+            return await self._call_api(**request(), call_context=call_context)
         except Exception as exc:
             if not window.refused(_http_status(exc)):
                 raise
             self._tool_window_fallback(window, tool_loading.FALLBACK_REFUSED, None)
-        return await self._call_api(**{**call_kwargs, "tools": window.request_tools()}, call_context=call_context)
+        return await self._call_api(**request(), call_context=call_context)
 
     async def _stream_tool_segment(
         self,
@@ -3198,11 +3208,16 @@ class AgentRunner:
     ) -> AsyncGenerator[StreamEvent, None]:
         """F120 On: one segment of ``stream_chat`` with the turn's window's tools (``_stream_with_keepalive``). When the
         API refuses the request with a 400 before any event but a keepalive, it is sent once more with every tool in
-        full, as is every later request of the turn (``ToolWindow.refused``)."""
+        full and no reference, as is every later request of the turn (``ToolWindow.refused``,
+        ``ToolWindow.request_messages``)."""
         for _attempt in range(2):
             refused = started = False
+            tools = window.request_tools()
             stream = self._stream_with_keepalive(
-                system_prompt=system_prompt, messages=messages, tools=window.request_tools(), call_context=call_context
+                system_prompt=system_prompt,
+                messages=window.request_messages(messages),
+                tools=tools,
+                call_context=call_context,
             )
             try:
                 async for event in stream:
@@ -3821,6 +3836,26 @@ class AgentRunner:
                                 own_reasons,
                                 self._settings.tool_reason_max_chars,
                             )
+
+                        # F120 On: a loader call whose input could not be read is the window's to answer.
+                        if tc.get("input_error") and window is not None and tc["name"] == tool_loading.LOADER_NAME:
+                            answer = self._tool_window_step(
+                                window,
+                                _ctx,
+                                name_called=tc["name"],
+                                name=tc["name"],
+                                tool_input=call_input,
+                                reason=reason,
+                                turn_id=_stream_turn_id,
+                                turn_number=_stream_turn_number,
+                                call_index=call_index,
+                                session_id=session_id,
+                                started_at=call_started,
+                                unreadable=True,
+                            )
+                            tool_results_for_message.append(answer.result(tc["id"]))
+                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            continue
 
                         # Malformed tool-input JSON: never dispatch a blanked-args
                         # call (it can only fail downstream with a misleading
@@ -4959,7 +4994,12 @@ class AgentRunner:
                 total_usage["output_tokens"] += api_response.usage.get("output_tokens", 0)
                 # The estimator learns characters of text per token. A request that carries an image teaches it
                 # nothing true: an image's base64 is not text, and its tokens are not those of the text beside it.
-                if self._compactor and not any(_carries_image(m.get("content")) for m in messages):
+                # Nor does one that holds a load (F120 On): the API counts each loaded definition with the messages.
+                if (
+                    self._compactor
+                    and not any(_carries_image(m.get("content")) for m in messages)
+                    and not tool_loading.carries_reference(messages)
+                ):
                     input_chars = sum(len(str(m.get("content", ""))) for m in messages)
                     self._compactor.estimator.calibrate(input_chars, api_response.usage.get("input_tokens", 0))
 
@@ -5030,6 +5070,25 @@ class AgentRunner:
                     # and the model is told what to fix. Skips gating, dispatch
                     # and the ledger: nothing ran, so nothing is recorded.
                     input_error = (api_response.input_errors or {}).get(tool_use_id)
+                    # F120 On: a loader call whose input could not be read is the window's to answer.
+                    if input_error and window is not None and tool_name == tool_loading.LOADER_NAME:
+                        answer = self._tool_window_step(
+                            window,
+                            ctx,
+                            name_called=block["name"],
+                            name=tool_name,
+                            tool_input=tool_input,
+                            reason=reason,
+                            turn_id=turn_id,
+                            turn_number=turn_number,
+                            call_index=call_index,
+                            session_id=session_id,
+                            started_at=call_started,
+                            unreadable=True,
+                        )
+                        tool_results_for_message.append(answer.result(tool_use_id))
+                        free_answers += 0 if answer.counted else 1
+                        continue
                     if input_error:
                         tool_results_for_message.append(
                             {

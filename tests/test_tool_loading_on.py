@@ -28,8 +28,10 @@ from nous.api.tool_loading import (
     LOADER_BAD_INPUT,
     LOADER_MAX_NAMES,
     LOADER_NAME,
+    LOADER_UNREADABLE,
     ToolLoadingConfig,
     call_record,
+    carries_reference,
     holds_reference,
     index_text,
     note_block,
@@ -113,6 +115,7 @@ def test_a_pinned_or_forced_tool_and_the_core_set_are_never_deferred():
         (True, "claude-sonnet-4-6", TOOLS, "model"),
         (True, "claude-opus-5", TOOLS, "model"),  # an id is listed only once the smoke script passed on it
         (True, None, TOOLS, "model"),
+        (True, MODEL, [*TOOLS, _tool(LOADER_NAME)], "name"),  # two tools of one name would be refused
         (True, MODEL, [_tool("bash"), _tool("db_query")], "nothing"),
         (True, MODEL, [], "nothing"),
         (True, MODEL, TOOLS, None),
@@ -207,6 +210,57 @@ def test_an_old_name_loads_the_tool_it_became():
         LOADER_NAME, {"names": ["email_send"]}, lambda name: {"email_send": "send_email"}.get(name, name)
     )
     assert answer.content == [{"type": "tool_reference", "tool_name": "send_email"}]
+
+
+SERVERS = [
+    _tool("bash"),
+    *(_tool(f"mcp__big__t{i:02d}") for i in range(45)),
+    _tool("mcp__ha__t01"),
+    _tool("mcp__ha__lamp"),
+]
+
+
+def test_every_deferred_tool_of_a_large_server_is_in_the_loaders_list_by_the_name_it_takes():
+    description = _window(SERVERS).tools[-1]["description"]
+    for i in range(45):
+        assert f"mcp__big__t{i:02d}" in description
+    assert "mcp__ha__lamp" in description and " more" not in description
+    assert "load one by its full name" in description and "call one" not in description
+
+
+def test_another_servers_tool_loads_by_its_full_name_and_by_its_short_name_when_only_one_has_it():
+    window = _window(SERVERS)
+    full = window.answer(LOADER_NAME, {"names": ["mcp__big__t44"]})
+    short = window.answer(LOADER_NAME, {"names": ["lamp"]})
+    assert full.content == [{"type": "tool_reference", "tool_name": "mcp__big__t44"}]
+    assert short.content == [{"type": "tool_reference", "tool_name": "mcp__ha__lamp"}]
+    again = window.answer(LOADER_NAME, {"names": ["lamp"]})
+    assert again.content == "Nothing was loaded. Already in your tool list: lamp."
+
+
+def test_a_short_name_several_tools_have_says_to_use_the_full_name():
+    window = _window(SERVERS)
+    answer = window.answer(LOADER_NAME, {"names": ["t01", "t02"]})
+    assert answer.content == [{"type": "tool_reference", "tool_name": "mcp__big__t02"}]
+    assert answer.note == "load_tools: t01 names 2 tools: load one by its full name, mcp__big__t01 or mcp__ha__t01."
+    alone = window.answer(LOADER_NAME, {"names": ["t01"]})
+    assert (
+        alone.content
+        == "Nothing was loaded. t01 names 2 tools: load one by its full name, mcp__big__t01 or mcp__ha__t01."
+    )
+    # a short name of a tool this turn may not use is not available, like any other name
+    assert (
+        window.answer(LOADER_NAME, {"names": ["HassTurnOn"]}).content
+        == "Nothing was loaded. Not available: HassTurnOn."
+    )
+
+
+def test_a_loader_call_whose_input_could_not_be_read_is_a_text_error_that_says_how_to_call_it():
+    window = _window()
+    answer = window.unreadable()
+    assert answer.content == LOADER_UNREADABLE and '{"names": ["tool_name"]}' in LOADER_UNREADABLE
+    assert (answer.is_error, answer.outcome, answer.counted) == (True, "nothing_loaded", False)
+    assert window.loads == 1  # counted under the loader's free calls
 
 
 # ---- a call of a tool not loaded yet --------------------------------------------------------------------------------
@@ -353,6 +407,18 @@ def test_the_tools_sent_in_full_and_a_result_that_loaded():
     assert sent_in_full(TOOLS) is TOOLS and sent_in_full(None) is None
     assert holds_reference(_loaded("send_email")["content"][0])
     assert not holds_reference({"type": "tool_result", "content": "x"}) and not holds_reference({"type": "text"})
+    assert carries_reference([{"role": "user", "content": "go"}, _loaded("send_email")])
+    assert not carries_reference([{"role": "user", "content": "go"}])
+
+
+def test_after_a_fallback_a_request_carries_no_reference():
+    messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": []}, _loaded("send_email")]
+    window = _window()
+    assert window.request_messages(messages) is messages  # deferring: the references stay
+    window.refused(400)
+    sent = window.request_messages(messages)
+    assert "tool_reference" not in json.dumps(sent) and "Loaded: send_email." in json.dumps(sent)
+    assert "tool_reference" in json.dumps(messages)  # the turn's own messages are never changed
 
 
 # ---- the SDK client's error status ----------------------------------------------------------------------------------

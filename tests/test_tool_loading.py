@@ -381,13 +381,16 @@ def test_each_line_of_the_list_is_short_and_not_empty():
 
 def test_the_list_is_sorted_so_a_reload_never_changes_it():
     assert index_text(TOOLS) == index_text(list(reversed(TOOLS)))
-    assert "- ha (1 tools): HassTurnOn" in index_text(TOOLS)
+    assert "- ha (1 tools): mcp__ha__HassTurnOn" in index_text(TOOLS)
 
 
-def test_a_server_with_many_tools_lists_forty_names_and_the_count():
+def test_a_server_with_many_tools_lists_every_tool_by_the_full_name_the_loader_takes():
+    """No cap: the estimate in Watch only is the list On sends, where every deferred tool must be found."""
     many = [_tool(f"mcp__big__t{i:02d}") for i in range(45)]
     line = next(line for line in index_text(many).splitlines() if line.startswith("- big "))
-    assert line.startswith("- big (45 tools): t00, t01") and line.endswith(", and 5 more")
+    assert line == "- big (45 tools): " + ", ".join(f"mcp__big__t{i:02d}" for i in range(45))
+    assert "Tools of other servers (load one by its full name, as listed):" in index_text(many)
+    assert "call one" not in index_text(many)
 
 
 def test_nothing_left_out_needs_no_list():
@@ -490,5 +493,7 @@ def test_the_card_knows_every_mode_and_every_reason():
     words = re.search(r"export const MODE_WORDS: Record<Mode, string> = \{([^}]*)\}", source).group(1)
     assert set(re.findall(r"(\w+):", words)) == set(tool_loading.MODES)
     why = re.search(r"export const WHY_WORDS: Record<string, string> = \{(.*?)\n\};", source, re.S).group(1)
-    reasons = {tool_loading.WHY_CLIENT, tool_loading.WHY_MODEL, tool_loading.WHY_NOTHING, tool_loading.WHY_TURN}
+    reasons = {name: value for name, value in vars(tool_loading).items() if name.startswith("WHY_")}
+    assert set(reasons) == {"WHY_CLIENT", "WHY_MODEL", "WHY_NAME", "WHY_NOTHING", "WHY_TURN", "WHY_FAULT"}
+    reasons = set(reasons.values())
     assert set(re.findall(r"^\s*(\w+):", why, re.M)) == reasons

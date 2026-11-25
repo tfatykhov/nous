@@ -71,9 +71,16 @@ def _settings(**over: Any) -> Settings:
     return Settings(_env_file=None, ANTHROPIC_API_KEY="test-key", agent_id=AGENT, **values)
 
 
+MALFORMED: dict[str, Any] = {}  # a tool call whose input the client could not parse (compared by identity)
+
+
 def _use(step: int, calls: list[tuple[str, dict]]) -> ApiResponse:
-    blocks = [{"type": "tool_use", "id": f"t{step}_{i}", "name": n, "input": inp} for i, (n, inp) in enumerate(calls)]
-    return ApiResponse(content=blocks, stop_reason="tool_use", usage=dict(_USAGE))
+    blocks = [
+        {"type": "tool_use", "id": f"t{step}_{i}", "name": n, "input": {} if inp is MALFORMED else inp}
+        for i, (n, inp) in enumerate(calls)
+    ]
+    errors = {f"t{step}_{i}": "Tool input JSON was malformed." for i, (_n, inp) in enumerate(calls) if inp is MALFORMED}
+    return ApiResponse(content=blocks, stop_reason="tool_use", usage=dict(_USAGE), input_errors=errors or None)
 
 
 def _segment(step: int, calls: list[tuple[str, dict]]) -> list[StreamEvent]:
@@ -81,7 +88,11 @@ def _segment(step: int, calls: list[tuple[str, dict]]) -> list[StreamEvent]:
     for i, (name, tool_input) in enumerate(calls):
         events += [
             StreamEvent(type="tool_start", tool_name=name, tool_id=f"t{step}_{i}", block_index=i),
-            StreamEvent(type="tool_input_delta", text=json.dumps(tool_input), block_index=i),
+            StreamEvent(
+                type="tool_input_delta",
+                text='{"names": [' if tool_input is MALFORMED else json.dumps(tool_input),
+                block_index=i,
+            ),
             StreamEvent(type="block_stop", block_index=i),
         ]
     return [*events, StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 7})]
@@ -141,6 +152,9 @@ def _client(steps: list[Any], stream: bool, sent: list[dict], hook: Any = None) 
         elif item == REFUSED:
             replies.append(_refused())
             segments.append(STREAM_REFUSED)
+        elif isinstance(item, list) and item and isinstance(item[0], StreamEvent):  # a stream's events as given
+            replies.append(_text())
+            segments.append(item)
         elif isinstance(item, BaseException):
             replies.append(item)
             segments.append(
@@ -196,6 +210,8 @@ async def _turn(
     defers: bool = True,
     dispatcher: _RecordingDispatcher | None = None,
     usage_out: dict[str, int] | None = None,
+    setup: Any = None,
+    **run_kwargs: Any,
 ) -> SimpleNamespace:
     """``turns`` turns on ``path`` answered by ``steps``: the payloads as sent, the watch records, the tool-call
     records, each turn's result, the stream's events, and the runner, client and dispatcher."""
@@ -218,13 +234,20 @@ async def _turn(
         blocked.append(args)
 
     r._ledger_blocked = ledger_blocked
+    if setup is not None:
+        setup(r)
     events: list[StreamEvent] = []
     raised: list[BaseException] = []  # a turn that ends in an error raises it after its records (run_turn)
     for _ in range(turns):
         if path == "stream_chat":
             events += await _pump(r.stream_chat("s1", "go"))
         elif (
-            path == "run_turn" and context is None and tool_filter is None and max_tool_calls is None and not usage_out
+            path == "run_turn"
+            and context is None
+            and tool_filter is None
+            and max_tool_calls is None
+            and not usage_out
+            and not run_kwargs
         ):
             try:
                 await asyncio.wait_for(r.run_turn("s1", "go"), 10)
@@ -243,6 +266,7 @@ async def _turn(
                         tool_filter=tool_filter,
                         max_tool_calls=max_tool_calls,
                         usage_out=usage_out,
+                        **run_kwargs,
                     ),
                     10,
                 )
@@ -787,5 +811,196 @@ async def test_the_outside_judge_counts_no_load_and_no_not_loaded_answer(db):
             calls = (await session.execute(evidence._CALLS, window)).mappings().all()
         assert tuple(counts) == (1, 0)
         assert [(c["tool_name"], c["outcome"]) for c in calls] == [("send_email", "ran")]
+    finally:
+        await delete_agent_rows(db, agent)
+
+
+# ---- found and loaded by the name shown; a fallback carries no reference; the rest of the review ----------------
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_refusal_after_a_load_is_sent_again_in_full_with_no_reference_and_nothing_runs_twice(path):
+    _on()
+    steps = [[(LOADER_NAME, {"names": ["send_email"]})], REFUSED, [("send_email", {"to": "a"})]]
+    turn = await _turn(path, steps)
+    assert len(turn.sent) == 4
+    refused, retried, after = turn.sent[1], turn.sent[2], turn.sent[3]
+    assert "tool_reference" in json.dumps(refused["messages"])  # the request the API refused
+    for payload in (retried, after):
+        assert not any(tool.get("defer_loading") for tool in payload["tools"])
+        assert _names(payload) == _names(refused)  # the same tools, in full
+        assert "tool_reference" not in json.dumps(payload["messages"])
+        assert "Loaded: send_email." in json.dumps(payload["messages"])
+    assert turn.dispatched == ["send_email"]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_refusal_not_caused_by_deferral_surfaces_after_the_one_retry_and_no_tool_runs_twice(path):
+    _on()
+    turn = await _turn(path, [[("bash", {})], REFUSED, REFUSED])
+    assert len(turn.sent) == 3 and turn.dispatched == ["bash"]
+    if path == "stream_chat":
+        assert [e.type for e in turn.events if e.type == "error"] == ["error"]
+    else:
+        assert len(turn.raised) == 1
+
+
+async def test_a_stream_that_fails_after_its_first_content_is_not_sent_again():
+    _on()
+    started = [
+        StreamEvent(type="message_start", usage={"input_tokens": 3}),
+        StreamEvent(type="text_block_start", block_index=0),
+        StreamEvent(type="text_delta", text="Let me", block_index=0),
+        StreamEvent(type="error", text="SDK stream error: Error code: 400", status=400),
+    ]
+    turn = await _turn("stream_chat", [started])
+    assert len(turn.sent) == 1
+    assert [e.type for e in turn.events if e.type == "error"] == ["error"]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_load_a_kept_tool_and_a_call_not_loaded_in_one_step_with_the_cache_mark_on_the_last_block(path):
+    _on()
+    step = [(LOADER_NAME, {"names": ["send_email", "nope"]}), ("bash", {}), ("dag_create", {})]
+    turn = await _turn(path, [step])
+    blocks = turn.sent[1]["messages"][-1]["content"]
+    assert [b["type"] for b in blocks] == ["tool_result", "tool_result", "tool_result", "text"]
+    assert blocks[0]["content"] == [{"type": "tool_reference", "tool_name": "send_email"}]
+    assert blocks[1]["is_error"] is False and blocks[2]["is_error"] is True and isinstance(blocks[2]["content"], str)
+    assert [("cache_control" in b) for b in blocks] == [False, False, False, True]  # as the payload builder marks it
+    assert turn.dispatched == ["bash"]
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_loader_call_whose_input_could_not_be_read_is_answered_by_the_window_and_is_no_failure(path):
+    _on()
+    turn = await _turn(path, [[(LOADER_NAME, MALFORMED)], [(LOADER_NAME, {"names": ["send_email"]})]])
+    result = _last_results(turn.sent[1])[0]
+    assert result == {
+        "type": "tool_result",
+        "tool_use_id": "t0_0",
+        "content": tool_loading.LOADER_UNREADABLE,
+        "is_error": True,
+    }
+    assert _outcomes(turn) == [(LOADER_NAME, "nothing_loaded", False), (LOADER_NAME, "loaded", False)]
+    assert turn.results[0].tool_results == []
+
+
+async def test_a_malformed_loader_call_is_one_of_the_turns_free_loads():
+    _on()
+    usage = {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0}
+    await _turn("subtask", [[(LOADER_NAME, MALFORMED), ("bash", {})]], usage_out=usage)
+    assert usage["tool_calls"] == 1  # bash only
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_tool_already_named_like_the_loader_keeps_the_turn_as_today_and_says_why(path):
+    offered = (*OFFERED, LOADER_NAME)
+    off = await _turn(path, [[("bash", {})]], _settings(tool_loading_enabled=False), offered=offered)
+    _on()
+    on = await _turn(path, [[("bash", {})]], offered=offered)
+    assert on.sent == off.sent
+    assert [(w["applied"], w["why"]) for w in on.watches] == [(False, "name")] * 2
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_fault_opening_the_window_leaves_the_turn_as_today_and_says_why(path, monkeypatch, caplog):
+    off = await _turn(path, [[("bash", {})]], _settings(tool_loading_enabled=False))
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("cannot open")
+
+    monkeypatch.setattr(tool_loading, "open_window", explode)
+    _on()
+    with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
+        on = await _turn(path, [[("bash", {})]])
+    assert on.sent == off.sent
+    assert [(w["applied"], w["why"]) for w in on.watches] == [(False, "fault")] * 2
+    faults = [r.getMessage() for r in caplog.records if r.getMessage().startswith("F120: tool loading fell back")]
+    assert faults == ["F120: tool loading fell back (fault, RuntimeError); this turn sends every tool in full"]
+
+
+async def test_the_estimators_calibration_skips_a_request_that_holds_a_load():
+    _on()
+    calibrated: list[int] = []
+
+    def watch(r: AgentRunner) -> None:
+        r._compactor = ConversationCompactor(_settings())
+        r._compactor.estimator.calibrate = lambda chars, tokens: calibrated.append(chars)
+
+    steps = [[("bash", {})], [(LOADER_NAME, {"names": ["send_email"]})], [("send_email", {})]]
+    turn = await _turn("run_turn", steps, setup=watch)
+    assert len(turn.sent) == 4
+    assert len(calibrated) == 2  # the two requests before the load; not the two that carry its reference
+
+
+async def test_the_free_loads_do_not_move_the_forced_reports_threshold():
+    """With thinking off a subtask forces its report once it has made max_tool_calls - 2 tool calls: 8 loads first move
+    nothing, so the 3rd tool call after them is the one that brings the forced choice."""
+    _on()
+
+    async def report(**_kwargs: Any) -> tuple[str, bool]:
+        return "accepted", False
+
+    schema = {
+        "name": "submit_final_report",
+        "description": "Hand in the final report.",
+        "input_schema": {"type": "object", "properties": {"report": {"type": "string"}}},
+    }
+    steps = [*[[(LOADER_NAME, {"names": ["nope"]})]] * 8, *[[("bash", {})]] * 3]
+    turn = await _turn(
+        "subtask",
+        steps,
+        _settings(thinking_mode="off", max_turns=50),
+        max_tool_calls=5,
+        extra_tools={"submit_final_report": (schema, report)},
+        force_tool_on_penultimate="submit_final_report",
+    )
+    forced = [i for i, payload in enumerate(turn.sent) if "tool_choice" in payload]
+    assert forced and forced[0] == 8 + 3  # the request after the 3rd real tool call
+    assert turn.sent[forced[0]]["tool_choice"] == {"type": "tool", "name": "submit_final_report"}
+    assert "submit_final_report" in _names(turn.sent[forced[0]])
+    assert not turn.sent[forced[0]]["tools"][_names(turn.sent[forced[0]]).index("submit_final_report")].get(
+        "defer_loading"
+    )
+
+
+async def test_a_tool_a_goal_has_not_granted_is_as_today_because_a_goal_session_never_defers():
+    """A goal's turns are of internal authority: a tool its goal has not granted is narrowed out of the offered set as
+    today, and On neither lists it nor opens a window (the payload is the same as with the setting off)."""
+    ctx = ExecutionContext(
+        kind="subtask", session_id="goal-subtask-1", subtask_id=uuid.uuid4(), authority=AUTHORITY_INTERNAL
+    )
+
+    def no_grant(r: AgentRunner) -> None:
+        r.set_goal_lift(lambda _ctx, _name: False)
+
+    steps = [[("send_email", {"to": "a"})]]
+    off = await _turn("subtask", steps, _settings(tool_loading_enabled=False), context=ctx, setup=no_grant)
+    _on()
+    on = await _turn("subtask", steps, context=ctx, setup=no_grant)
+    assert on.sent == off.sent and on.watches == [None, None]
+    assert "send_email" not in _names(on.sent[0]) and LOADER_NAME not in _names(on.sent[0])
+    assert on.dispatched == off.dispatched == []
+    assert [(c.outcome, c.refused_by) for c in on.calls] == [(c.outcome, c.refused_by) for c in off.calls]
+
+
+@pytest.mark.postgres_only
+async def test_the_work_views_session_list_leaves_loads_and_not_loaded_answers_out(db):
+    from nous.api.work_view_dashboard import get_sessions
+    from tests.test_work_view_dashboard import delete_agent_rows, insert_turn
+
+    agent = f"test-f120-on-{uuid.uuid4().hex[:12]}"
+    try:
+        turn_ids = await _rows(db, agent, "s-work", turns=1)
+        await insert_turn(db, agent, "s-work", turn_id=turn_ids[0], tool_call_count=3)
+        async with db.session() as session:
+            listed = await get_sessions(
+                session, agent, kind="all", days=1, tool=None, q=None, lens=None, limit=10, before=None
+            )
+        (row,) = listed["sessions"]
+        assert row["tool_calls"] == 1  # the call that ran
+        assert "repeat" not in row["flags"]  # a not-loaded answer and its retry are not a repeat
+        assert [t["tool"] for t in row["tools"]] == ["send_email"]
     finally:
         await delete_agent_rows(db, agent)

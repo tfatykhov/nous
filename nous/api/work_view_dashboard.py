@@ -280,7 +280,7 @@ calls AS (
            t.session_id, t.started_at AS turn_started_at
     FROM nous_system.tool_call_log c
     JOIN turns t ON t.id = c.turn_id
-    WHERE c.agent_id = :agent
+    WHERE c.agent_id = :agent AND c.{NOT_LOADER_SQL}
       -- Redundant, so it can only narrow the scan. The runner stamps a turn's start before any of its calls start
       -- (both datetime.now), and a call written without a start gets now() when written, later still, so every
       -- call of a window turn is itself in the window. Only a wall-clock step back between the two, at the very

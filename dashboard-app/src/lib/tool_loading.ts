@@ -157,8 +157,10 @@ export const NUMBERS_TITLE = 'What it saved, or would have';
 export const WHY_WORDS: Record<string, string> = {
   client: 'the model client in use cannot leave tools out',
   model: 'their model is not one tool loading was tested on',
+  name: 'a tool they could use is already named load_tools, like the loader',
   nothing: 'every tool they could use is in the core set or pinned',
   turn: 'their turn began before On was chosen',
+  fault: 'tool loading failed when their turn began',
 };
 export const WINDOW_OPTIONS = WINDOWS.map((d) => ({ value: String(d), label: d === 1 ? 'Last day' : `Last ${d} days` }));
 export const WEIGHED_TEXT =
