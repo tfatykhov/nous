@@ -1,21 +1,25 @@
-"""F120 tool loading, watch only, over REST: the card "Tool loading" on the Limits and tools screen.
+"""F120 tool loading over REST: the card "Tool loading" on the Limits and tools screen.
 
 ``GET /dashboard/tool-loading?days=7``: the owner's setting (mode, kinds of call, core set, pinned tools and why, last
-change), whether model calls and tool calls are recorded, per kind of call over the last ``days`` days (1, 7 or 30)
-the successful calls recorded in Watch only (``nous_system.tool_loading_watch`` joined to each call's own
-``model_call_log`` row) and what they would have saved weighed by each call's cache state, how many turns then used a
-tool that would have been left out, and every registered tool with its calls and sessions in the last 30 days (every
-kind of call), its estimated tokens and whether it is kept in full or would be left out. A name in the stored core set
-that is not registered now is listed as such and does nothing. A failed read of the numbers or of the tools' use
-answers 200 with the setting, that part null and ``numbers_failed`` or ``usage_failed`` true.
+change), whether model calls and tool calls are recorded, whether the model client in use can defer tools, per kind of
+call over the last ``days`` days (1, 7 or 30) the successful calls recorded in Watch only
+(``nous_system.tool_loading_watch`` joined to each call's own ``model_call_log`` row) and what they would have saved
+weighed by each call's cache state, how many turns then used a tool that would have been left out, and the calls
+recorded in On (``on_numbers``): how many were sent with tools deferred and how many tools each sent in full and
+deferred, the saving weighed the same way, the loads and the calls of a tool not loaded yet per turn (from
+``tool_call_log``), the fallbacks, and why the others were sent in full; and every registered tool with its calls and
+sessions in the last 30 days (every kind of call), its estimated tokens and whether it is kept in full or left out. A
+name in the stored core set that is not registered now is listed as such and does nothing. A failed read of the
+numbers or of the tools' use answers 200 with the setting, that part null and ``numbers_failed`` or ``usage_failed``
+true.
 
 ``PUT /dashboard/tool-loading``: ``{mode?, kinds?, core?}``, each field optional and merged into the stored setting:
-``mode`` ``off`` or ``watch``, ``kinds`` an object of kind to true or false, ``core`` a list of tool names or null for
-the default. A name already in the core set is kept whether registered or not; a name being added must be registered
-now. A pinned tool is always kept in full, whatever the list says. The setting is stored in ``nous_system.config``
-under ``tool_loading:<agent_id>`` with when and by whom (the proof the owner guard accepted), then set on the running
-process, so the next model call reads it. A change that changes nothing is not written, unless the stored value could
-not be read: then it is replaced. Nothing else is written.
+``mode`` ``off``, ``watch`` or ``on``, ``kinds`` an object of kind to true or false, ``core`` a list of tool names or
+null for the default. A name already in the core set is kept whether registered or not; a name being added must be
+registered now. A pinned tool is always kept in full, whatever the list says. The setting is stored in
+``nous_system.config`` under ``tool_loading:<agent_id>`` with when and by whom (the proof the owner guard accepted),
+then set on the running process, so the next model call reads it (in On, the next turn). A change that changes
+nothing is not written, unless the stored value could not be read: then it is replaced. Nothing else is written.
 
 Both routes require the owner's or the proxy's secret (``nous/api/owner_guard.py``), checked before anything else. A
 body is at most ``BODY_MAX_BYTES``, a JSON object with strictly typed fields and no other field; a refusal names the
@@ -42,8 +46,13 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX
 from nous.api.tool_loading import (
     CORE_MAX,
     KINDS,
+    MODE_ON,
+    MODE_WATCH,
     MODES,
     NAME_PATTERN,
+    OUTCOME_LOADED,
+    OUTCOME_NOT_LOADED,
+    OUTCOME_NOTHING_LOADED,
     PINNED,
     READ_RATIO,
     WRITE_RATIO,
@@ -75,9 +84,14 @@ _WATCHED = """
    WHERE w.agent_id = :agent AND w.started_at >= :since AND m.status = 'ok'
 """
 _NET = "CAST(w.record->>'deferred_tokens_est' AS bigint) - CAST(w.record->>'index_tokens_est' AS bigint)"
+# In On: a call sent with tools deferred, and a call of a turn that deferred (sent deferred, or in full after a fault).
+_APPLIED = "w.record->>'applied' = 'true'"
+_ENGAGED = f"({_APPLIED} OR w.record->>'fallback' IS NOT NULL)"
+# Per kind of call and mode (Watch only, On): the calls, their cache states and what they left out or would have.
 _CALLS = text(
     f"""
     SELECT w.kind,
+           w.record->>'mode' AS mode,
            count(*) AS calls,
            count(*) FILTER (WHERE w.record->>'cache' = 'read') AS read_calls,
            count(*) FILTER (WHERE w.record->>'cache' = 'written') AS written_calls,
@@ -86,19 +100,25 @@ _CALLS = text(
            coalesce(sum(CAST(w.record->>'index_tokens_est' AS bigint)), 0) AS index_tokens,
            coalesce(sum({_NET}) FILTER (WHERE w.record->>'cache' = 'read'), 0) AS read_net,
            coalesce(sum({_NET}) FILTER (WHERE w.record->>'cache' = 'written'), 0) AS written_net,
-           count(DISTINCT w.turn_id) AS turns
+           count(DISTINCT w.turn_id) AS turns,
+           count(*) FILTER (WHERE {_APPLIED}) AS applied,
+           coalesce(sum(CAST(w.record->>'full' AS integer)) FILTER (WHERE {_APPLIED}), 0) AS full_sent,
+           coalesce(sum(CAST(w.record->>'loaded' AS integer)) FILTER (WHERE {_APPLIED}), 0) AS loaded,
+           coalesce(sum(CAST(w.record->>'loaded_tokens_est' AS bigint)) FILTER (WHERE {_APPLIED}), 0) AS loaded_tokens,
+           count(*) FILTER (WHERE w.record->>'fallback' IS NOT NULL) AS fallbacks,
+           count(DISTINCT w.turn_id) FILTER (WHERE {_ENGAGED}) AS engaged_turns
     {_WATCHED}
-     GROUP BY 1
+     GROUP BY 1, 2
     """
 )
-# The turns in which a tool the call would have left out (sent, and not kept) was then called. The calls of a turn
-# mostly send the same tools and keep the same names: DISTINCT before the join keeps one row of each.
+# Watch only: the turns in which a tool the call would have left out (sent, and not kept) was then called. The calls
+# of a turn mostly send the same tools and keep the same names: DISTINCT before the join keeps one row of each.
 _USED = text(
     f"""
     WITH watched AS (
         SELECT DISTINCT w.turn_id, w.kind, m.tool_names, w.record->'kept' AS kept
         {_WATCHED}
-           AND w.turn_id IS NOT NULL
+           AND w.turn_id IS NOT NULL AND w.record->>'mode' = '{MODE_WATCH}'
     )
     SELECT w.kind, count(DISTINCT w.turn_id) AS turns, count(DISTINCT t.id) AS calls
       FROM watched w
@@ -106,6 +126,33 @@ _USED = text(
         ON t.agent_id = :agent AND t.started_at >= :since AND t.turn_id = w.turn_id
        AND t.tool_name = ANY (w.tool_names) AND NOT (w.kept @> to_jsonb(t.tool_name))
      GROUP BY w.kind
+    """
+)
+# On: the loader's calls and the calls of a tool not loaded yet, in the turns that deferred.
+_LOADS = text(
+    f"""
+    WITH engaged AS (
+        SELECT DISTINCT w.turn_id, w.kind
+        {_WATCHED}
+           AND w.turn_id IS NOT NULL AND w.record->>'mode' = '{MODE_ON}' AND {_ENGAGED}
+    )
+    SELECT e.kind,
+           count(*) FILTER (WHERE t.outcome IN ('{OUTCOME_LOADED}', '{OUTCOME_NOTHING_LOADED}')) AS loads,
+           count(*) FILTER (WHERE t.outcome = '{OUTCOME_NOT_LOADED}') AS refusals
+      FROM engaged e
+      JOIN nous_system.tool_call_log t
+        ON t.agent_id = :agent AND t.started_at >= :since AND t.turn_id = e.turn_id
+     GROUP BY e.kind
+    """
+)
+# On: why the calls that did not defer were sent in full (nous.api.tool_loading.why_not).
+_WHY = text(
+    f"""
+    SELECT w.kind, w.record->>'why' AS why, count(*) AS calls
+    {_WATCHED}
+       AND w.record->>'mode' = '{MODE_ON}' AND w.record->>'why' IS NOT NULL
+     GROUP BY 1, 2
+     ORDER BY 1, 3 DESC, 2
     """
 )
 # Each tool's calls and sessions over every kind of call.
@@ -175,7 +222,7 @@ def changed_setting(
     mode = current.mode
     if body.mode is not None:
         if body.mode not in MODES:
-            raise _BadRequest("The mode must be off or watch.")
+            raise _BadRequest("The mode must be off, watch or on.")
         mode = body.mode
     kinds = set(current.kinds)
     if body.kinds is not None:
@@ -227,10 +274,26 @@ _NO_CALLS = {
 }
 
 
-def numbers_row(key: str, words: str, on: bool, row: Any, used: tuple[int, int] | None) -> dict[str, Any]:
+def numbers_row(
+    key: str,
+    words: str,
+    on: bool,
+    row: Any,
+    used: tuple[int, int] | None,
+    on_row: Any = None,
+    loads: tuple[int, int] | None = None,
+    why: list[tuple[str, int]] | None = None,
+) -> dict[str, Any]:
     """One row of the card's numbers, with the fields the card's ``KindNumbers`` reads (dashboard-app
-    ``lib/tool_loading.ts``): the kind's ``key``, its words, whether it is watched, and ``kind_numbers``."""
-    return {"key": key, "words": words, "on": on, **kind_numbers(row or _NO_CALLS, used)}
+    ``lib/tool_loading.ts``): the kind's ``key``, its words, whether it is switched on, ``kind_numbers`` of its Watch
+    only calls, and ``on_mode``, the ``on_numbers`` of its calls in On (null when there were none)."""
+    return {
+        "key": key,
+        "words": words,
+        "on": on,
+        **kind_numbers(row or _NO_CALLS, used),
+        "on_mode": None if on_row is None else on_numbers(on_row, loads, why or []),
+    }
 
 
 def kind_numbers(row: dict[str, Any], used: tuple[int, int] | None) -> dict[str, Any]:
@@ -252,6 +315,40 @@ def kind_numbers(row: dict[str, Any], used: tuple[int, int] | None) -> dict[str,
         "turns": int(row["turns"]),
         "turns_used_left_out": None if used is None else used[0],
         "calls_used_left_out": None if used is None else used[1],
+    }
+
+
+def on_numbers(row: dict[str, Any], loads: tuple[int, int] | None, why: list[tuple[str, int]]) -> dict[str, Any]:
+    """One kind of call's calls in On over the window, with the fields the card's ``OnNumbers`` reads: ``row``, the sums
+    of ``_CALLS`` for mode On; ``loads``, the loader's calls and the calls of a tool not loaded yet in the turns that
+    deferred (``_LOADS``, None when tool calls are not recorded); ``why``, each reason calls were sent in full, with
+    their count (``_WHY``). The saving is weighed by each call's cache state as in Watch only, over every call in On (a
+    call sent in full saved nothing; one sent in full after a fault also carried the loader). A tool loaded earlier in
+    the turn is not left out: per call sent deferred, ``deferred_avg`` counts the tools left out, and ``loaded_avg``
+    and ``loaded_tokens_avg`` the loaded ones and their definitions, carried in the messages and not counted as
+    saved."""
+    applied, turns = int(row["applied"]), int(row["engaged_turns"])
+    weighed = int(row["read_calls"]) + int(row["written_calls"])
+    saved = float(row["read_net"]) * READ_RATIO + float(row["written_net"]) * WRITE_RATIO
+
+    def per_turn(count: int) -> float | None:
+        return None if loads is None else (round(count / turns, 1) if turns else 0)
+
+    return {
+        "calls": int(row["calls"]),
+        "applied": applied,
+        "full_avg": round(int(row["full_sent"]) / applied, 1) if applied else 0,
+        "deferred_avg": round(int(row["deferred"]) / applied, 1) if applied else 0,
+        "loaded_avg": round(int(row["loaded"]) / applied, 1) if applied else 0,
+        "loaded_tokens_avg": round(int(row["loaded_tokens"]) / applied) if applied else 0,
+        "read_calls": int(row["read_calls"]),
+        "written_calls": int(row["written_calls"]),
+        "saved_per_call": round(saved / weighed) if weighed else None,
+        "turns": turns,
+        "loads_per_turn": per_turn(loads[0] if loads else 0),
+        "refusals_per_turn": per_turn(loads[1] if loads else 0),
+        "fallbacks": int(row["fallbacks"]),
+        "not_applied": [{"why": reason, "calls": count} for reason, count in why],
     }
 
 
@@ -282,15 +379,32 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
         if not settings.model_call_log_enabled:
             return None
         since = datetime.now(UTC) - timedelta(days=days)
+        params = {"agent": agent_id, "since": since}
         async with database.session() as session:
-            result = await session.execute(_CALLS, {"agent": agent_id, "since": since})
-            rows = {row["kind"]: dict(row) for row in result.mappings()}
+            result = await session.execute(_CALLS, params)
+            rows = {(row["kind"], row["mode"]): dict(row) for row in result.mappings()}
+            why: dict[str, list[tuple[str, int]]] = {}
+            if any(mode == MODE_ON for _kind, mode in rows):
+                for row in (await session.execute(_WHY, params)).mappings():
+                    why.setdefault(row["kind"], []).append((str(row["why"]), int(row["calls"])))
             used: dict[str, tuple[int, int]] | None = None
+            loads: dict[str, tuple[int, int]] | None = None
             if settings.tool_call_log_enabled:
-                result = await session.execute(_USED, {"agent": agent_id, "since": since})
+                result = await session.execute(_USED, params)
                 used = {row["kind"]: (int(row["turns"]), int(row["calls"])) for row in result.mappings()}
+                result = await session.execute(_LOADS, params)
+                loads = {row["kind"]: (int(row["loads"]), int(row["refusals"])) for row in result.mappings()}
         return [
-            numbers_row(key, words, key in config.kinds, rows.get(key), None if used is None else used.get(key, (0, 0)))
+            numbers_row(
+                key,
+                words,
+                key in config.kinds,
+                rows.get((key, MODE_WATCH)),
+                None if used is None else used.get(key, (0, 0)),
+                rows.get((key, MODE_ON)),
+                None if loads is None else loads.get(key, (0, 0)),
+                why.get(key, []),
+            )
             for key, words in KINDS.items()
         ]
 
@@ -375,6 +489,8 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
                     "model_calls": bool(settings.model_call_log_enabled),
                     "tool_calls": bool(settings.tool_call_log_enabled),
                 },
+                # On defers tools only through the SDK client (nous.api.anthropic_client.SdkAnthropicClient).
+                "deferring_client": settings.api_backend == "sdk",
                 "days": days,
                 "numbers": per_kind,
                 "numbers_failed": numbers_failed,

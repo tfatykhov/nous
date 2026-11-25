@@ -381,13 +381,16 @@ def test_each_line_of_the_list_is_short_and_not_empty():
 
 def test_the_list_is_sorted_so_a_reload_never_changes_it():
     assert index_text(TOOLS) == index_text(list(reversed(TOOLS)))
-    assert "- ha (1 tools): HassTurnOn" in index_text(TOOLS)
+    assert "- ha (1 tools): mcp__ha__HassTurnOn" in index_text(TOOLS)
 
 
-def test_a_server_with_many_tools_lists_forty_names_and_the_count():
+def test_a_server_with_many_tools_lists_every_tool_by_the_full_name_the_loader_takes():
+    """No cap: the estimate in Watch only is the list On sends, where every deferred tool must be found."""
     many = [_tool(f"mcp__big__t{i:02d}") for i in range(45)]
     line = next(line for line in index_text(many).splitlines() if line.startswith("- big "))
-    assert line.startswith("- big (45 tools): t00, t01") and line.endswith(", and 5 more")
+    assert line == "- big (45 tools): " + ", ".join(f"mcp__big__t{i:02d}" for i in range(45))
+    assert "Tools of other servers (load one by its full name, as listed):" in index_text(many)
+    assert "call one" not in index_text(many)
 
 
 def test_nothing_left_out_needs_no_list():
@@ -416,7 +419,7 @@ def test_the_stored_value_round_trips():
         "[]",
         42,
         [],
-        {"version": 1, "mode": "on"},
+        {"version": 1, "mode": "full"},
         {"version": 2, "mode": "watch"},
         {"mode": "watch"},
         {"version": 1, "mode": "watch", "kinds": ["chat", "nonsense"]},
@@ -449,14 +452,48 @@ def test_a_value_whose_reading_raises_is_off_with_its_class():
     assert config == OFF and "RuntimeError" in problem and "boom" not in problem
 
 
+def _card_fields(*bodies: str) -> set[str]:
+    return set(re.findall(r"(\w+)\??:", re.sub(r"/\*.*?\*/", "", ";".join(bodies), flags=re.S)))
+
+
+def _card_source() -> str:
+    return (ROOT / "dashboard-app/src/lib/tool_loading.ts").read_text(encoding="utf-8")
+
+
 def test_a_numbers_row_has_exactly_the_fields_the_card_reads():
     """Both sides of the contract: the server's row and the card's ``KindNumbers`` (with ``KindSwitch``) name the same
-    fields, so a keyed list on the card never meets a missing key."""
-    from nous.api.tool_loading_routes import numbers_row
+    fields, so a keyed list on the card never meets a missing key; so do the On numbers (``OnNumbers``) and each reason
+    calls were sent in full (``NotApplied``)."""
+    from nous.api.tool_loading_routes import numbers_row, on_numbers
 
-    source = (Path(__file__).resolve().parents[1] / "dashboard-app/src/lib/tool_loading.ts").read_text(encoding="utf-8")
+    source = _card_source()
     switch = re.search(r"export interface KindSwitch \{([^}]*)\}", source).group(1)
     numbers = re.search(r"export interface KindNumbers extends KindSwitch \{(.*?)\n\}", source, re.S).group(1)
-    card = set(re.findall(r"(\w+)\??:", re.sub(r"/\*.*?\*/", "", switch + ";" + numbers, flags=re.S)))
+    on_mode = re.search(r"export interface OnNumbers \{(.*?)\n\}", source, re.S).group(1)
+    not_applied = re.search(r"export interface NotApplied \{([^}]*)\}", source).group(1)
 
-    assert card and set(numbers_row("chat", "Chat", True, None, (0, 0))) == card
+    assert set(numbers_row("chat", "Chat", True, None, (0, 0))) == _card_fields(switch, numbers)
+    sums = dict.fromkeys(
+        ("calls", "applied", "engaged_turns", "read_calls", "written_calls", "read_net", "written_net"), 0
+    ) | {"full_sent": 0, "deferred": 0, "fallbacks": 0, "loaded": 0, "loaded_tokens": 0}
+    row = numbers_row("chat", "Chat", True, None, (0, 0), sums, (0, 0), [("model", 2)])
+    assert set(row["on_mode"]) == _card_fields(on_mode)
+    assert set(row["on_mode"]["not_applied"][0]) == _card_fields(not_applied)
+    assert set(on_numbers(sums, None, [])) == _card_fields(on_mode)
+
+
+def test_the_card_knows_every_mode_and_every_reason():
+    """The modes the server stores and the card's ``Mode`` and words; the reasons a call in On is sent in full
+    (``why_not``) and the card's words for them."""
+    from nous.api import tool_loading
+
+    source = _card_source()
+    mode = re.search(r"export type Mode = ([^;]*);", source).group(1)
+    assert set(re.findall(r"'(\w+)'", mode)) == set(tool_loading.MODES)
+    words = re.search(r"export const MODE_WORDS: Record<Mode, string> = \{([^}]*)\}", source).group(1)
+    assert set(re.findall(r"(\w+):", words)) == set(tool_loading.MODES)
+    why = re.search(r"export const WHY_WORDS: Record<string, string> = \{(.*?)\n\};", source, re.S).group(1)
+    reasons = {name: value for name, value in vars(tool_loading).items() if name.startswith("WHY_")}
+    assert set(reasons) == {"WHY_CLIENT", "WHY_MODEL", "WHY_NAME", "WHY_NOTHING", "WHY_TURN", "WHY_FAULT"}
+    reasons = set(reasons.values())
+    assert set(re.findall(r"^\s*(\w+):", why, re.M)) == reasons

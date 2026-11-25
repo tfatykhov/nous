@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.api.tool_classes import tool_class
 from nous.cognitive.ledger_store import redact_output, redact_structure
 from nous.judge.slot import Claim, JudgeInput
+from nous.observability.tool_patterns import NOT_LOADER_SQL
 
 EVIDENCE_MAX_CHARS = 16_000
 SUBJECT_CAP = 600
@@ -279,9 +280,10 @@ _RECORD_CALLS = text(
 )
 # Every source is read as of the claim (``:until``): a call that had ended by then (its row is written when it ends),
 # a ledger row or a task that had started by then. What finished later is read without its result.
+# F120 On: the loader's calls and the answers to a call of a tool not loaded yet are not work (NOT_LOADER_SQL).
 _CALL_WINDOW = (
     "FROM nous_system.tool_call_log WHERE agent_id = :agent AND session_id = :session AND started_at >= :since "
-    "AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until"
+    f"AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until AND {NOT_LOADER_SQL}"
 )
 _CALL_COUNTS = text(
     f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_BOOKKEEPING_SQL}), "
@@ -476,7 +478,7 @@ _TASK = text(
 _TASK_ROWS = "agent_id = :agent AND (subtask_id = :task OR (subtask_id IS NULL AND session_id = :own))"
 _TASK_CALL_WINDOW = (
     f"FROM nous_system.tool_call_log WHERE {_TASK_ROWS} AND started_at >= :since AND started_at <= :until "
-    "AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until"
+    f"AND started_at + COALESCE(duration_ms, 0) * interval '1 millisecond' <= :until AND {NOT_LOADER_SQL}"
 )
 _TASK_CALL_COUNTS = text(
     f"SELECT count(*) FILTER (WHERE tool_name NOT IN {_REPORT_BOOKKEEPING_SQL}), "

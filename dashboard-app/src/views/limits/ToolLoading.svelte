@@ -9,7 +9,7 @@
   } from '../../lib/autonomy_settings';
   import {
     ALREADY_TEXT, CORE_HELP, CORE_TITLE, CORE_WORDS, DEFAULT_LABEL, DEFAULT_TEXT, DISCARD_LABEL, HARNESS_TEXT,
-    KINDS_HELP, KINDS_TITLE, MODE_HELP, MODE_TITLE, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NOT_REGISTERED_TEXT,
+    KINDS_HELP, KINDS_TITLE, MODE_HELP, MODE_TITLE, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NO_DEFERRING_TEXT, NOT_REGISTERED_TEXT,
     NUMBERS_TITLE, OFF_TEXT, OFF_TITLE, SAVED_TEXT, SAVES_AT_ONCE_TEXT, SAVE_LABEL, SUBTITLE, SWITCH_WORDS,
     NUMBERS_FAILED_TEXT, TOOL_CALLS_OFF_TEXT, UNSAVED_TEXT, USAGE_FAILED_TEXT, WEIGHED_TEXT, WINDOW_OPTIONS,
     changeLoading, draftChanged, draftList, kindLines, lastChangeText, pinnedText, problemLine, readLoading,
@@ -17,12 +17,11 @@
     type Change, type LoadingAnswer, type Mode, type ToolRow, type Window,
   } from '../../lib/tool_loading';
 
-  // F120 tool loading, watch only (GET /dashboard/tool-loading): the mode, the kinds of call, what Watch only recorded
-  // per kind over the chosen window, and the core set over every registered tool. The mode and each kind are saved when
-  // chosen (PUT with that field alone, merged by the server); the core set is edited here and saved with one Save
-  // (PUT {core}), or set back to the default (PUT {core: null}). Read when the tab opens, on Refresh or Retry, when the
-  // window changes and after every change. Names, words and reasons the server sends are text nodes. Nothing here
-  // changes what is sent to the model.
+  // F120 tool loading (GET /dashboard/tool-loading): the mode (Off, Watch only, On), the kinds of call, what Watch only
+  // and On recorded per kind over the chosen window, and the core set over every registered tool. The mode and each
+  // kind are saved when chosen (PUT with that field alone, merged by the server); the core set is edited here and saved
+  // with one Save (PUT {core}), or set back to the default (PUT {core: null}). Read when the tab opens, on Refresh or
+  // Retry, when the window changes and after every change. Names, words and reasons the server sends are text nodes.
 
   let windowValue = $state('7');
   const store = usePoll(
@@ -44,7 +43,7 @@
   let unsaved = $derived(draft !== null && draftChanged(draft, saved));
   let tools = $derived(answer?.tools ?? []);
 
-  const MODES: Mode[] = ['off', 'watch'];
+  const MODES: Mode[] = ['off', 'watch', 'on'];
   const slug = (name: string) => name.replace(/[^A-Za-z0-9_-]/g, '_');
 
   let lastWindow = '7';
@@ -152,6 +151,7 @@
       {/each}
     </fieldset>
     <p class="hint">{MODE_HELP[answer.mode]}</p>
+    {#if answer.mode === 'on' && answer.deferring_client === false}<p class="warn" role="status">{NO_DEFERRING_TEXT}</p>{/if}
 
     <h2 id="loading-kinds" class="sub">{KINDS_TITLE}</h2>
     <ul class="rows" aria-labelledby="loading-kinds">

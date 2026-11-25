@@ -2,20 +2,26 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  ALREADY_TEXT, CORE_HELP, KINDS_HELP, MODE_HELP, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NOT_REGISTERED_TEXT, OFF_TEXT,
-  NUMBERS_FAILED_TEXT, SAVED_TEXT, SUBTITLE, SWITCH_WORDS, TOOL_CALLS_OFF_TEXT, USAGE_FAILED_TEXT, WEIGHED_TEXT,
-  WINDOW_OPTIONS,
-  changeLoading, draftChanged, draftList, kindLines, lastChangeText, pinnedText, problemLine, readLoading, readPath,
-  sourceText, toolNumbersText, totalsText,
-  type KindNumbers, type ToolRow,
+  ALREADY_TEXT, CORE_HELP, KINDS_HELP, MODE_HELP, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NO_DEFERRING_TEXT,
+  NOT_REGISTERED_TEXT, OFF_TEXT, NUMBERS_FAILED_TEXT, SAVED_TEXT, SAVES_AT_ONCE_TEXT, SUBTITLE, SWITCH_WORDS,
+  TOOL_CALLS_OFF_TEXT, USAGE_FAILED_TEXT, WEIGHED_TEXT, WHY_WORDS, WINDOW_OPTIONS,
+  changeLoading, draftChanged, draftList, kindLines, lastChangeText, onLines, pinnedText, problemLine, readLoading,
+  readPath, sourceText, toolNumbersText, totalsText,
+  type KindNumbers, type OnNumbers, type ToolRow,
 } from './tool_loading';
 
-// F120 tool loading, watch only: the card's words and requests (nous/api/tool_loading_routes.py). Every value is made up.
+// F120 tool loading: the card's words and requests (nous/api/tool_loading_routes.py). Every value is made up.
 
 const kind = (over: Partial<KindNumbers> = {}): KindNumbers => ({
   key: 'chat', words: 'Chat and calls from other agents', on: true, calls: 12, read_calls: 9, written_calls: 2,
   deferred_avg: 95.5, deferred_tokens_avg: 37500, index_tokens_avg: 1800, saved_per_call: 9000, turns: 4,
-  turns_used_left_out: 1, calls_used_left_out: 2, ...over,
+  turns_used_left_out: 1, calls_used_left_out: 2, on_mode: null, ...over,
+});
+const inOn = (over: Partial<OnNumbers> = {}): OnNumbers => ({
+  calls: 20, applied: 18, full_avg: 14, deferred_avg: 96.5, loaded_avg: 0, loaded_tokens_avg: 0, read_calls: 15,
+  written_calls: 4, saved_per_call: 7000,
+  turns: 5, loads_per_turn: 1.4, refusals_per_turn: 0.2, fallbacks: 1,
+  not_applied: [{ why: 'model', calls: 1 }], ...over,
 });
 const tool = (over: Partial<ToolRow> = {}): ToolRow => ({
   name: 'send_email', server: null, registered: true, tokens_est: 420, calls_30d: 7, sessions_30d: 3,
@@ -27,7 +33,14 @@ afterEach(() => { vi.unstubAllGlobals(); });
 describe('tool loading: the words', () => {
   it('pins the sentences the owner reads', () => {
     expect(SUBTITLE).toContain('Watch only changes nothing that is sent');
-    expect(MODE_WORDS).toEqual({ off: 'Off', watch: 'Watch only' });
+    expect(MODE_WORDS).toEqual({ off: 'Off', watch: 'Watch only', on: 'On' });
+    expect(MODE_HELP.on).toMatch(/^In a kind switched on below, the tools outside the core set are left out of each model call/);
+    expect(MODE_HELP.on).toContain('What a turn may use is as before.');
+    expect(SAVES_AT_ONCE_TEXT).toContain('(in On, from the next turn)');
+    expect(NO_DEFERRING_TEXT).toMatch(/^On does nothing on this server/);
+    expect(Object.keys(WHY_WORDS).sort()).toEqual(['client', 'fault', 'model', 'name', 'nothing', 'turn']);
+    expect(WHY_WORDS.name).toBe('a tool they could use is already named load_tools, like the loader');
+    expect(WHY_WORDS.fault).toBe('tool loading failed when their turn began');
     expect(MODE_HELP.watch).toBe(
       'Every tool is still sent in full. Each model call of a kind switched on below records what it would have left out.',
     );
@@ -64,6 +77,36 @@ describe('tool loading: the words', () => {
     expect(kindLines(kind({ calls: 0 }))).toEqual(['No successful call recorded in this window.']);
     expect(kindLines(kind({ calls: 0, on: false }))).toEqual(['Off, and no successful call recorded in this window.']);
     expect(kindLines(kind({ calls: 1, turns: 1, turns_used_left_out: 0 }))[0]).toMatch(/^1 successful call recorded\./);
+  });
+
+  it('a kind of call in On, in lines, after its Watch only lines', () => {
+    expect(onLines(inOn())).toEqual([
+      'On: 20 calls recorded, 18 sent with tools left out.',
+      'Each of those sent 14 tools in full and left out 96.5 on average.',
+      'Weighed, that saved about 7,000 uncached input tokens a call (15 read the tools from the cache and 4 wrote them).',
+      'In the 5 turns that left tools out: 1.4 loads a turn, and 0.2 calls a turn of a tool not loaded yet, which did not run.',
+      '1 call sent with every tool in full after a fault.',
+      '1 call sent with every tool in full: their model is not one tool loading was tested on.',
+    ]);
+    const none = onLines(inOn({ applied: 0, saved_per_call: null, turns: 0, fallbacks: 0, not_applied: [{ why: 'client', calls: 20 }] }));
+    expect(none).toEqual([
+      'On: 20 calls recorded, 0 sent with tools left out.',
+      'No call reported its cache state, so the saving is not weighed.',
+      '20 calls sent with every tool in full: the model client in use cannot leave tools out.',
+    ]);
+    expect(onLines(inOn({ loads_per_turn: null, refusals_per_turn: null }))).toHaveLength(5); // tool calls not recorded
+    // tools loaded earlier in a turn are carried in the messages, not left out and not counted as saved
+    expect(onLines(inOn({ loaded_avg: 1.5, loaded_tokens_avg: 620 }))[2]).toBe(
+      'They also carried 1.5 tools loaded earlier in their turn on average, about 620 tokens in the messages, not counted as saved.',
+    );
+    expect(onLines(inOn({ loaded_avg: 1.5, loaded_tokens_avg: 620 }))).toHaveLength(7);
+    expect(onLines(inOn({ not_applied: [{ why: 'new', calls: 2 }] })).at(-1))
+      .toBe('2 calls sent with every tool in full: for a reason this page does not know.');
+    // both modes in one window: Watch only first; only On: its lines alone
+    const both = kindLines(kind({ on_mode: inOn() }));
+    expect(both[0]).toMatch(/^12 successful calls recorded\./);
+    expect(both.slice(3)).toEqual(onLines(inOn()));
+    expect(kindLines(kind({ calls: 0, on_mode: inOn() }))).toEqual(onLines(inOn()));
   });
 
   it('a tool, its numbers and where it comes from', () => {

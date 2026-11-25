@@ -120,6 +120,19 @@ logger = logging.getLogger(__name__)
 
 # F120: a fault in the tool-loading record is logged once per process; the call goes on as it is.
 _tool_loading_fault_logged = False
+# F120 On: each kind of fallback of a turn's tool window ("refused", "fault") is logged once per process.
+_tool_window_logged: set[str] = set()
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status the API answered a failed call with: the SDK's error carries it, and the client raises its own
+    error from that one. None when there was no answer."""
+    for error in (exc, exc.__cause__):
+        status = getattr(error, "status_code", None)
+        if isinstance(status, int):
+            return status
+    return None
+
 
 # F113 Phase A (shadow): the regex check of a validated subtask report (``log_report_claim_check``). The task
 # scorer does not read this type; ``f026_claim_verification`` is the per-turn check it counts.
@@ -2800,7 +2813,14 @@ class AgentRunner:
         has sent, each added after the content of its user message in this payload only, with no ``cache_control``.
         The newest is on the last user message, after its marked block. None when the payload asks for thinking.
         ``messages`` itself is never changed.
+
+        F120 On: a tool result that loaded a tool this request does not send (a request with no tools) carries words
+        instead of its references (``tool_loading.references_outside``); the estimate and the cache-break check count
+        only the tools sent in full, as deferred definitions are not in the cached prefix
+        (``tool_loading.sent_in_full``).
         """
+        messages = tool_loading.references_outside(messages, tools)
+        full_tools = tool_loading.sent_in_full(tools)
         # Add cache_control to last user message for prompt caching
         cached_messages = list(messages)
         for i in range(len(cached_messages) - 1, -1, -1):
@@ -2880,7 +2900,7 @@ class AgentRunner:
 
             # F036: Run cache break detection
             if self._cache_break_detector:
-                tools_json = json.dumps(tools) if tools else ""
+                tools_json = json.dumps(full_tools) if full_tools else ""
                 model_str = model_override or self._settings.model
                 cache_break = self._cache_break_detector.check(
                     static_text=static_text,
@@ -2965,7 +2985,11 @@ class AgentRunner:
         if self._context_logger or records:
             try:
                 sections = system_sections(flat_system_prompt, preamble)
-                stats = analyze_sections(sections, messages, tools, self._get_context_window_size())
+                stats = analyze_sections(sections, messages, full_tools, self._get_context_window_size())
+                if full_tools is not tools:  # F120 On: every tool is named in the request, deferred or not
+                    stats = dataclasses.replace(
+                        stats, tools_count=len(tools), tool_names=[t.get("name", "") for t in tools]
+                    )
             except Exception as exc:
                 logger.warning("F108: context estimate failed (%s); this call has no estimate", type(exc).__name__)
 
@@ -3011,7 +3035,7 @@ class AgentRunner:
                     cache_break_components=list(cache_break.components_changed),
                     cache_break_tokens_lost=cache_break.estimated_tokens_lost,
                 )
-            record = self._tool_loading_record(call_context, tools)
+            record = self._tool_loading_record(call_context, tools, effective_model)
             if record is not None:
                 stats = dataclasses.replace(stats, tool_loading=record)
             call_context = dataclasses.replace(call_context, stats=stats, call_id=call_id)
@@ -3021,9 +3045,13 @@ class AgentRunner:
 
         return payload, call_context
 
-    def _tool_loading_record(self, call_context: CallContext, tools: list[dict[str, Any]] | None) -> dict | None:
-        """F120 watch only: what this call would leave out, for its ``model_call_log`` row, or None. Read at each call:
-        the owner's setting (``RuntimeConfig``) as it is now. Only a tool loop's own calls carry a kind
+    def _tool_loading_record(
+        self, call_context: CallContext, tools: list[dict[str, Any]] | None, model: str | None = None
+    ) -> dict | None:
+        """F120: the record of this call, for its ``model_call_log`` row, or None. A turn that defers tools (its
+        ``ToolWindow`` on the context) records what the call sent; any other call reads the owner's setting
+        (``RuntimeConfig``) as it is now: in Watch only what it would leave out, in On that it was sent in full and why
+        (``tool_loading.why_not`` for ``model``, the call's model). Only a tool loop's own calls carry a kind
         (``tool_loading_kind``). Reads ``tools`` and never changes it or the payload; a fault gives None and is logged
         once."""
         global _tool_loading_fault_logged
@@ -3033,8 +3061,16 @@ class AgentRunner:
             kind = getattr(call_context, "tool_loading_kind", None)
             if kind is None:
                 return None
+            window = getattr(call_context, "tool_window", None)
+            if isinstance(window, tool_loading.ToolWindow):
+                return window.record(tools)
             config = RuntimeConfig.get().get_tool_loading(self._settings.agent_id)
-            return tool_loading.call_record(config, kind, tools)
+            why = None
+            if config.mode == tool_loading.MODE_ON:
+                why = getattr(call_context, "tool_loading_why", None) or tool_loading.why_not(
+                    config, tools, deferring_client=self._defers_tools(), model=model
+                )
+            return tool_loading.call_record(config, kind, tools, why)
         except Exception as exc:  # noqa: BLE001 -- watching must never change a call
             if not _tool_loading_fault_logged:
                 _tool_loading_fault_logged = True
@@ -3058,6 +3094,143 @@ class AgentRunner:
                 _tool_loading_fault_logged = True
                 logger.warning("F120: tool-loading kind not set (%s); calls go on as before", type(exc).__name__)
             return call_context
+
+    def _defers_tools(self) -> bool:
+        """F120 On: whether the model client in use was tested with deferred tools (only the SDK client)."""
+        return getattr(self._api, "supports_deferred_tools", False) is True
+
+    def _open_tool_window(self, call_context: CallContext, tools: list[dict[str, Any]], model: str) -> CallContext:
+        """F120 On: ``call_context`` (a tool loop's, with the turn's kind of call) with the turn's ``ToolWindow`` when
+        its calls defer tools: the mode is On, the turn's kind is switched on, and ``tool_loading.why_not`` finds
+        nothing against ``tools`` (every tool the turn may use) on ``model``. Else ``call_context`` itself, and the
+        turn is as today. Decided once, at the turn's start: the turn's array is fixed from then on. A fault gives
+        ``call_context`` with ``tool_loading.WHY_FAULT`` as the reason its calls record, and is logged once."""
+        kind = getattr(call_context, "tool_loading_kind", None)
+        if kind is None or not tools:
+            return call_context
+        try:
+            config = RuntimeConfig.get().get_tool_loading(self._settings.agent_id)
+            if config.mode != tool_loading.MODE_ON or kind not in config.kinds:
+                return call_context
+            if tool_loading.why_not(config, tools, deferring_client=self._defers_tools(), model=model) is not None:
+                return call_context
+            return dataclasses.replace(call_context, tool_window=tool_loading.open_window(config, kind, tools))
+        except Exception as exc:  # noqa: BLE001 -- the turn goes on as today
+            self._tool_window_fallback(None, tool_loading.FALLBACK_FAULT, exc)
+            return dataclasses.replace(call_context, tool_loading_why=tool_loading.WHY_FAULT)
+
+    @staticmethod
+    def _tool_window_fallback(window: tool_loading.ToolWindow | None, why: str, exc: BaseException | None) -> None:
+        """F120 On: the turn's window fell back to sending every tool in full (``why``: the API refused a request, or
+        the window's own code failed). Breaks the window for the rest of the turn; logged once per kind of fallback."""
+        if window is not None and why == tool_loading.FALLBACK_FAULT:
+            window.fail()
+        if why not in _tool_window_logged:
+            _tool_window_logged.add(why)
+            logger.warning(
+                "F120: tool loading fell back (%s%s); this turn sends every tool in full",
+                why,
+                "" if exc is None else f", {type(exc).__name__}",
+            )
+
+    def _tool_window_step(
+        self,
+        window: tool_loading.ToolWindow,
+        ctx: ExecutionContext,
+        *,
+        name_called: str,
+        name: str,
+        tool_input: Any,
+        reason: str | None,
+        turn_id: UUID | None,
+        turn_number: int | None,
+        call_index: int,
+        session_id: str | None,
+        started_at: datetime | None,
+        unreadable: bool = False,
+    ) -> tool_loading.LoaderAnswer | None:
+        """F120 On, both tool loops: the answer to a call the turn's window takes (the loader, or a deferred tool not
+        loaded when the request was built, which never runs), or None for a call that goes on as today. Runs after
+        the alias step and before every check; a loader call whose input could not be read (``unreadable``) is taken
+        before the malformed-input answer. The answer opens no ledger row and is no tool failure: it is recorded in
+        ``tool_call_log`` with its own outcome and ``is_error`` false, and nowhere else."""
+        try:
+            answer = window.unreadable() if unreadable else window.answer(name, tool_input, self._alias_target)
+        except Exception as exc:  # noqa: BLE001 -- the turn goes on with every tool in full
+            self._tool_window_fallback(window, tool_loading.FALLBACK_FAULT, exc)
+            answer = window.fault_answer(name)
+        if answer is not None and self._tool_call_recorder:
+            self._note_tool_call(
+                ctx,
+                turn_id=turn_id,
+                turn_number=turn_number,
+                call_index=call_index,
+                name_called=name_called,
+                name=name,
+                tool_input=tool_input,
+                reason=reason,
+                outcome=answer.outcome,
+                result_text=answer.text,
+                is_error=False,
+                refused_by=None,
+                duration_ms=0,
+                ledger_entry_id=None,
+                session_id=session_id,
+                started_at=started_at,
+            )
+        return answer
+
+    async def _call_tool_api(
+        self, window: tool_loading.ToolWindow, call_kwargs: dict[str, Any], call_context: CallContext
+    ) -> ApiResponse:
+        """F120 On: one request of ``_tool_loop`` with the turn's window's tools. When the API refuses it with a 400 it
+        is sent once more with every tool in full and no reference, as is every later request of the turn
+        (``ToolWindow.refused``, ``ToolWindow.request_messages``)."""
+
+        def request() -> dict[str, Any]:
+            tools = window.request_tools()
+            return {**call_kwargs, "tools": tools, "messages": window.request_messages(call_kwargs["messages"])}
+
+        try:
+            return await self._call_api(**request(), call_context=call_context)
+        except Exception as exc:
+            if not window.refused(_http_status(exc)):
+                raise
+            self._tool_window_fallback(window, tool_loading.FALLBACK_REFUSED, None)
+        return await self._call_api(**request(), call_context=call_context)
+
+    async def _stream_tool_segment(
+        self,
+        window: tool_loading.ToolWindow,
+        system_prompt: str | dict[str, str],
+        messages: list[dict[str, Any]],
+        call_context: CallContext,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """F120 On: one segment of ``stream_chat`` with the turn's window's tools (``_stream_with_keepalive``). When the
+        API refuses the request with a 400 before any event but a keepalive, it is sent once more with every tool in
+        full and no reference, as is every later request of the turn (``ToolWindow.refused``,
+        ``ToolWindow.request_messages``)."""
+        for _attempt in range(2):
+            refused = started = False
+            tools = window.request_tools()
+            stream = self._stream_with_keepalive(
+                system_prompt=system_prompt,
+                messages=window.request_messages(messages),
+                tools=tools,
+                call_context=call_context,
+            )
+            try:
+                async for event in stream:
+                    if event.type == "error" and not started and window.refused(event.status):
+                        refused = True
+                        continue
+                    started = started or event.type != "keepalive"
+                    yield event
+            finally:
+                await _close_stream(stream)
+            if not refused:
+                return
+            self._tool_window_fallback(window, tool_loading.FALLBACK_REFUSED, None)
 
     async def _call_api(
         self,
@@ -3346,6 +3519,9 @@ class AgentRunner:
             offered_names = frozenset(t["name"] for t in tools)
             # F108: the offered tools whose own schema declares reason keep it in their input.
             own_reasons = own_reason_tools(tools) if self._settings.tool_reason_enabled else frozenset()
+            # F120 On: the turn's window, when its calls defer tools (offered_names above stays every tool it may use).
+            _stream_loop_context = self._open_tool_window(_stream_loop_context, tools, self._settings.model)
+            window = getattr(_stream_loop_context, "tool_window", None)
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -3452,12 +3628,17 @@ class AgentRunner:
 
                     # Emit keepalives while waiting for Anthropic's first byte —
                     # large contexts + thinking can cause long waits (008.1)
-                    async for event in self._stream_with_keepalive(
-                        system_prompt=system_prompt,
-                        messages=messages,
-                        tools=tools if tools else None,
-                        call_context=_stream_loop_context,
-                    ):
+                    segment = (
+                        self._stream_with_keepalive(
+                            system_prompt=system_prompt,
+                            messages=messages,
+                            tools=tools if tools else None,
+                            call_context=_stream_loop_context,
+                        )
+                        if window is None
+                        else self._stream_tool_segment(window, system_prompt, messages, _stream_loop_context)
+                    )
+                    async for event in segment:
                         if event.type == "error":
                             error = event.text
                             yield event
@@ -3640,6 +3821,7 @@ class AgentRunner:
 
                     # Execute tools (P1-2: all results in single user message)
                     tool_results_for_message: list[dict[str, Any]] = []
+                    window_notes: list[str] = []  # F120 On: what the step's loads did not load, after its results
                     for tc in tool_calls:
                         _call_images: list[dict] | None = None  # set when this call's dispatch returns
                         # F108: the call's place in the turn and its start, and its reason split out of the input
@@ -3654,6 +3836,26 @@ class AgentRunner:
                                 own_reasons,
                                 self._settings.tool_reason_max_chars,
                             )
+
+                        # F120 On: a loader call whose input could not be read is the window's to answer.
+                        if tc.get("input_error") and window is not None and tc["name"] == tool_loading.LOADER_NAME:
+                            answer = self._tool_window_step(
+                                window,
+                                _ctx,
+                                name_called=tc["name"],
+                                name=tc["name"],
+                                tool_input=call_input,
+                                reason=reason,
+                                turn_id=_stream_turn_id,
+                                turn_number=_stream_turn_number,
+                                call_index=call_index,
+                                session_id=session_id,
+                                started_at=call_started,
+                                unreadable=True,
+                            )
+                            tool_results_for_message.append(answer.result(tc["id"]))
+                            yield StreamEvent(type="tool_end", tool_name=tc["name"])
+                            continue
 
                         # Malformed tool-input JSON: never dispatch a blanked-args
                         # call (it can only fail downstream with a misleading
@@ -3734,6 +3936,27 @@ class AgentRunner:
                                 )
                             yield StreamEvent(type="tool_end", tool_name=tool_name)
                             continue
+
+                        # F120 On: the loader, or a deferred tool not loaded yet (never run), answered by the window.
+                        if window is not None:
+                            answer = self._tool_window_step(
+                                window,
+                                _ctx,
+                                name_called=tc["name"],
+                                name=tool_name,
+                                tool_input=tool_input,
+                                reason=reason,
+                                turn_id=_stream_turn_id,
+                                turn_number=_stream_turn_number,
+                                call_index=call_index,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
+                            if answer is not None:
+                                tool_results_for_message.append(answer.result(tc["id"]))
+                                window_notes += [answer.note] if answer.note else []
+                                yield StreamEvent(type="tool_end", tool_name=tool_name)
+                                continue
 
                         # Harness: was this tool offered this turn, and may this context use it?
                         refusal = self._authorize_tool_call(
@@ -4046,7 +4269,10 @@ class AgentRunner:
 
                         yield StreamEvent(type="tool_end", tool_name=tool_name)
 
-                    messages.append({"role": "user", "content": tool_results_for_message})
+                    # F120 On: the loads' words after the results, in a block of their own
+                    messages.append(
+                        {"role": "user", "content": tool_results_for_message + tool_loading.note_block(window_notes)}
+                    )
 
                     # Prune old tool results before next API call (Spec 008.1 Layer 1)
                     if self._compactor:
@@ -4605,8 +4831,12 @@ class AgentRunner:
             frame_id=frame_id,
             trace_id=trace_id,
         )
-        # F120: the loop's own model calls carry the turn's kind of call (tool loading, watch only).
+        # F120: the loop's own model calls carry the turn's kind of call (tool loading), and in On the turn's window.
         loop_call_context = self._tool_loading_context(call_context, ctx, frame_id, tool_filter)
+        loop_call_context = self._open_tool_window(
+            loop_call_context, offered_tools, model_override or self._settings.model
+        )
+        window = getattr(loop_call_context, "tool_window", None)
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -4738,7 +4968,10 @@ class AgentRunner:
                 sent_notes.append((len(messages) - 1, note))
             if sent_notes:
                 _call_kwargs["tail_notes"] = list(sent_notes)
-            api_response = await self._call_api(**_call_kwargs, call_context=loop_call_context)
+            if window is None:
+                api_response = await self._call_api(**_call_kwargs, call_context=loop_call_context)
+            else:
+                api_response = await self._call_tool_api(window, _call_kwargs, loop_call_context)
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:
@@ -4761,7 +4994,12 @@ class AgentRunner:
                 total_usage["output_tokens"] += api_response.usage.get("output_tokens", 0)
                 # The estimator learns characters of text per token. A request that carries an image teaches it
                 # nothing true: an image's base64 is not text, and its tokens are not those of the text beside it.
-                if self._compactor and not any(_carries_image(m.get("content")) for m in messages):
+                # Nor does one that holds a load (F120 On): the API counts each loaded definition with the messages.
+                if (
+                    self._compactor
+                    and not any(_carries_image(m.get("content")) for m in messages)
+                    and not tool_loading.carries_reference(messages)
+                ):
                     input_chars = sum(len(str(m.get("content", ""))) for m in messages)
                     self._compactor.estimator.calibrate(input_chars, api_response.usage.get("input_tokens", 0))
 
@@ -4801,6 +5039,8 @@ class AgentRunner:
 
             # P1-2: Dispatch ALL tool_use blocks, collect results in SINGLE user message
             tool_results_for_message: list[dict[str, Any]] = []
+            window_notes: list[str] = []  # F120 On: what the step's loads did not load, after its results
+            free_answers = 0  # F120 On: the step's loader and not-loaded answers that are not tool calls
             for block in api_response.content:
                 if block.get("type") == "tool_use":
                     tool_name = block["name"]
@@ -4830,6 +5070,25 @@ class AgentRunner:
                     # and the model is told what to fix. Skips gating, dispatch
                     # and the ledger: nothing ran, so nothing is recorded.
                     input_error = (api_response.input_errors or {}).get(tool_use_id)
+                    # F120 On: a loader call whose input could not be read is the window's to answer.
+                    if input_error and window is not None and tool_name == tool_loading.LOADER_NAME:
+                        answer = self._tool_window_step(
+                            window,
+                            ctx,
+                            name_called=block["name"],
+                            name=tool_name,
+                            tool_input=tool_input,
+                            reason=reason,
+                            turn_id=turn_id,
+                            turn_number=turn_number,
+                            call_index=call_index,
+                            session_id=session_id,
+                            started_at=call_started,
+                            unreadable=True,
+                        )
+                        tool_results_for_message.append(answer.result(tool_use_id))
+                        free_answers += 0 if answer.counted else 1
+                        continue
                     if input_error:
                         tool_results_for_message.append(
                             {
@@ -4903,6 +5162,27 @@ class AgentRunner:
                                 started_at=call_started,
                             )
                         continue
+
+                    # F120 On: the loader, or a deferred tool not loaded yet (never run), answered by the turn's window.
+                    if window is not None:
+                        answer = self._tool_window_step(
+                            window,
+                            ctx,
+                            name_called=block["name"],
+                            name=tool_name,
+                            tool_input=tool_input,
+                            reason=reason,
+                            turn_id=turn_id,
+                            turn_number=turn_number,
+                            call_index=call_index,
+                            session_id=session_id,
+                            started_at=call_started,
+                        )
+                        if answer is not None:
+                            tool_results_for_message.append(answer.result(tool_use_id))
+                            window_notes += [answer.note] if answer.note else []
+                            free_answers += 0 if answer.counted else 1
+                            continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
                     # F115: the lifts the call is authorized under go to the dispatch, which asks them again.
@@ -5155,16 +5435,18 @@ class AgentRunner:
                     if terminate_after_tool_results:
                         break
 
-            # Append all tool results as single user message
+            # Append all tool results as single user message (F120 On: the loads' words after them, in a block of
+            # their own: a result that loads a tool holds only its references)
             messages.append(
                 {
                     "role": "user",
-                    "content": tool_results_for_message,
+                    "content": tool_results_for_message + tool_loading.note_block(window_notes),
                 }
             )
 
-            total_tool_calls += len(tool_results_for_message)
-            total_usage["tool_calls"] += len(tool_results_for_message)
+            # F120 On: up to FREE_LOADS_PER_TURN loader and not-loaded answers a turn are not tool calls.
+            total_tool_calls += len(tool_results_for_message) - free_answers
+            total_usage["tool_calls"] += len(tool_results_for_message) - free_answers
 
             # F061: short-circuit on a successful terminal extra tool
             # (TERMINAL_EXTRA_TOOLS). Caller reads the validated payload from

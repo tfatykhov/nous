@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from nous.api.models import ApiResponse, Conversation, Message
 from nous.api.smart_compress import final_marker_line
+from nous.api.tool_loading import holds_reference
 from nous.cognitive.schemas import (
     BULK_ESCALATION_TOOLS,
     DECAY_PROFILE_AGES,
@@ -814,6 +815,10 @@ class ConversationCompactor:
 
             for item in content:
                 if not isinstance(item, dict) or self._has_image_content(item):
+                    continue
+                # F120 On: the words after a step's results are not a result, and a result that loaded tools keeps
+                # its references for the rest of the turn (every tier would replace them with text).
+                if item.get("type") != "tool_result" or holds_reference(item):
                     continue
 
                 tool_use_id = item.get("tool_use_id")

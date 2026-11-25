@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.api.tool_loading import LOADER_OUTCOMES
 from nous.cognitive.ledger_store import REFUSAL_CODES, redact_output
 
 logger = logging.getLogger(__name__)
@@ -134,12 +135,18 @@ EXAMPLE_MAX_CHARS = 200
 # default). Only a bound: the example is redacted with ``redact_output`` and then cut to the shown length.
 _INPUT_FETCH_CHARS = 2000
 
-_WINDOW_CTE = """
+# F120 On: the loader's calls and the answers to a call of a tool not loaded yet are neither failures nor repeats (a
+# refused call and its retry once loaded are not a repeated call): every count here leaves their rows out, as do the
+# Patterns screen (work_view_dashboard) and the outside judge (judge/evidence.py).
+NOT_LOADER_SQL = "outcome NOT IN (" + ", ".join(f"'{outcome}'" for outcome in LOADER_OUTCOMES) + ")"
+
+_WINDOW_CTE = f"""
 WITH win AS (
     SELECT id, turn_id, call_index, tool_name, input_text, is_error, outcome, refused_by, error_text, started_at
     FROM nous_system.tool_call_log
     WHERE agent_id = :agent AND started_at >= :since AND started_at < :until
       AND (CAST(:tool AS text) IS NULL OR tool_name = :tool)
+      AND {NOT_LOADER_SQL}
 )
 """
 
