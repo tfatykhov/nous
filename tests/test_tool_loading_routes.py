@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import text
 from starlette.applications import Starlette
 
+from nous.api import tool_loading_routes as routes_module
 from nous.api.owner_guard import OwnerGuard
 from nous.api.tool_loading import PINNED, ToolLoadingConfig, config_key, index_tokens, tokens_est
 from nous.api.tool_loading_routes import BODY_MAX_BYTES, build_tool_loading_routes, kind_numbers
@@ -102,6 +103,7 @@ async def _cleanup(db, *agents: str) -> None:
         for agent in agents:
             await conn.execute(text("DELETE FROM nous_system.config WHERE key = :k"), {"k": config_key(agent)})
             await conn.execute(text("DELETE FROM nous_system.model_call_log WHERE agent_id = :a"), {"a": agent})
+            await conn.execute(text("DELETE FROM nous_system.tool_loading_watch WHERE agent_id = :a"), {"a": agent})
             await conn.execute(text("DELETE FROM nous_system.tool_call_log WHERE agent_id = :a"), {"a": agent})
 
 
@@ -180,15 +182,37 @@ def _record(kind: str, deferred: int, deferred_tokens: int, index: int, cache: s
     )
 
 
-async def _call(conn, agent: str, turn: uuid.UUID, record: str | None, names: list[str], when: datetime) -> None:
-    await conn.execute(
-        text(
-            "INSERT INTO nous_system.model_call_log "
-            "(agent_id, purpose, label_source, call_kind, status, turn_id, tool_names, started_at, tool_loading) "
-            "VALUES (:a, 'chat', 'explicit', 'call', 'ok', :t, CAST(:n AS text[]), :w, CAST(:r AS jsonb))"
-        ),
-        {"a": agent, "t": turn, "n": names, "w": when, "r": record},
-    )
+async def _call(
+    conn,
+    agent: str,
+    turn: uuid.UUID,
+    record: str | None,
+    names: list[str],
+    when: datetime,
+    *,
+    status: str = "ok",
+    call_row: bool = True,
+) -> None:
+    """One model call of ``agent`` (its ``model_call_log`` row, unless ``call_row`` is False) and, when ``record`` is
+    given, its watch row keyed by the call's id."""
+    call_id = uuid.uuid4()
+    if call_row:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.model_call_log "
+                "(id, agent_id, purpose, label_source, call_kind, status, turn_id, tool_names, started_at) "
+                "VALUES (:id, :a, 'chat', 'explicit', 'call', :s, :t, CAST(:n AS text[]), :w)"
+            ),
+            {"id": call_id, "a": agent, "s": status, "t": turn, "n": names, "w": when},
+        )
+    if record is not None:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.tool_loading_watch (call_id, agent_id, started_at, turn_id, kind, record) "
+                "VALUES (:id, :a, :w, :t, :k, CAST(:r AS jsonb))"
+            ),
+            {"id": call_id, "a": agent, "w": when, "t": turn, "k": json.loads(record)["kind"], "r": record},
+        )
 
 
 async def _tool_call(conn, agent: str, turn: uuid.UUID, name: str, when: datetime, kind: str, session: str) -> None:
@@ -206,7 +230,7 @@ async def _tool_call(conn, agent: str, turn: uuid.UUID, name: str, when: datetim
 async def test_the_numbers_per_kind_weigh_each_call_by_its_cache_state(db):
     agent, other = _agent(), _agent()
     now = datetime.now(UTC)
-    t1, t2, t3, old = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    t1, t2, t3, t4, t5, old = (uuid.uuid4() for _ in range(6))
     names = ["bash", "db_query", "send_email", "dag_create"]
     kept = ["bash", "db_query"]
     try:
@@ -218,10 +242,15 @@ async def test_the_numbers_per_kind_weigh_each_call_by_its_cache_state(db):
             await _call(conn, agent, t2, _record("chat", 2, 1000, 200, None, kept), names, now)
             # heartbeat: one call, read
             await _call(conn, agent, t3, _record("heartbeat", 1, 400, 100, "read", kept), names, now)
-            # not counted: a call before the window, a call with no record, another agent's call
+            # not counted: a call before the window, a call with no record, another agent's call, a call that
+            # failed (its turn's use of a left-out tool not counted either), a watch row whose call row is missing
             await _call(conn, agent, old, _record("chat", 2, 1000, 200, "read", kept), names, now - timedelta(days=9))
             await _call(conn, agent, t2, None, names, now)
             await _call(conn, other, t1, _record("chat", 2, 1000, 200, "read", kept), names, now)
+            await _call(conn, agent, t4, _record("chat", 2, 1000, 200, "read", kept), names, now, status="error")
+            await _call(conn, agent, t5, _record("chat", 2, 1000, 200, "read", kept), names, now, call_row=False)
+            await _tool_call(conn, agent, t4, "send_email", now, "interactive", "s4")
+            await _tool_call(conn, agent, t5, "dag_create", now, "interactive", "s5")
             # turn 1 then called send_email (left out) and bash (kept); turn 2 only bash; another agent's turn 2 call
             await _tool_call(conn, agent, t1, "send_email", now, "interactive", "s1")
             await _tool_call(conn, agent, t1, "bash", now, "interactive", "s1")
@@ -246,8 +275,9 @@ async def test_the_numbers_per_kind_weigh_each_call_by_its_cache_state(db):
         # the tool table: calls and sessions in 30 days over every kind of call, this agent's only
         rows = {row["name"]: row for row in body["tools"]}
         assert (rows["bash"]["calls_30d"], rows["bash"]["sessions_30d"]) == (2, 2)
-        assert (rows["send_email"]["calls_30d"], rows["send_email"]["sessions_30d"]) == (1, 1)
-        assert rows["dag_create"]["calls_30d"] == 0
+        assert (rows["send_email"]["calls_30d"], rows["send_email"]["sessions_30d"]) == (2, 2)  # every call counts
+        assert rows["dag_create"]["calls_30d"] == 1
+        assert body["numbers_failed"] is False and body["usage_failed"] is False
     finally:
         await _cleanup(db, agent, other)
 
@@ -265,6 +295,76 @@ async def test_without_the_tool_call_log_the_usage_numbers_are_null(db):
         assert chat["calls"] == 1 and chat["turns_used_left_out"] is None and chat["calls_used_left_out"] is None
         assert body["recorded"] == {"model_calls": True, "tool_calls": False}
         assert all(row["calls_30d"] is None for row in body["tools"])
+    finally:
+        await _cleanup(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_many_watched_calls_and_tool_calls_in_one_turn_are_each_counted_once(db):
+    """The turn query keeps one row per (turn, kind, tools sent, names kept) before the join: a turn of many calls
+    that send the same tools, with many tool calls, counts each left-out call once and the turn once."""
+    agent = _agent()
+    now = datetime.now(UTC)
+    turn = uuid.uuid4()
+    names, kept = ["bash", "send_email", "dag_create"], ["bash"]
+    try:
+        async with db.engine.begin() as conn:
+            for _ in range(6):
+                await _call(conn, agent, turn, _record("chat", 2, 1000, 200, "read", kept), names, now)
+            for name in ("send_email", "send_email", "dag_create", "bash", "bash"):
+                await _tool_call(conn, agent, turn, name, now, "interactive", "s1")
+        body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
+        chat = next(row for row in body["numbers"] if row["kind"] == "chat")
+        assert (chat["calls"], chat["turns"], chat["turns_used_left_out"], chat["calls_used_left_out"]) == (6, 1, 1, 3)
+    finally:
+        await _cleanup(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_numbers_read_keeps_the_setting_on_the_card(db, monkeypatch):
+    agent = _agent()
+    monkeypatch.setattr(routes_module, "_CALLS", text("SELECT no_such_column FROM nous_system.tool_loading_watch"))
+    RuntimeConfig.get().set_tool_loading(agent, ToolLoadingConfig(mode="watch", kinds=frozenset({"chat"})))
+    response = await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["numbers"], body["numbers_failed"], body["usage_failed"]) == (None, True, False)
+    assert body["mode"] == "watch" and [k["on"] for k in body["kinds"]][0] is True  # the setting is still there
+    assert all(row["calls_30d"] is not None for row in body["tools"])
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_read_of_the_tools_use_keeps_the_rest(db, monkeypatch):
+    agent = _agent()
+    monkeypatch.setattr(routes_module, "_TOOL_USE", text("SELECT no_such_column FROM nous_system.tool_call_log"))
+    body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
+    assert (body["numbers_failed"], body["usage_failed"]) == (False, True)
+    assert body["numbers"] is not None and all(row["calls_30d"] is None for row in body["tools"])
+
+
+@pytest.mark.postgres_only
+async def test_a_save_that_changes_nothing_still_replaces_an_unreadable_stored_value(db):
+    agent = _agent()
+    try:
+        async with db.engine.begin() as conn:
+            await conn.execute(
+                text("INSERT INTO nous_system.config (key, value) VALUES (:k, CAST(:v AS jsonb))"),
+                {"k": config_key(agent), "v": json.dumps({"version": 1, "mode": "on"})},
+            )
+        async with db.session() as session:
+            await RuntimeConfig.get().load_from_db(session, agent)
+        assert RuntimeConfig.get().tool_loading_problem(agent) is not None
+        app = _app(db, _settings(agent))
+        body = (await _send(app, "GET", PATH, headers=OWNER)).json()
+        assert body["mode"] == "off" and body["problem"]
+        saved = await _send(app, "PUT", PATH, headers=OWNER, json={"mode": "off"})  # the same as now
+        assert saved.status_code == 200 and saved.json()["changed"] is True
+        stored = await _stored(db, agent)
+        assert stored["mode"] == "off" and stored["version"] == 1 and stored["updated_by"] == "owner"
+        assert RuntimeConfig.get().tool_loading_problem(agent) is None
+        assert (await _send(app, "GET", PATH, headers=OWNER)).json()["problem"] is None
+        again = await _send(app, "PUT", PATH, headers=OWNER, json={"mode": "off"})
+        assert again.json()["changed"] is False  # now readable: a save that changes nothing writes nothing
     finally:
         await _cleanup(db, agent)
 

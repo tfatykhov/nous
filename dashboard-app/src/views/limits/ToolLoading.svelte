@@ -11,7 +11,7 @@
     ALREADY_TEXT, CORE_HELP, CORE_TITLE, CORE_WORDS, DEFAULT_LABEL, DEFAULT_TEXT, DISCARD_LABEL, HARNESS_TEXT,
     KINDS_HELP, KINDS_TITLE, MODE_HELP, MODE_TITLE, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NOT_REGISTERED_TEXT,
     NUMBERS_TITLE, OFF_TEXT, OFF_TITLE, SAVED_TEXT, SAVES_AT_ONCE_TEXT, SAVE_LABEL, SUBTITLE, SWITCH_WORDS,
-    TOOL_CALLS_OFF_TEXT, UNSAVED_TEXT, WEIGHED_TEXT, WINDOW_OPTIONS,
+    NUMBERS_FAILED_TEXT, TOOL_CALLS_OFF_TEXT, UNSAVED_TEXT, USAGE_FAILED_TEXT, WEIGHED_TEXT, WINDOW_OPTIONS,
     changeLoading, draftChanged, draftList, kindLines, lastChangeText, pinnedText, problemLine, readLoading,
     sourceText, toolNumbersText, totalsText,
     type Change, type LoadingAnswer, type Mode, type ToolRow, type Window,
@@ -193,6 +193,8 @@
         {/each}
       </ul>
       <p class="hint">{WEIGHED_TEXT}</p>
+    {:else if answer.numbers_failed}
+      <p class="warn" role="status">{NUMBERS_FAILED_TEXT}</p>
     {:else}
       <p class="hint">{MODEL_CALLS_OFF_TEXT}</p>
     {/if}
@@ -203,6 +205,7 @@
     <p class="hint">{CORE_HELP}</p>
     <p class="hint">{HARNESS_TEXT}</p>
     {#if answer.totals}<p class="hint">{totalsText(answer.totals)}</p>{/if}
+    {#if answer.usage_failed}<p class="warn" role="status">{USAGE_FAILED_TEXT}</p>{/if}
     <ul class="tools">
       {#each tools as row (row.name)}
         <li class="tool">

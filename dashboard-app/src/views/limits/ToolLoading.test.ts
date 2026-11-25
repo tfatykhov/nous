@@ -117,7 +117,7 @@ describe('Limits and tools: tool loading', () => {
     expect((within(mode).getByRole('radio', { name: 'Off' }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText('Every tool is sent in full, as now, and nothing is recorded.')).toBeTruthy();
     for (const [, words] of KIND_WORDS) expect(screen.getAllByText(words).length).toBeGreaterThanOrEqual(2); // switch, numbers
-    expect(screen.getByText(/^12 calls recorded\. Each would have left out 3 tools on average/)).toBeTruthy();
+    expect(screen.getByText(/^12 successful calls recorded\. Each would have left out 3 tools on average/)).toBeTruthy();
     expect(screen.getByText('Weighed, that is worth about 140 uncached input tokens a call (9 read the tools from the cache and 2 wrote them).')).toBeTruthy();
     expect(screen.getByText('1 of 4 turns then used a tool that would have been left out.')).toBeTruthy();
     expect(screen.getByText('Last changed from the dashboard, Nov 24 10:05 UTC.')).toBeTruthy();
@@ -233,6 +233,17 @@ describe('Limits and tools: tool loading', () => {
     expect((await screen.findAllByText(/NOUS_MODEL_CALL_LOG_ENABLED/)).length).toBeGreaterThan(0);
     expect(screen.getByText(/NOUS_TOOL_CALL_LOG_ENABLED/)).toBeTruthy();
     expect(screen.getByText(/^The saved setting could not be read \(the stored mode is not off or watch\)/)).toBeTruthy();
+  });
+
+  it('numbers that could not be read say so, and the mode and the switches stay', async () => {
+    current = answer({ numbers: null, numbers_failed: true, usage_failed: true });
+    render(Limits);
+    expect(await screen.findByText(/^The numbers could not be read just now\./)).toBeTruthy();
+    expect(screen.getByText("The tools' calls could not be read just now; Refresh reads them again.")).toBeTruthy();
+    expect(screen.queryByText(/NOUS_MODEL_CALL_LOG_ENABLED/)).toBeNull(); // recorded, only not read now
+    const mode = screen.getByRole('group', { name: 'Mode' });
+    expect(within(mode).getByRole('radio', { name: 'Watch only' })).toBeTruthy();
+    expect(screen.getAllByRole('group', { name: 'Workflow steps' }).length).toBeGreaterThan(0);
   });
 
   it('a new window reads again with that window', async () => {

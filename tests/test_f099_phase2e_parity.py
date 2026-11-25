@@ -137,7 +137,7 @@ def test_2e_added_one_migration_and_no_setting():  # PIN: changes when a later P
     assert migrations[-4].name == "121_judge_verdicts.sql"  # F118 the outside judge's verdicts
     assert migrations[-3].name == "122_judge_second_settings.sql"  # F118 the owner's settings of the second judge
     assert migrations[-2].name == "123_entity_profile.sql"  # F119 per-entity profiles
-    assert migrations[-1].name == "124_model_call_tool_loading.sql"  # F120 what a model call would have left out
+    assert migrations[-1].name == "124_tool_loading_watch.sql"  # F120 what a watched model call would have left out
     assert not [name for name in Settings.model_fields if "cancel" in name or "failed_tokens" in name]
 
 

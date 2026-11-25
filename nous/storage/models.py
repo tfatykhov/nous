@@ -2494,9 +2494,6 @@ class ModelCallLog(Base):
     runner's estimate (``section_tokens_est`` is ``context_log.token_breakdown`` renamed: a ``token_`` prefix trips the
     reader's credential check). ``turn_id`` names an ``AgentTurnLog`` row (no foreign key). Read by the app and by the
     ``db_query`` reader. The indexes are in the migration.
-
-    Migration 124 (F120): ``tool_loading``, what the call would have left out (``nous.api.tool_loading.call_record``
-    and its cache state), written only in Watch only for a switched-on kind of call; NULL otherwise.
     """
 
     __tablename__ = "model_call_log"
@@ -2554,7 +2551,6 @@ class ModelCallLog(Base):
     cache_break: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     cache_break_components = mapped_column(ARRAY(Text), nullable=True)
     cache_break_tokens_lost: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    tool_loading: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class ModelCallAttempt(Base):

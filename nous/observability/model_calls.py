@@ -105,6 +105,8 @@ MAIN_LOOP_PURPOSES: frozenset[str] = frozenset(
 # The main-loop calls the chat views leave out (they replace the old HEARTBEAT_CALL_TYPE exclusion).
 QUIET_PURPOSES: frozenset[str] = frozenset({"heartbeat", "background_check"})
 
+# F120: the bounded writer's kind for the tool-loading watch rows (its own backlog cap, never the call rows').
+WATCH_WRITE_KIND = "tool_loading_watch"
 # A call's and an attempt's error text, redacted and clipped (the tool-call log uses the same cap).
 ERROR_TEXT_MAX_CHARS = 1000
 
@@ -552,7 +554,6 @@ _CALL_COLUMNS: tuple[str, ...] = (
     "cache_break",
     "cache_break_components",
     "cache_break_tokens_lost",
-    "tool_loading",
 )
 _CTX_COLUMNS = (
     "session_id",
@@ -585,7 +586,7 @@ _STATS_COLUMNS = (
     "cache_break_components",
     "cache_break_tokens_lost",
 )
-_JSON_COLUMNS = frozenset({"section_tokens_est", "message_roles", "tool_loading"})
+_JSON_COLUMNS = frozenset({"section_tokens_est", "message_roles"})
 _ARRAY_COLUMNS = frozenset({"sections_present", "tool_names", "cache_break_components"})
 
 
@@ -601,6 +602,12 @@ _INSERT_CALL = text(
     f"INSERT INTO nous_system.model_call_log ({', '.join(_CALL_COLUMNS)}) VALUES ("
     + ", ".join(_call_value(c) for c in _CALL_COLUMNS)
     + ")"
+)
+# F120: one row per watched model call (migration 124), written after the call's own row, in a transaction of its own.
+_INSERT_WATCH = text(
+    "INSERT INTO nous_system.tool_loading_watch (call_id, agent_id, started_at, turn_id, kind, record) "
+    "VALUES (:call_id, :agent_id, :started_at, :turn_id, :kind, CAST(:record AS jsonb)) "
+    "ON CONFLICT (call_id) DO NOTHING"
 )
 _INSERT_ATTEMPT = text(
     "INSERT INTO nous_system.model_call_attempt "
@@ -637,21 +644,15 @@ def _json_param(value: Any) -> str | None:
     return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _tool_loading_value(stats: ContextStats, usage: dict[str, int]) -> dict[str, Any] | None:
-    """F120: the call's tool-loading record with its cache state: ``read`` when the call's ``cache_read`` covers the
-    estimated tokens of the tools it sent (they lead the cached prefix), ``written`` when it does not, None when the
-    call reported no usage. A fault keeps the record without the state; the row is written either way."""
-    record = stats.tool_loading
-    if record is None:
-        return None
-    try:
-        cache_read = usage.get("cache_read_input_tokens")
-        tools_tokens = stats.section_tokens_est.get("tools_definition", 0)
-        cache = None if cache_read is None else ("read" if cache_read >= tools_tokens else "written")
-        return {**record, "cache": cache}
-    except Exception as exc:
-        logger.warning("F120: the cache state of a tool-loading record was not set (%s)", type(exc).__name__)
-        return dict(record)
+def cache_state(usage: dict[str, int]) -> str | None:
+    """F120: whether a call read its tools from the prompt cache or wrote them, from its own usage. The tools lead the
+    cached prefix, so any token read from the cache includes them: ``read`` when the call read any; ``written`` when it
+    read none and wrote some; None (not weighed) when it reported neither."""
+    if usage.get("cache_read_input_tokens", 0) > 0:
+        return "read"
+    if usage.get("cache_creation_input_tokens", 0) > 0:
+        return "written"
+    return None
 
 
 class ModelCallScope:
@@ -846,16 +847,20 @@ class ModelCallScope:
         stats = ctx.stats
         for column in _STATS_COLUMNS:
             params[column] = None if stats is None else getattr(stats, column)
-        params["tool_loading"] = None if stats is None else _tool_loading_value(stats, self._usage)
         params["cache_break"] = bool(params["cache_break"])
         for column in _JSON_COLUMNS:
             params[column] = _json_param(params[column])
         attempts = [{**a, "call_id": params["id"], "agent_id": params["agent_id"]} for a in self._attempts]
         sent = self._text_snapshot()
+        # F120: a watched call's row of nous_system.tool_loading_watch, written after this row (``_insert_call``).
+        watch = None
+        if stats is not None and stats.tool_loading is not None:
+            watch = self._recorder._watch_row(params, stats, self._usage)
+        more = {} if watch is None else {"watch": watch}
         if sent is None:
-            self._recorder._submit_call(params, attempts)
+            self._recorder._submit_call(params, attempts, **more)
         else:
-            self._recorder._submit_call(params, attempts, sent)
+            self._recorder._submit_call(params, attempts, sent, **more)
 
     def _text_snapshot(self) -> tuple[dict[str, Any], Any, list[Any] | None] | None:
         """What the text write needs, taken now: ``(sent, response_content, stream_events)``. Right after the call
@@ -906,6 +911,7 @@ class ModelCallRecorder:
         self._stats = RecorderStats()
         self._warned_purposes: set[str] = set()
         self._warned_late = False
+        self._warned_watch = False
 
     @property
     def stats(self) -> RecorderStats:
@@ -996,12 +1002,20 @@ class ModelCallRecorder:
             )
 
     def _submit_call(
-        self, params: dict[str, Any], attempts: list[dict[str, Any]], sent: tuple[Any, ...] | None = None
+        self,
+        params: dict[str, Any],
+        attempts: list[dict[str, Any]],
+        sent: tuple[Any, ...] | None = None,
+        watch: dict[str, Any] | None = None,
     ) -> None:
-        self._writer.submit(lambda: self._insert_call(params, attempts, sent), stats=self._stats)
+        self._writer.submit(lambda: self._insert_call(params, attempts, sent, watch), stats=self._stats)
 
     async def _insert_call(
-        self, params: dict[str, Any], attempts: list[dict[str, Any]], sent: tuple[Any, ...] | None = None
+        self,
+        params: dict[str, Any],
+        attempts: list[dict[str, Any]],
+        sent: tuple[Any, ...] | None = None,
+        watch: dict[str, Any] | None = None,
     ) -> None:
         async with self._database.session() as session:
             await session.execute(_INSERT_CALL, params)
@@ -1010,6 +1024,48 @@ class ModelCallRecorder:
             await session.commit()
         if sent is not None and self._text is not None:
             self._text.submit(params["id"], *sent)  # after the commit: the text's refs need this row
+        if watch is not None:
+            # After the commit, as a write of its own kind: it never holds up, undoes or crowds out a call's row.
+            self._writer.submit(lambda: self._insert_watch(watch), kind=WATCH_WRITE_KIND)
+
+    def _watch_fault(self, exc: BaseException) -> None:
+        """Log the first fault of a watch row (F120); the model-call rows are written as before."""
+        if not self._warned_watch:
+            self._warned_watch = True
+            logger.warning(
+                "F120: a tool-loading watch row was not written (%s); model calls are recorded as before",
+                type(exc).__name__,
+            )
+
+    def _watch_row(self, params: dict[str, Any], stats: ContextStats, usage: dict[str, int]) -> dict[str, Any] | None:
+        """F120: the ``tool_loading_watch`` row of the call ``params`` describes: its id, agent, start and turn, the
+        kind of call, and the record with the call's model and cache state (``cache_state(usage)``). None on any fault
+        (logged once): the call's own row is written either way."""
+        try:
+            record = stats.tool_loading or {}
+            return {
+                "call_id": params["id"],
+                "agent_id": params["agent_id"],
+                "started_at": params["started_at"],
+                "turn_id": params["turn_id"],
+                "kind": str(record["kind"]),
+                "record": json.dumps(
+                    {**record, "model": params["model"], "cache": cache_state(usage)},
+                    ensure_ascii=False,
+                ),
+            }
+        except Exception as exc:
+            self._watch_fault(exc)
+            return None
+
+    async def _insert_watch(self, watch: dict[str, Any]) -> None:
+        """Write one watch row in a transaction of its own. Never raises: a fault is logged once."""
+        try:
+            async with self._database.session() as session:
+                await session.execute(_INSERT_WATCH, watch)
+                await session.commit()
+        except Exception as exc:
+            self._watch_fault(exc)
 
     async def _upsert_bucket(self, params: dict[str, Any]) -> None:
         async with self._database.session() as session:

@@ -3,10 +3,11 @@
 Nothing here changes a request. The owner chooses on the Limits and tools screen a mode (``off`` or ``watch``), the
 kinds of call it applies to (``KINDS``) and the core set. ``RuntimeConfig`` holds the choice, stored in
 ``nous_system.config`` under ``tool_loading:<agent_id>`` (``config_key``), and the runner reads it at each model call.
-In ``watch`` mode a call of a switched-on kind gets a record (``call_record``) in ``model_call_log.tool_loading``: how
-many of the tools it sent would have been left out, their estimated tokens, the estimated tokens of the list of names
-that would replace them (``index_text``, built for its size only), and the names kept in full. The recorder adds
-whether the call read the tools from the prompt cache or wrote them.
+In ``watch`` mode a call of a switched-on kind gets a record (``call_record``): how many of the tools it sent would
+have been left out, their estimated tokens, the estimated tokens of the list of names that would replace them
+(``index_text``, built for its size only), and the names kept in full. The model-call recorder writes it, with the
+call's model and whether the call read the tools from the prompt cache or wrote them, as a row of
+``nous_system.tool_loading_watch`` keyed by the call's id, after the call's own ``model_call_log`` row.
 
 A tool is kept in full when it is in the core set or pinned (``PINNED``): the harness's own per-turn tools, a tool a
 harness step forces, a tool the prompts tell the model to call by name, and ``commit``. A turn of internal authority,

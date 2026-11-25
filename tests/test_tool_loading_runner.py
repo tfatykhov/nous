@@ -45,6 +45,7 @@ from nous.api.tool_loading import KINDS, ToolLoadingConfig
 from nous.api.tool_loading_routes import build_tool_loading_routes
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.config import Settings
+from nous.observability import model_calls
 from nous.observability.model_calls import ModelCallRecorder
 from nous.observability.recording import BoundedWriter
 from nous.runtime_config import RuntimeConfig
@@ -78,6 +79,14 @@ def _client(stream: bool, sent: list[str]) -> _SpyClient:
         return next(replies)
 
     client = _SpyClient(reply, segments=[_tool_segment("bash"), _text_segment()] if stream else None)
+
+    def keep(params: dict[str, Any], attempts: Any, sent: Any = None, watch: dict[str, Any] | None = None) -> None:
+        """The row handed to the writer, with the watch row handed with it (kept apart: it is not a column)."""
+        client.rows.append(params)
+        client.watches.append(watch)
+
+    client.watches = []
+    client.recorder._submit_call = keep
     if stream:
         streamed = client.stream
 
@@ -121,11 +130,13 @@ async def _turn(
     else:
         await _drive(r, path)
     assert len(sent) == 2, sent
-    return sent, client.rows
+    # The model-call row is as it is on main: the record is never one of its columns.
+    assert all("tool_loading" not in row for row in client.rows)
+    return sent, client.watches
 
 
-def _records(rows: list[dict[str, Any]]) -> list[dict[str, Any] | None]:
-    return [None if row["tool_loading"] is None else json.loads(row["tool_loading"]) for row in rows]
+def _records(watches: list[dict[str, Any] | None]) -> list[dict[str, Any] | None]:
+    return [None if watch is None else json.loads(watch["record"]) for watch in watches]
 
 
 # ---- no request changes ---------------------------------------------------------------------------------------------
@@ -153,7 +164,8 @@ async def test_in_watch_only_each_loop_call_records_what_it_would_leave_out(path
     kind = "subtask" if path == "subtask" else "chat"
     for payload, record in zip(sent, records, strict=True):
         tools = json.loads(payload)["tools"]
-        assert record == {**tool_loading.call_record(WATCH_ALL, kind, tools), "cache": "read"}
+        model = json.loads(payload)["model"]
+        assert record == {**tool_loading.call_record(WATCH_ALL, kind, tools), "model": model, "cache": "read"}
         assert record["sent"] == len(tools) and record["deferred"] == 2  # send_email and dag_create
         assert record["kept"] == ["bash", "db_query", "recall_deep"]
 
@@ -301,7 +313,7 @@ async def test_a_change_through_the_route_is_seen_by_the_next_call_without_a_res
 
 
 @pytest.mark.postgres_only
-async def test_the_record_is_written_to_the_calls_row(db):
+async def test_the_watch_row_is_written_after_the_calls_row_in_a_table_of_its_own(db):
     agent = f"test-tool-loading-{uuid.uuid4().hex[:12]}"
     writer = BoundedWriter("test")
     sent: list[str] = []
@@ -316,17 +328,60 @@ async def test_the_record_is_written_to_the_calls_row(db):
             rows = (
                 await conn.execute(
                     text(
-                        "SELECT tool_loading, tool_names, cache_read FROM nous_system.model_call_log "
-                        "WHERE agent_id = :a ORDER BY started_at"
+                        "SELECT m.id, m.turn_id, m.tool_names, m.model, w.kind, w.record, w.turn_id, w.started_at, "
+                        "m.started_at FROM nous_system.model_call_log m "
+                        "JOIN nous_system.tool_loading_watch w ON w.call_id = m.id AND w.agent_id = m.agent_id "
+                        "WHERE m.agent_id = :a ORDER BY m.started_at"
                     ),
                     {"a": agent},
                 )
             ).all()
-        assert len(rows) == 2
-        for row in rows:
-            record = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            assert (record["kind"], record["deferred"], record["cache"]) == ("chat", 2, "read")
-            assert set(row[1]) - set(record["kept"]) == {"send_email", "dag_create"}
+            calls = (
+                await conn.execute(
+                    text("SELECT count(*) FROM nous_system.model_call_log WHERE agent_id = :a"), {"a": agent}
+                )
+            ).scalar_one()
+        assert calls == len(rows) == 2
+        for _id, turn_id, names, model, kind, raw, watch_turn, watch_started, call_started in rows:
+            record = raw if isinstance(raw, dict) else json.loads(raw)
+            assert (kind, record["kind"], record["deferred"], record["cache"]) == ("chat", "chat", 2, "read")
+            assert record["model"] == model and (watch_turn, watch_started) == (turn_id, call_started)
+            assert set(names) - set(record["kept"]) == {"send_email", "dag_create"}
+    finally:
+        async with db.engine.begin() as conn:
+            await conn.execute(text("DELETE FROM nous_system.model_call_log WHERE agent_id = :a"), {"a": agent})
+            await conn.execute(text("DELETE FROM nous_system.tool_loading_watch WHERE agent_id = :a"), {"a": agent})
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_watch_write_never_touches_the_calls_row(db, monkeypatch, caplog):
+    """The watch table missing (a rollback that dropped it while this code runs): every watch write fails on its own,
+    logged once, and the model-call rows are written as before."""
+    agent = f"test-tool-loading-{uuid.uuid4().hex[:12]}"
+    writer = BoundedWriter("test")
+    client = _client(False, [])
+    client.recorder = ModelCallRecorder(writer, db, agent, SimpleNamespace())
+    monkeypatch.setattr(
+        model_calls,
+        "_INSERT_WATCH",
+        text("INSERT INTO nous_system.no_such_watch_table (call_id) VALUES (:call_id)"),
+    )
+    RuntimeConfig.get().set_tool_loading(agent, WATCH_ALL)
+    r = _runner(client, _settings(agent, tool_loading_enabled=True))
+    try:
+        with caplog.at_level(logging.WARNING, logger="nous.observability.model_calls"):
+            await asyncio.wait_for(r.run_turn("s1", "go"), 10)
+            await writer.drain(5.0)
+        async with db.engine.connect() as conn:
+            calls = (
+                await conn.execute(
+                    text("SELECT count(*) FROM nous_system.model_call_log WHERE agent_id = :a"), {"a": agent}
+                )
+            ).scalar_one()
+        assert calls == 2
+        faults = [m.getMessage() for m in caplog.records if "F120" in m.getMessage()]
+        assert len(faults) == 1 and faults[0].startswith("F120: a tool-loading watch row was not written")
+        assert client.recorder.stats.written == 2 and client.recorder.stats.dropped_error == 0
     finally:
         async with db.engine.begin() as conn:
             await conn.execute(text("DELETE FROM nous_system.model_call_log WHERE agent_id = :a"), {"a": agent})

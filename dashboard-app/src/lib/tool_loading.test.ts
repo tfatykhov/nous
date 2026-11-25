@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   ALREADY_TEXT, CORE_HELP, KINDS_HELP, MODE_HELP, MODE_WORDS, MODEL_CALLS_OFF_TEXT, NOT_REGISTERED_TEXT, OFF_TEXT,
-  SAVED_TEXT, SUBTITLE, SWITCH_WORDS, TOOL_CALLS_OFF_TEXT, WEIGHED_TEXT, WINDOW_OPTIONS,
+  NUMBERS_FAILED_TEXT, SAVED_TEXT, SUBTITLE, SWITCH_WORDS, TOOL_CALLS_OFF_TEXT, USAGE_FAILED_TEXT, WEIGHED_TEXT,
+  WINDOW_OPTIONS,
   changeLoading, draftChanged, draftList, kindLines, lastChangeText, pinnedText, problemLine, readLoading, readPath,
   sourceText, toolNumbersText, totalsText,
   type KindNumbers, type ToolRow,
@@ -38,6 +39,12 @@ describe('tool loading: the words', () => {
     expect(CORE_HELP).toContain('Changes to the core set are saved together with Save');
     expect(KINDS_HELP).toContain('never watched');
     expect(WEIGHED_TEXT).toContain('approximations, not prices');
+    expect(WEIGHED_TEXT).toMatch(/^Only successful calls are counted\./);
+    expect(WEIGHED_TEXT).toContain('A call that did neither is not weighed.');
+    expect(NUMBERS_FAILED_TEXT).toBe(
+      'The numbers could not be read just now. The mode, the kinds of call and the core set can still be changed; Refresh reads them again.',
+    );
+    expect(USAGE_FAILED_TEXT).toBe("The tools' calls could not be read just now; Refresh reads them again.");
     expect(NOT_REGISTERED_TEXT).toMatch(/^Not registered now\./);
     expect(SAVED_TEXT).toBe('Saved. It applies from the next model call.');
     expect(ALREADY_TEXT).toBe('That was already the saved setting.');
@@ -48,15 +55,15 @@ describe('tool loading: the words', () => {
 
   it('a kind of call over the window, in lines', () => {
     expect(kindLines(kind())).toEqual([
-      '12 calls recorded. Each would have left out 95.5 tools on average, about 37,500 tokens, listed by name in about 1,800.',
+      '12 successful calls recorded. Each would have left out 95.5 tools on average, about 37,500 tokens, listed by name in about 1,800.',
       'Weighed, that is worth about 9,000 uncached input tokens a call (9 read the tools from the cache and 2 wrote them).',
       '1 of 4 turns then used a tool that would have been left out.',
     ]);
     expect(kindLines(kind({ saved_per_call: null }))[1]).toBe('No call reported its cache state, so the saving is not weighed.');
     expect(kindLines(kind({ turns_used_left_out: null, calls_used_left_out: null }))).toHaveLength(2);
-    expect(kindLines(kind({ calls: 0 }))).toEqual(['No call recorded in this window.']);
-    expect(kindLines(kind({ calls: 0, on: false }))).toEqual(['Off, and no call recorded in this window.']);
-    expect(kindLines(kind({ calls: 1, turns: 1, turns_used_left_out: 0 }))[0]).toMatch(/^1 call recorded\./);
+    expect(kindLines(kind({ calls: 0 }))).toEqual(['No successful call recorded in this window.']);
+    expect(kindLines(kind({ calls: 0, on: false }))).toEqual(['Off, and no successful call recorded in this window.']);
+    expect(kindLines(kind({ calls: 1, turns: 1, turns_used_left_out: 0 }))[0]).toMatch(/^1 successful call recorded\./);
   });
 
   it('a tool, its numbers and where it comes from', () => {

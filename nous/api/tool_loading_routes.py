@@ -2,17 +2,20 @@
 
 ``GET /dashboard/tool-loading?days=7``: the owner's setting (mode, kinds of call, core set, pinned tools and why, last
 change), whether model calls and tool calls are recorded, per kind of call over the last ``days`` days (1, 7 or 30)
-the calls recorded in Watch only and what they would have saved weighed by each call's cache state, how many turns
-then used a tool that would have been left out, and every registered tool with its calls and sessions in the last 30
-days (every kind of call), its estimated tokens and whether it is kept in full or would be left out. A name in the
-stored core set that is not registered now is listed as such and does nothing.
+the successful calls recorded in Watch only (``nous_system.tool_loading_watch`` joined to each call's own
+``model_call_log`` row) and what they would have saved weighed by each call's cache state, how many turns then used a
+tool that would have been left out, and every registered tool with its calls and sessions in the last 30 days (every
+kind of call), its estimated tokens and whether it is kept in full or would be left out. A name in the stored core set
+that is not registered now is listed as such and does nothing. A failed read of the numbers or of the tools' use
+answers 200 with the setting, that part null and ``numbers_failed`` or ``usage_failed`` true.
 
 ``PUT /dashboard/tool-loading``: ``{mode?, kinds?, core?}``, each field optional and merged into the stored setting:
 ``mode`` ``off`` or ``watch``, ``kinds`` an object of kind to true or false, ``core`` a list of tool names or null for
 the default. A name already in the core set is kept whether registered or not; a name being added must be registered
 now. A pinned tool is always kept in full, whatever the list says. The setting is stored in ``nous_system.config``
 under ``tool_loading:<agent_id>`` with when and by whom (the proof the owner guard accepted), then set on the running
-process, so the next model call reads it. Nothing else is written.
+process, so the next model call reads it. A change that changes nothing is not written, unless the stored value could
+not be read: then it is replaced. Nothing else is written.
 
 Both routes require the owner's or the proxy's secret (``nous/api/owner_guard.py``), checked before anything else. A
 body is at most ``BODY_MAX_BYTES``, a JSON object with strictly typed fields and no other field; a refusal names the
@@ -64,34 +67,38 @@ TOOL_DAYS = 30
 OFF = {"error": "Tool loading is off on this server.", "enabled": False}
 FAILED = "The request could not be processed."
 
+# The watched calls of the window, each joined to its own model-call row (the same agent): only a call that succeeded
+# is counted, and a watch row whose call row is missing is left out.
+_WATCHED = """
+    FROM nous_system.tool_loading_watch w
+    JOIN nous_system.model_call_log m ON m.id = w.call_id AND m.agent_id = w.agent_id
+   WHERE w.agent_id = :agent AND w.started_at >= :since AND m.status = 'ok'
+"""
+_NET = "CAST(w.record->>'deferred_tokens_est' AS bigint) - CAST(w.record->>'index_tokens_est' AS bigint)"
 _CALLS = text(
-    """
-    SELECT tool_loading->>'kind' AS kind,
+    f"""
+    SELECT w.kind,
            count(*) AS calls,
-           count(*) FILTER (WHERE tool_loading->>'cache' = 'read') AS read_calls,
-           count(*) FILTER (WHERE tool_loading->>'cache' = 'written') AS written_calls,
-           coalesce(sum(CAST(tool_loading->>'deferred' AS integer)), 0) AS deferred,
-           coalesce(sum(CAST(tool_loading->>'deferred_tokens_est' AS bigint)), 0) AS deferred_tokens,
-           coalesce(sum(CAST(tool_loading->>'index_tokens_est' AS bigint)), 0) AS index_tokens,
-           coalesce(sum(CAST(tool_loading->>'deferred_tokens_est' AS bigint)
-                        - CAST(tool_loading->>'index_tokens_est' AS bigint))
-                    FILTER (WHERE tool_loading->>'cache' = 'read'), 0) AS read_net,
-           coalesce(sum(CAST(tool_loading->>'deferred_tokens_est' AS bigint)
-                        - CAST(tool_loading->>'index_tokens_est' AS bigint))
-                    FILTER (WHERE tool_loading->>'cache' = 'written'), 0) AS written_net,
-           count(DISTINCT turn_id) AS turns
-      FROM nous_system.model_call_log
-     WHERE agent_id = :agent AND started_at >= :since AND tool_loading IS NOT NULL
+           count(*) FILTER (WHERE w.record->>'cache' = 'read') AS read_calls,
+           count(*) FILTER (WHERE w.record->>'cache' = 'written') AS written_calls,
+           coalesce(sum(CAST(w.record->>'deferred' AS integer)), 0) AS deferred,
+           coalesce(sum(CAST(w.record->>'deferred_tokens_est' AS bigint)), 0) AS deferred_tokens,
+           coalesce(sum(CAST(w.record->>'index_tokens_est' AS bigint)), 0) AS index_tokens,
+           coalesce(sum({_NET}) FILTER (WHERE w.record->>'cache' = 'read'), 0) AS read_net,
+           coalesce(sum({_NET}) FILTER (WHERE w.record->>'cache' = 'written'), 0) AS written_net,
+           count(DISTINCT w.turn_id) AS turns
+    {_WATCHED}
      GROUP BY 1
     """
 )
-# The turns in which a tool the call would have left out (sent, and not kept) was then called.
+# The turns in which a tool the call would have left out (sent, and not kept) was then called. The calls of a turn
+# mostly send the same tools and keep the same names: DISTINCT before the join keeps one row of each.
 _USED = text(
-    """
+    f"""
     WITH watched AS (
-        SELECT turn_id, tool_loading->>'kind' AS kind, tool_names, tool_loading->'kept' AS kept
-          FROM nous_system.model_call_log
-         WHERE agent_id = :agent AND started_at >= :since AND tool_loading IS NOT NULL AND turn_id IS NOT NULL
+        SELECT DISTINCT w.turn_id, w.kind, m.tool_names, w.record->'kept' AS kept
+        {_WATCHED}
+           AND w.turn_id IS NOT NULL
     )
     SELECT w.kind, count(DISTINCT w.turn_id) AS turns, count(DISTINCT t.id) AS calls
       FROM watched w
@@ -344,11 +351,21 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
         try:
             defs = tool_defs()
             kept, left_out = split(defs, config)
-            per_kind = await numbers(days, config)
-            use = await tool_use()
         except Exception as exc:
             logger.warning("F120: reading the tool-loading card failed (%s)", type(exc).__name__)
             return _error(500, FAILED)
+        # A failed read of the numbers or of the tools' use leaves the setting on the card, so it can still be changed.
+        numbers_failed = usage_failed = False
+        try:
+            per_kind = await numbers(days, config)
+        except Exception as exc:
+            logger.warning("F120: reading the tool-loading numbers failed (%s)", type(exc).__name__)
+            per_kind, numbers_failed = None, True
+        try:
+            use = await tool_use()
+        except Exception as exc:
+            logger.warning("F120: reading the tools' use failed (%s)", type(exc).__name__)
+            use, usage_failed = None, True
         return JSONResponse(
             {
                 "enabled": True,
@@ -359,6 +376,8 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
                 },
                 "days": days,
                 "numbers": per_kind,
+                "numbers_failed": numbers_failed,
+                "usage_failed": usage_failed,
                 "totals": {
                     "tools": len(defs),
                     "kept": len(kept),
@@ -390,7 +409,9 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
             except Exception as exc:
                 logger.warning("F120: checking a tool-loading change failed (%s)", type(exc).__name__)
                 return _error(500, FAILED)
-            if (new.mode, new.kinds, new.core) == (current.mode, current.kinds, current.core):
+            # A stored value that could not be read is replaced by any save, even one that changes nothing.
+            unchanged = (new.mode, new.kinds, new.core) == (current.mode, current.kinds, current.core)
+            if unchanged and runtime.tool_loading_problem(agent_id) is None:
                 return JSONResponse({"enabled": True, "changed": False, **setting_view(current, None)})
             try:
                 async with database.session() as session:

@@ -11,6 +11,7 @@ import ast
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -40,7 +41,7 @@ from nous.api.tool_policy import INTERNAL_ONLY_EXTRA_TOOLS
 from nous.api.tools import _INITIATION_ONLY_TOOLS
 from nous.autonomy.tool_guard import HARNESS_TOOLS
 from nous.brain.intentions import AUTHORITY_INTERNAL
-from nous.observability.model_calls import ContextStats, _tool_loading_value
+from nous.observability.model_calls import ContextStats, ModelCallRecorder, cache_state
 
 ROOT = Path(__file__).resolve().parents[1]
 WATCH_ALL = ToolLoadingConfig(mode="watch", kinds=frozenset(KINDS))
@@ -137,24 +138,122 @@ def test_every_tool_a_prompt_names_is_pinned():
     assert not missing, f"a prompt names a tool that is not pinned: {missing}"
 
 
-def test_every_tool_a_harness_step_forces_is_pinned():
-    """The forced tool_choice comes from ``force_tool_on_penultimate``: every string a caller passes or assigns for it
-    is pinned."""
+class _Unreadable(AssertionError):
+    """A forced tool whose name the scan cannot read: it must be made readable (a literal or a module constant)."""
+
+
+def _module_strings(tree: ast.Module) -> dict[str, str]:
+    """A module's top-level ``NAME = "text"`` assignments."""
+    found: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            found.update({t.id: value.value for t in targets if isinstance(t, ast.Name)})
+    return found
+
+
+def _names_of(value: ast.expr, local: dict[str, str], everywhere: dict[str, set[str]], where: str) -> set[str]:
+    """The tool names a forced value can be. None gives none; a name holding ``force_tool`` is passed through (its own
+    assignments and keywords are read where they are made); a constant name is read from its module, else from the one
+    module-level string of that name in nous/. Anything else cannot be read: ``_Unreadable``."""
+    if isinstance(value, ast.Constant):
+        if value.value is None:
+            return set()
+        if isinstance(value.value, str):
+            return {value.value}
+    elif isinstance(value, ast.Name):
+        if "force_tool" in value.id:
+            return set()
+        if value.id in local:
+            return {local[value.id]}
+        if len(everywhere.get(value.id, ())) == 1:
+            return set(everywhere[value.id])
+    elif isinstance(value, ast.IfExp):
+        return _names_of(value.body, local, everywhere, where) | _names_of(value.orelse, local, everywhere, where)
+    elif isinstance(value, ast.BoolOp):
+        return set().union(*(_names_of(v, local, everywhere, where) for v in value.values))
+    raise _Unreadable(f"{where}: cannot read the forced tool {ast.unparse(value)!r}")
+
+
+def _forced_tools(sources: dict[str, str]) -> set[str]:
+    """Every tool name a harness step can force, from ``sources`` (path to source): each ``force_tool_on_penultimate=``
+    keyword, each assignment to a name holding ``force_tool``, and the name of each literal ``{"type": "tool", ...}``
+    tool choice in the runner."""
+    trees = {path: ast.parse(source) for path, source in sources.items()}
+    everywhere: dict[str, set[str]] = {}
+    for tree in trees.values():
+        for name, value in _module_strings(tree).items():
+            everywhere.setdefault(name, set()).add(value)
     forced: set[str] = set()
-    for path in (ROOT / "nous").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, tree in trees.items():
+        local = _module_strings(tree)
         for node in ast.walk(tree):
-            values = []
+            values: list[ast.expr] = []
             if isinstance(node, ast.keyword) and node.arg == "force_tool_on_penultimate":
                 values.append(node.value)
             if isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and "force_tool" in t.id for t in node.targets
             ):
                 values.append(node.value)
+            if path.endswith("runner.py") and isinstance(node, ast.Dict):
+                pairs = {k.value: v for k, v in zip(node.keys, node.values, strict=True) if isinstance(k, ast.Constant)}
+                kind = pairs.get("type")
+                if isinstance(kind, ast.Constant) and kind.value == "tool" and "name" in pairs:
+                    values.append(pairs["name"])
             for value in values:
-                forced |= {c.value for c in ast.walk(value) if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                forced |= _names_of(value, local, everywhere, f"{path}:{getattr(node, 'lineno', '?')}")
+    return forced
+
+
+def test_every_tool_a_harness_step_forces_is_pinned():
+    """The forced tool_choice comes from ``force_tool_on_penultimate`` and the runner's own tool-choice dict: every name
+    a caller can force is read from the code (a value that cannot be read fails) and is pinned."""
+    sources = {
+        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8") for path in (ROOT / "nous").rglob("*.py")
+    }
+    forced = _forced_tools(sources)
     assert "submit_final_report" in forced  # the scan reaches the subtask executor
-    assert forced <= set(PINNED)
+    assert forced <= set(PINNED), forced - set(PINNED)
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ('X = "a_report"\nf(force_tool_on_penultimate=X)', {"a_report"}),
+        ("f(force_tool_on_penultimate=None)", set()),
+        ('force_tool = "b_report" if on else None', {"b_report"}),
+        ("f(force_tool_on_penultimate=force_tool)", set()),  # passed through: read where it is assigned
+    ],
+)
+def test_the_forced_tool_scan_reads_literals_constants_and_pass_throughs(source, expected):
+    assert _forced_tools({"nous/x.py": source}) == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "f(force_tool_on_penultimate=NEW_REPORT_TOOL)",  # a name with no string behind it
+        "f(force_tool_on_penultimate=settings.report_tool)",
+        'f(force_tool_on_penultimate=pick("a"))',
+        "force_tool = choose()",
+    ],
+)
+def test_a_forced_value_the_scan_cannot_read_fails(source):
+    with pytest.raises(_Unreadable):
+        _forced_tools({"nous/x.py": source})
+
+
+def test_a_literal_tool_choice_in_the_runner_is_read():
+    runner = 'tool_choice_arg = {"type": "tool", "name": "c_report"}'
+    assert _forced_tools({"nous/api/runner.py": runner}) == {"c_report"}
+    with pytest.raises(_Unreadable):
+        _forced_tools({"nous/api/runner.py": 'tool_choice_arg = {"type": "tool", "name": other.name}'})
 
 
 def test_the_default_core_set_is_registered_tool_names():
@@ -222,14 +321,49 @@ def test_no_record_unless_watch_only_for_a_switched_on_kind(config, kind, tools)
     assert call_record(config, kind, tools) is None
 
 
-def test_the_cache_state_is_set_from_the_calls_usage():
-    stats = ContextStats({"tools_definition": 1000}, 0, 0, 0.0, [], 1, ["bash"], 0, {}, tool_loading={"kind": "chat"})
-    assert _tool_loading_value(stats, {"cache_read_input_tokens": 1000})["cache"] == "read"
-    assert _tool_loading_value(stats, {"cache_read_input_tokens": 999})["cache"] == "written"
-    assert _tool_loading_value(stats, {"cache_read_input_tokens": 0})["cache"] == "written"
-    assert _tool_loading_value(stats, {})["cache"] is None  # no usage: not weighed
-    bare = ContextStats({"tools_definition": 1000}, 0, 0, 0.0, [], 1, ["bash"], 0, {})
-    assert _tool_loading_value(bare, {"cache_read_input_tokens": 1000}) is None
+@pytest.mark.parametrize(
+    ("usage", "state"),
+    [
+        ({"cache_read_input_tokens": 1, "cache_creation_input_tokens": 0}, "read"),
+        ({"cache_read_input_tokens": 52000, "cache_creation_input_tokens": 900}, "read"),  # the tools lead the prefix
+        ({"cache_read_input_tokens": 0, "cache_creation_input_tokens": 46000}, "written"),
+        ({"cache_creation_input_tokens": 46000}, "written"),
+        ({"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}, None),  # neither: not weighed
+        ({"input_tokens": 90000}, None),
+        ({}, None),
+    ],
+)
+def test_the_cache_state_is_the_calls_own_usage(usage, state):
+    assert cache_state(usage) == state
+
+
+def _stats(record: dict | None) -> ContextStats:
+    return ContextStats({"tools_definition": 1000}, 0, 0, 0.0, [], 1, ["bash"], 0, {}, tool_loading=record)
+
+
+def test_the_watch_row_carries_the_call_the_kind_the_model_and_the_cache_state():
+    recorder = ModelCallRecorder(SimpleNamespace(), None, "a", SimpleNamespace())
+    call_id, turn_id, started = uuid4(), uuid4(), object()
+    params = {"id": call_id, "agent_id": "a", "started_at": started, "turn_id": turn_id, "model": "claude-x"}
+    row = recorder._watch_row(params, _stats({"kind": "chat", "deferred": 3}), {"cache_creation_input_tokens": 5})
+    assert {k: row[k] for k in ("call_id", "agent_id", "started_at", "turn_id", "kind")} == {
+        "call_id": call_id,
+        "agent_id": "a",
+        "started_at": started,
+        "turn_id": turn_id,
+        "kind": "chat",
+    }
+    assert json.loads(row["record"]) == {"kind": "chat", "deferred": 3, "model": "claude-x", "cache": "written"}
+
+
+def test_a_watch_row_that_cannot_be_built_is_none_and_logged_once(caplog):
+    recorder = ModelCallRecorder(SimpleNamespace(), None, "a", SimpleNamespace())
+    with caplog.at_level("WARNING", logger="nous.observability.model_calls"):
+        assert recorder._watch_row({}, _stats({"kind": "chat"}), {}) is None  # no id
+        assert recorder._watch_row({"id": 1}, _stats({}), {}) is None  # no kind
+    assert [r.getMessage() for r in caplog.records if "F120" in r.getMessage()] == [
+        "F120: a tool-loading watch row was not written (KeyError); model calls are recorded as before"
+    ]
 
 
 # ---- the list of names (its size only) -----------------------------------------------------------------------------

@@ -74,6 +74,10 @@ export interface LoadingAnswer extends Partial<Setting> {
   days?: number;
   /** Null while model calls are not recorded. */
   numbers?: KindNumbers[] | null;
+  /** The numbers could not be read now (`numbers` is null); the setting can still be changed. */
+  numbers_failed?: boolean;
+  /** The tools' use could not be read now (their counts are null). */
+  usage_failed?: boolean;
   totals?: Totals;
   tools?: ToolRow[];
 }
@@ -117,7 +121,10 @@ export const SAVES_AT_ONCE_TEXT = 'The mode and each kind of call are saved when
 export const NUMBERS_TITLE = 'What it would have saved';
 export const WINDOW_OPTIONS = WINDOWS.map((d) => ({ value: String(d), label: d === 1 ? 'Last day' : `Last ${d} days` }));
 export const WEIGHED_TEXT =
-  "Each call is weighed by its own cache state: a token read from the cache counts as about a tenth of an uncached input token, and one written to it as about 1.25. These are approximations, not prices.";
+  "Only successful calls are counted. Each call is weighed by its own cache state: a call that read from the cache read its tools too (they come first), and a token read counts as about a tenth of an uncached input token; a call that read nothing and wrote to the cache wrote them, at about 1.25. A call that did neither is not weighed. These are approximations, not prices.";
+export const NUMBERS_FAILED_TEXT =
+  'The numbers could not be read just now. The mode, the kinds of call and the core set can still be changed; Refresh reads them again.';
+export const USAGE_FAILED_TEXT = "The tools' calls could not be read just now; Refresh reads them again.";
 export const MODEL_CALLS_OFF_TEXT =
   'Model calls are not recorded on this server (NOUS_MODEL_CALL_LOG_ENABLED), so Watch only records nothing.';
 export const TOOL_CALLS_OFF_TEXT =
@@ -159,9 +166,11 @@ export function totalsText(t: Totals): string {
 
 /** A kind of call's numbers over the window, as lines. */
 export function kindLines(k: KindNumbers): string[] {
-  if (k.calls === 0) return [k.on ? 'No call recorded in this window.' : 'Off, and no call recorded in this window.'];
+  if (k.calls === 0) {
+    return [k.on ? 'No successful call recorded in this window.' : 'Off, and no successful call recorded in this window.'];
+  }
   const lines = [
-    `${n(k.calls)} ${k.calls === 1 ? 'call' : 'calls'} recorded. Each would have left out ${n(k.deferred_avg)} tools on average, about ${n(k.deferred_tokens_avg)} tokens, listed by name in about ${n(k.index_tokens_avg)}.`,
+    `${n(k.calls)} successful ${k.calls === 1 ? 'call' : 'calls'} recorded. Each would have left out ${n(k.deferred_avg)} tools on average, about ${n(k.deferred_tokens_avg)} tokens, listed by name in about ${n(k.index_tokens_avg)}.`,
   ];
   if (k.saved_per_call === null) {
     lines.push('No call reported its cache state, so the saving is not weighed.');

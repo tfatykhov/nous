@@ -106,7 +106,7 @@ async def test_sweep_deletes_old_calls_and_cascades_attempts(db):
         deleted = await sweep_model_calls(db, mine, 30)
 
         # The old call and the old minute bucket go; the call's attempts go with it.
-        assert deleted == {"model_call_log": 2}
+        assert deleted == {"model_call_log": 2, "tool_loading_watch": 0}
         assert await _call_ages(db, mine) == [29]
         assert await _attempt_counts(db, old, new, old_bucket) == [0, 1, 0]
         # Another agent's old rows survive: its own process sweeps them, by its own retention.
@@ -114,6 +114,56 @@ async def test_sweep_deletes_old_calls_and_cascades_attempts(db):
         assert await _attempt_counts(db, theirs) == [1]
     finally:
         await _delete_calls(db, mine, other)
+
+
+async def _insert_watch(db, agent: str, call_id: uuid.UUID, days_ago: int) -> None:
+    """F120: the tool-loading watch row of ``call_id``, started ``days_ago`` days ago."""
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.tool_loading_watch (call_id, agent_id, started_at, kind, record) "
+                "VALUES (:c, :a, now() - make_interval(days => :d), 'chat', '{}'::jsonb)"
+            ),
+            {"c": call_id, "a": agent, "d": days_ago},
+        )
+
+
+async def _watch_ages(db, agent: str) -> list[int]:
+    async with db.engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT extract(day FROM now() - started_at)::int FROM nous_system.tool_loading_watch "
+                "WHERE agent_id = :a ORDER BY started_at"
+            ),
+            {"a": agent},
+        )
+        return [row[0] for row in result]
+
+
+@pytest.mark.postgres_only
+async def test_sweep_deletes_the_tool_loading_watch_rows_of_the_same_age(db):
+    """F120: a watched call's row goes with its call, by the same agent and age; another agent's rows stay."""
+    mine, other = _agent(), _agent()
+    try:
+        old = await _insert_call(db, mine, 31, attempts=0)
+        new = await _insert_call(db, mine, 29, attempts=0)
+        theirs = await _insert_call(db, other, 31, attempts=0)
+        await _insert_watch(db, mine, old, 31)
+        await _insert_watch(db, mine, new, 29)
+        await _insert_watch(db, mine, uuid.uuid4(), 40)  # a watch row whose call row is gone is swept too
+        await _insert_watch(db, other, theirs, 31)
+
+        deleted = await sweep_model_calls(db, mine, 30)
+
+        assert deleted == {"model_call_log": 1, "tool_loading_watch": 2}
+        assert await _call_ages(db, mine) == [29] and await _watch_ages(db, mine) == [29]
+        assert await _watch_ages(db, other) == [31]
+    finally:
+        await _delete_calls(db, mine, other)
+        async with db.engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM nous_system.tool_loading_watch WHERE agent_id = ANY(:a)"), {"a": [mine, other]}
+            )
 
 
 @pytest.mark.parametrize("days", [0, -1])
@@ -187,15 +237,17 @@ async def _one_startup_pass(settings: SimpleNamespace, database: _Database) -> N
 
 
 _TOOL_TABLES = [("tool_call_log", 30), ("agent_turn_log", 30)]
+# The model-call sweep deletes the calls and, in the same transaction, their F120 watch rows of the same age.
+_MODEL_TABLES = [("model_call_log", 7), ("tool_loading_watch", 7)]
 
 
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [
-        ({}, [*_TOOL_TABLES, ("model_call_log", 7)]),
+        ({}, [*_TOOL_TABLES, *_MODEL_TABLES]),
         ({"model_call_log_enabled": False}, _TOOL_TABLES),
-        ({"tool_call_log_enabled": False}, [("model_call_log", 7)]),
-        ({"tool_call_retention_days": 0}, [("model_call_log", 7)]),
+        ({"tool_call_log_enabled": False}, _MODEL_TABLES),
+        ({"tool_call_retention_days": 0}, _MODEL_TABLES),
         ({"model_call_retention_days": 0}, _TOOL_TABLES),
     ],
     ids=["both logs", "tool log only", "model log only", "tool retention 0", "model retention 0"],
@@ -216,7 +268,7 @@ def test_the_loop_sweeps_each_log_by_its_own_switch_and_retention(monkeypatch, c
     ("down", "message", "still_swept"),
     [
         ("model_call_log", "F108: model-call retention sweep failed", _TOOL_TABLES),
-        ("tool_call_log", "F108: tool-call retention sweep failed", [("model_call_log", 7)]),
+        ("tool_call_log", "F108: tool-call retention sweep failed", _MODEL_TABLES),
     ],
     ids=["model sweep fails", "tool sweep fails"],
 )
