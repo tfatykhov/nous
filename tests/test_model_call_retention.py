@@ -594,3 +594,33 @@ def test_the_model_call_setting_rows_say_what_reads_them():
         row = next(line for line in doc.splitlines() if line.startswith(f"| `{name}` |"))
         assert "Nothing reads" not in row, name
         assert "sweep_model_calls" in row or "set_recorder" in row, name
+
+
+async def test_a_failed_watch_delete_never_keeps_the_model_call_rows(caplog):
+    """The watch rows are deleted in a transaction of their own: when that fails, the model-call rows are still
+    deleted and committed, and the fault is logged."""
+    from nous.observability import work_view_retention as retention
+
+    done: list[str] = []
+
+    class _Session:
+        async def execute(self, statement, params):
+            if statement is retention._DELETE_WATCH_ROWS:
+                raise RuntimeError("no such table")
+            done.append("deleted calls")
+            return SimpleNamespace(rowcount=3)
+
+        async def commit(self):
+            done.append("commit")
+
+    class _Database:
+        @contextlib.asynccontextmanager
+        async def session(self):
+            yield _Session()
+
+    with caplog.at_level(logging.WARNING, logger=retention.logger.name):
+        deleted = await sweep_model_calls(_Database(), "agent-x", 30)
+
+    assert deleted == {"model_call_log": 3, "tool_loading_watch": 0}
+    assert done == ["deleted calls", "commit"]
+    assert "watch rows failed" in caplog.text
