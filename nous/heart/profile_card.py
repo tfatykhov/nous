@@ -275,14 +275,16 @@ def settle_entries(
     rejected: list[str],
     max_entries: int,
     max_tokens: int,
+    *,
+    max_cites: int = MAX_CITES,
 ) -> tuple[list[dict] | None, dict[str, int]]:
     """Check the model's entries against the source set; None means keep the old card (fail closed).
 
-    In order: drop an entry with no text, a line over ``LINE_CHARS`` or a citation outside the source set
-    (``dropped``); drop a rejected line (``rejected_dropped``) and a repeat of a kept line; fail closed when no entry
-    is left or more than half were ``dropped``; add a line (the fact's text cut to ``LINE_CHARS``) for each pinned
-    fact no entry cites (``pinned_added``); drop whole lines from the end, unpinned first, until the card fits
-    (``trimmed``).
+    In order: drop an entry with no text, a line over ``LINE_CHARS``, more than ``max_cites`` citations or a citation
+    outside the source set (``dropped``); drop a rejected line (``rejected_dropped``) and a repeat of a kept line;
+    fail closed when no entry is left or more than half were ``dropped``; add a line (the fact's text cut to
+    ``LINE_CHARS``) for each pinned fact no entry cites (``pinned_added``); drop whole lines from the end, unpinned
+    first, until the card fits (``trimmed``).
     """
     counts = {"dropped": 0, "rejected_dropped": 0, "pinned_added": 0, "trimmed": 0}
     if not isinstance(raw, list) or not raw:
@@ -295,7 +297,7 @@ def settle_entries(
         item = item if isinstance(item, dict) else {}
         text = _one_line(item["text"]) if isinstance(item.get("text"), str) else ""
         cited = item.get("fact_ids")
-        resolved = [_resolve(c, ids) for c in cited] if isinstance(cited, list) and 1 <= len(cited) <= MAX_CITES else []
+        resolved = [_resolve(c, ids) for c in cited] if isinstance(cited, list) and 1 <= len(cited) <= max_cites else []
         if not text or len(text) > LINE_CHARS or not resolved or None in resolved:
             counts["dropped"] += 1
             continue

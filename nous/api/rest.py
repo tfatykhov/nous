@@ -881,6 +881,87 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse(result)
 
+    # ------------------------------------------------------------------
+    # Entity profiles (F119: written by the last sleep phase, in shadow; the owner reads them or rebuilds one)
+    # ------------------------------------------------------------------
+
+    def _entity_profile_store():
+        from nous.heart.entity_profile import EntityProfileStore
+
+        return EntityProfileStore(database, settings.agent_id)
+
+    async def list_entity_profiles(request: Request) -> JSONResponse:
+        """GET /entity-profiles — every profile with its status and size, and per key the active facts that name it
+        in their text without carrying it as an entity key (``unkeyed_mentions``, approximate)."""
+        try:
+            store = _entity_profile_store()
+            rows = await store.list()
+            unkeyed = await store.unkeyed_mentions([row["key"] for row in rows])
+        except Exception as e:
+            logger.error("list_entity_profiles failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        fields = ("key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at")
+        profiles = [
+            {**{k: row[k] for k in fields}, "lines": len(row["lines"]), "unkeyed_mentions": unkeyed.get(row["key"], 0)}
+            for row in rows
+        ]
+        return JSONResponse({"writer_enabled": settings.entity_profile_writer_enabled, "profiles": profiles})
+
+    async def get_entity_profile(request: Request) -> JSONResponse:
+        """GET /entity-profiles/{key} — one profile: its dated lines with the fact ids each cites, and the rejected
+        lines."""
+        from nous.heart.keys import normalize_key
+
+        key = normalize_key(request.path_params["key"])
+        try:
+            row = await _entity_profile_store().get(key) if key else None
+        except Exception as e:
+            logger.error("get_entity_profile failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if row is None or not row["active"]:
+            return JSONResponse({"error": "no profile for this key"}, status_code=404)
+        fields = (
+            "key", "display_name", "kind", "status", "lines", "rejected", "fact_count", "source_count", "tokens",
+            "written_at",
+        )  # fmt: skip
+        return JSONResponse({k: row[k] for k in fields})
+
+    async def rebuild_entity_profile(request: Request) -> JSONResponse:
+        """POST /entity-profiles/rebuild — write one entity's profile now (body ``{"key": ...}``); 409 when the writer
+        is off, asleep or running, 400 without a key, 404 when no active fact carries the key, 429 when the day's
+        model calls are used."""
+        from nous.heart.keys import normalize_key
+
+        try:
+            # sleep_handler is a lazy proxy in prod: reading it raises RuntimeError while the component is unset.
+            writer = getattr(sleep_handler, "_entity_profile_writer", None) if sleep_handler else None
+            running = writer is not None and (sleep_handler.is_sleeping or writer.busy)
+        except (RuntimeError, AttributeError):
+            writer, running = None, False
+        if writer is None:
+            return JSONResponse({"error": "the entity profile writer is off"}, status_code=409)
+        if running:
+            return JSONResponse({"error": "a sleep cycle or another rebuild is running"}, status_code=409)
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        raw = body.get("key") if isinstance(body, dict) else None
+        key = normalize_key(raw) if isinstance(raw, str) else None
+        if not key:
+            return JSONResponse({"error": "key is required: one entity key"}, status_code=400)
+        try:
+            result = await writer.rebuild(key)
+        except Exception as e:
+            logger.error("rebuild_entity_profile failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if result.get("outcome") == "no_facts":
+            return JSONResponse({"error": "no active fact carries this key", **result}, status_code=404)
+        if result.get("outcome") == "at_limit":
+            refused = {"error": "the day's model calls for entity profiles are used", **result}
+            return JSONResponse(refused, status_code=429)
+        return JSONResponse(result)
+
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
 
@@ -4149,6 +4230,9 @@ def create_app(
         Route("/profile-card", get_profile_card),
         owner_guard.route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
         owner_guard.route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
+        Route("/entity-profiles", list_entity_profiles),
+        owner_guard.route("/entity-profiles/rebuild", rebuild_entity_profile, methods=["POST"]),
+        Route("/entity-profiles/{key}", get_entity_profile),
         owner_guard.route("/facts/{fact_id}", update_fact, methods=["PUT"]),
         owner_guard.route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),

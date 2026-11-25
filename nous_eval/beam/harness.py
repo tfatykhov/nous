@@ -262,6 +262,10 @@ async def open_stack(
                 from nous.heart.profile_card import ProfileCardWriter
 
                 sleep_handler._profile_card_writer = ProfileCardWriter(db, settings, llm)
+            if settings.entity_profile_writer_enabled:  # main.py: entity profiles are written in the last sleep phase
+                from nous.heart.entity_profile import EntityProfileWriter
+
+                sleep_handler._entity_profile_writer = EntityProfileWriter(db, settings, llm)
 
         async with db.session() as s:
             columns = set(

@@ -61,6 +61,7 @@ PURPOSES: frozenset[str] = frozenset(
         "fact_dedup",  # the write-time dedup tiebreaker (FactManager.is_distinct_fact)
         "actionability",
         "profile_card",
+        "entity_profile",  # F119: one entity's profile in the sleep phase (EntityProfileWriter)
         "episode_summarizer",
         "fact_extractor",
         "knowledge_extractor",

@@ -720,6 +720,21 @@ async def test_sleep_stack_wires_the_profile_card_writer_behind_its_flag(db, fla
 
 
 @pytest.mark.postgres_only
+@pytest.mark.parametrize(("flag", "wired"), [("true", True), ("false", False)])
+async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, flag: str, wired: bool) -> None:
+    """As main.py does: with sleep on, the entity profile writer is injected exactly when its flag is on."""
+    from conftest import MockEmbeddingProvider
+
+    from nous.heart.entity_profile import EntityProfileWriter
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    settings = arms.build_settings(db_url, "beam-entity-profile-check", {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": flag})
+    async with harness.open_stack(settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), sleep=True) as stack:
+        writer = stack.sleep_handler._entity_profile_writer
+    assert isinstance(writer, EntityProfileWriter) is wired
+
+
+@pytest.mark.postgres_only
 async def test_stack_publishes_the_arms_fusion_settings_for_its_lifetime(db, monkeypatch: pytest.MonkeyPatch) -> None:
     """hybrid search re-reads NOUS_RRF_K and friends from the environment per query."""
     from conftest import MockEmbeddingProvider

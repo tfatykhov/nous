@@ -404,6 +404,7 @@ class SleepHandler:
         self._tool_notes = None  # Tool notes review (F108 Phase 3): set externally if enabled
         self._job_fixer = None  # Job fixes: set externally if enabled
         self._profile_card_writer = None  # Profile card: set externally if enabled
+        self._entity_profile_writer = None  # Entity profiles (F119): set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
         self._episode_summarizer = None  # F060: Set externally if enabled
@@ -842,6 +843,22 @@ class SleepHandler:
                 )
                 if success:
                     phases_completed.append("evolve_rubric")
+
+            # Optional: registered only when the entity profile writer is wired. Last: its model calls come after every
+            # other phase, and it sees the facts this sleep merged or retired.
+            if not self._interrupted and self._entity_profile_writer is not None:
+                success = await self._run_phase(
+                    "entity_profile",
+                    lambda: self._run_audited_phase(
+                        "entity_profile",
+                        "rewrite",
+                        lambda: self._phase_entity_profile(sleep_stats),
+                        sleep_stats,
+                        ("entity_profiles_rewritten",),
+                    ),
+                )
+                if success:
+                    phases_completed.append("entity_profile")
 
             await self._bus.emit(
                 Event(
@@ -3111,6 +3128,34 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("Profile card phase failed", exc_info=True)
+            return False
+
+    async def _phase_entity_profile(self, sleep_stats: dict) -> bool:
+        """Write the profiles of the entities whose facts changed (at most the day's remaining model calls)."""
+        if self._entity_profile_writer is None:
+            logger.debug("Sleep phase: entity_profile (no writer configured)")
+            return True
+        try:
+            stats = await self._entity_profile_writer.run_sleep(interrupted=lambda: self._interrupted)
+            # The profiles written are the one memory change, so they are the one top-level int the audit sums.
+            sleep_stats["entity_profiles_rewritten"] = stats.get("written", 0)
+            keys = (
+                "candidates", "asked", "written", "not_entity", "owner", "failed_closed", "unchanged",
+                "skipped_cap", "inactive", "errors", "dropped", "inferred_dropped", "dead_dropped", "trimmed",
+            )  # fmt: skip
+            counts = {key: stats.get(key, 0) for key in keys}
+            # Nested, not flat ints: the consolidation audit sums every top-level int.
+            sleep_stats["entity_profile"] = {"outcome": stats.get("outcome", ""), **counts}
+            logger.info(
+                "Sleep entity profiles: %s, %d candidates, %d asked, %d written, %d not_entity, %d owner, "
+                "%d failed_closed, %d unchanged, %d skipped_cap, %d inactive, %d errors, %d dropped, "
+                "%d inferred_dropped, %d dead_dropped, %d trimmed",
+                stats.get("outcome", ""),
+                *counts.values(),
+            )
+            return True
+        except Exception:
+            logger.warning("Entity profile phase failed", exc_info=True)
             return False
 
     async def _phase_job_fixes(self, sleep_stats: dict) -> bool:

@@ -70,6 +70,10 @@ ARM_SETTINGS = frozenset(
         "profile_intent_leg_limit", "profile_intent_leg_budget", "profile_intent_leg_min_score",
         "profile_card_writer_enabled", "profile_card_enabled", "profile_card_max_tokens", "profile_card_max_entries",
         "profile_card_source_limit", "profile_card_episodes",
+        # entity profiles (F119)
+        "entity_profile_writer_enabled", "entity_profile_min_facts", "entity_profile_max_profiles",
+        "entity_profile_max_calls_per_day", "entity_profile_max_lines", "entity_profile_max_tokens",
+        "entity_profile_source_limit", "entity_profile_owner_keys",
         # extraction, admission, supersession
         "transcript_max_chars", "transcript_message_max_chars", "episode_summary_max_chunks",
         "episode_summary_max_tokens", "episode_seed_summary_chars", "episode_min_content_length",
