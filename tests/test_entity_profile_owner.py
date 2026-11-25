@@ -16,7 +16,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import event, select, update
+from sqlalchemy.orm import Session
 from test_entity_profile import (
     FakeLLM,
     _a_day_later,
@@ -35,7 +36,13 @@ from test_entity_profile import (
     _stored_line,
     _writer,
 )
+from test_entity_profile_use import _build as _turn
+from test_entity_profile_use import _engine, _section
+from test_entity_profile_use import _facts as _turn_facts
+from test_entity_profile_use import _line as _turn_line
+from test_entity_profile_use import _profile as _turn_profile
 
+from nous.heart import entity_profile as ep
 from nous.heart.entity_profile import (
     LIST_OFFSET_MAX,
     PREVIOUS_CAP,
@@ -870,6 +877,166 @@ async def test_an_offset_past_any_table_is_clamped(db):
     answer = await _call(app, "GET", "/entity-profiles?offset=99999999999999999999")
     assert answer.status_code == 200
     assert (answer.json()["profiles"], answer.json()["offset"]) == ([], LIST_OFFSET_MAX)
+
+
+# ---------------------------------------------------------------------------
+# The owner's corrections reach turns at once (with F119 PR 3's turn-time reads and its cached vocabulary)
+# ---------------------------------------------------------------------------
+
+
+async def _quillon(db, agent: str) -> tuple[dict, dict]:
+    """Two facts of "quillon" and its committed profile, one line on each; the two lines."""
+    f1, f2 = await _turn_facts(db, agent, "quillon keeps bees", "quillon sails")
+    l1, l2 = _turn_line("Quillon keeps bees.", f1), _turn_line("Quillon sails.", f2)
+    await _turn_profile(db, agent, "quillon", l1, l2, name="Quillon", kind="person")
+    return l1, l2
+
+
+def _cached(agent: str) -> frozenset[str] | None:
+    entry = ep._vocab_cache.get(agent)
+    return entry[0] if entry is not None else None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("change", ["removed", "not_entity"])
+async def test_a_profile_removed_or_called_not_an_entity_is_not_shown_on_the_next_turn(
+    db, mock_embeddings, settings, change
+):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, "on")
+    try:
+        await _quillon(db, s.agent_id)
+        assert _section(await _turn(engine, s, "how is quillon?")) is not None
+        store = EntityProfileStore(db, s.agent_id)
+        if change == "removed":
+            assert await store.set_active("quillon", False) is True
+        else:
+            assert await store.set_owner_verdict("quillon", True, "owner") is True
+        # The cached keys still hold it (nothing cleared them): the turn's own read leaves it out.
+        assert "quillon" in _cached(s.agent_id)
+        result = await _turn(engine, s, "how is quillon?")
+        assert _section(result) is None and result.entity_profiles["matched"] == ["quillon"]
+    finally:
+        await heart.close()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("change", ["restored", "taken_back"])
+async def test_a_profile_restored_or_taken_back_is_shown_on_the_next_turn(db, mock_embeddings, settings, change):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, "on")
+    try:
+        await _quillon(db, s.agent_id)
+        store = EntityProfileStore(db, s.agent_id)
+        if change == "restored":
+            await store.set_active("quillon", False)
+        else:
+            await store.set_owner_verdict("quillon", True, "owner")
+        ep.invalidate_profiled_vocabulary(s.agent_id)
+        assert _section(await _turn(engine, s, "how is quillon?")) is None
+        assert "quillon" not in _cached(s.agent_id)  # cached without it
+
+        if change == "restored":
+            assert await store.set_active("quillon", True) is True
+        else:
+            assert await store.set_owner_verdict("quillon", False, None) is True
+        content = _section(await _turn(engine, s, "how is quillon?")).content
+        assert "Quillon keeps bees." in content and "Quillon sails." in content
+    finally:
+        await heart.close()
+
+
+@pytest.mark.postgres_only
+async def test_a_line_removed_is_not_shown_on_the_next_turn_and_a_line_put_back_is(db, mock_embeddings, settings):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, "on")
+    try:
+        l1, l2 = await _quillon(db, s.agent_id)
+        store = EntityProfileStore(db, s.agent_id)
+        assert "Quillon keeps bees." in _section(await _turn(engine, s, "quillon")).content
+
+        assert await store.remove_line("quillon", l1["id"], "owner") is True
+        content = _section(await _turn(engine, s, "quillon")).content
+        assert "Quillon keeps bees." not in content and "Quillon sails." in content
+
+        # Its last line: the profile has no live line left, and the key leaves the vocabulary.
+        assert await store.remove_line("quillon", l2["id"], "owner") is True
+        assert _section(await _turn(engine, s, "quillon")) is None
+        assert "quillon" not in _cached(s.agent_id)
+
+        # A line put back: the key is back in the vocabulary, and the line is shown on the very next turn.
+        assert await store.restore_line("quillon", l2["id"]) == "restored"
+        content = _section(await _turn(engine, s, "quillon")).content
+        assert "Quillon sails." in content and "Quillon keeps bees." not in content
+    finally:
+        await heart.close()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("action", ["restore", "take_back", "remove_line", "restore_line", "write", "left_alone"])
+async def test_the_cached_keys_are_cleared_after_the_commit_never_before(db, monkeypatch, action):
+    agent = _agent()
+    try:
+        l1, _l2 = await _quillon(db, agent)
+        store = EntityProfileStore(db, agent)
+        if action == "restore":
+            await store.set_active("quillon", False)
+        elif action in ("take_back", "left_alone"):
+            await store.set_owner_verdict("quillon", True, "owner")
+        elif action == "restore_line":
+            await store.remove_line("quillon", l1["id"], "owner")
+        order: list[str] = []
+        clear = ep.invalidate_profiled_vocabulary
+
+        def _clear(agent_id: str) -> None:
+            order.append("clear")
+            clear(agent_id)
+
+        def _commit(_session) -> None:
+            order.append("commit")
+
+        monkeypatch.setattr(ep, "invalidate_profiled_vocabulary", _clear)
+        event.listen(Session, "before_commit", _commit)
+        try:
+            if action == "restore":
+                await store.set_active("quillon", True)
+            elif action == "take_back":
+                await store.set_owner_verdict("quillon", False, None)
+            elif action == "remove_line":
+                await store.remove_line("quillon", l1["id"], "owner")
+            elif action == "restore_line":
+                await store.restore_line("quillon", l1["id"])
+            else:
+                written = await store.write(
+                    "quillon", "profile", "h2", fact_count=2, source_count=2, lines=[], display_name="Quillon"
+                )
+                assert (written is None) is (action == "left_alone")
+        finally:
+            event.remove(Session, "before_commit", _commit)
+        # Cleared once the change is committed; a write that left the row alone clears nothing.
+        assert order == (["commit"] if action == "left_alone" else ["commit", "clear"])
+    finally:
+        await _purge(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_savepoint_or_a_rollback_clears_nothing(db, monkeypatch):
+    agent = _agent()
+    try:
+        await _quillon(db, agent)
+        store = EntityProfileStore(db, agent)
+        await store.set_active("quillon", False)
+        cleared: list[str] = []
+        monkeypatch.setattr(ep, "invalidate_profiled_vocabulary", cleared.append)
+        async with db.session() as s:
+            async with s.begin_nested():
+                await store.set_active("quillon", True, session=s)
+            assert cleared == []  # a savepoint's release is not the commit
+            await s.rollback()
+        assert cleared == []
+        async with db.session() as s:
+            await store.set_active("quillon", True, session=s)
+            await s.commit()
+        assert cleared == [agent]
+    finally:
+        await _purge(db, agent)
 
 
 # ---------------------------------------------------------------------------

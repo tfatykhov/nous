@@ -510,7 +510,8 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "Run the entity profile sleep phase and allow POST /entity-profiles/rebuild (on by default; false "
-            "switches both off). Shadow: profiles are readable on GET /entity-profiles and never sent to the model."
+            "switches both off). Profiles are readable on GET /entity-profiles and reach a turn only with "
+            "NOUS_ENTITY_PROFILE_USE."
         ),
     )
     entity_profile_min_facts: int = Field(

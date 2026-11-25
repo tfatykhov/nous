@@ -116,7 +116,7 @@ export const rebuild = (key: string) => apiRequest<RebuildAnswer>(REBUILD_PATH, 
 
 export const TAB_LABEL = 'Profiles';
 export const INTRO_TEXT =
-  'A short, dated profile of each person, place or thing the facts talk about, written while Nous sleeps. Each line cites the facts it comes from. Profiles are not used in replies yet.';
+  'A short, dated profile of each person, place or thing the facts talk about, written while Nous sleeps. Each line cites the facts it comes from. With NOUS_ENTITY_PROFILE_USE on, a turn that names one gets its profile, and each correction here applies from the next turn.';
 export const WRITER_OFF_TEXT =
   'The profile writer is off on this server (NOUS_ENTITY_PROFILE_WRITER_ENABLED=false): no profile is written while Nous sleeps, and Write it again now is refused. The profiles already written are shown.';
 export const EMPTY_TEXT = 'No profiles yet. They are written while Nous sleeps.';

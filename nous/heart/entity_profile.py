@@ -42,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import case, event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
@@ -111,11 +111,13 @@ TURN_MAX_TOKENS = 400
 RECORD_MATCHED_MAX = 20
 # The characters of a message extract_entity_candidates reads (nous/heart/keys.py).
 MATCH_CHARS = 1000
-# The keys a turn can match, cached per agent in this process. Profiles change only when a writer writes: this
-# process's writer clears the agent's entry on every write (``invalidate_profiled_vocabulary``), so its changes are seen
-# on the next turn. A write by another process cannot clear it, so an entry lives at most 300 seconds, as the
-# entity-key vocabulary's does (nous/heart/facts.py). A key whose last live line died since it was cached costs one
-# read that shows nothing: the turn's read checks every line again.
+# The keys a turn can match, cached per agent in this process. Once a change is committed, this process clears the
+# agent's entry (``invalidate_profiled_vocabulary``, through ``_invalidate_after_commit``) wherever the vocabulary can
+# gain a key or lose one by its lines: every write of a profile, and the owner's restore of a profile, take-back of "not
+# an entity", removal or putting back of a line. So its changes are seen on the next turn. A key can leave it without a
+# clear (the owner removes the profile or calls it not an entity): the turn's own read checks ``active``, the status,
+# the owner's verdict and every line again, so such a key is never shown and costs one read. A write by another process
+# cannot clear the entry, so it lives at most 300 seconds, as the entity-key vocabulary's does (nous/heart/facts.py).
 VOCAB_TTL_SECONDS = 300.0
 _vocab_cache: dict[str, tuple[frozenset[str], float]] = {}
 # Bumped on every clear, so a read that started before a write does not store what it read.
@@ -231,10 +233,26 @@ def invalidate_profiled_vocabulary(agent_id: str) -> None:
     _vocab_gen[agent_id] = _vocab_gen.get(agent_id, 0) + 1
 
 
+def _invalidate_after_commit(agent_id: str, session: AsyncSession) -> None:
+    """Clear the agent's cached profiled keys once ``session``'s transaction commits, never before: a turn that read
+    the keys between a clear and the commit would cache the old rows. A savepoint's release is not the commit
+    (SQLAlchemy reports it as one), and nothing is cleared on a rollback."""
+    done = False
+
+    def _after_commit(sync_session: Any) -> None:
+        nonlocal done
+        if done or sync_session.in_nested_transaction():
+            return
+        done = True
+        invalidate_profiled_vocabulary(agent_id)
+
+    event.listen(session.sync_session, "after_commit", _after_commit)
+
+
 @asynccontextmanager
 async def _clearing_profiled_vocabulary(agent_id: str) -> AsyncIterator[None]:
     """Clear the agent's cached profiled keys when the block ends, however it ends (a cancelled or failed run too).
-    Each write clears them before its commit, so a turn that read them in between holds the old rows until this."""
+    Each write clears them after its own commit as well; this clear is the last word on a run's writes."""
     try:
         yield
     finally:
@@ -526,11 +544,12 @@ _LIVE_FACT = (
     "f.agent_id = :agent AND f.active = true AND f.superseded_by IS NULL AND f.id = CASE WHEN c.fid ~ "
     "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN CAST(c.fid AS uuid) END"
 )
-# The keys of the agent's active profile rows that have at least one line citing only live facts.
+# The keys of the agent's active profile rows the owner has not called not an entity, with at least one line citing
+# only live facts.
 _VOCAB_SQL = f"""
 SELECT p.entity_key
 FROM nous_system.entity_profile p
-WHERE p.agent_id = :agent AND p.active = true AND p.status = 'profile'
+WHERE p.agent_id = :agent AND p.active = true AND p.status = 'profile' AND p.owner_verdict IS NULL
   AND EXISTS (
     SELECT 1
     FROM jsonb_array_elements({_LINES}) AS l(line)
@@ -541,13 +560,14 @@ WHERE p.agent_id = :agent AND p.active = true AND p.status = 'profile'
       )
   )
 """
-# The active profile rows of ``keys``, one row per cited id with the fact's statement times when it is live (NULL
-# when not), and one row with no id for a profile that cites none.
+# The active profile rows of ``keys`` the owner has not called not an entity, one row per cited id with the fact's
+# statement times when it is live (NULL when not), and one row with no id for a profile that cites none.
 _TURN_SQL = f"""
 WITH p AS (
     SELECT entity_key, display_name, kind, lines
     FROM nous_system.entity_profile
-    WHERE agent_id = :agent AND active = true AND status = 'profile' AND entity_key = ANY(CAST(:keys AS text[]))
+    WHERE agent_id = :agent AND active = true AND status = 'profile' AND owner_verdict IS NULL
+      AND entity_key = ANY(CAST(:keys AS text[]))
 ), cited AS (
     SELECT DISTINCT p.entity_key, c.fid
     FROM p
@@ -816,8 +836,8 @@ class EntityProfileStore:
                 row.written_at = now
             row.updated_at = now
             await s.flush()
-            # run_sleep and rebuild clear it again when they end, once their writes are committed.
-            invalidate_profiled_vocabulary(self.agent_id)
+            # The cached keys are cleared once this is committed (run_sleep and rebuild clear them again when they end).
+            _invalidate_after_commit(self.agent_id, s)
             return _as_dict(row)
 
     async def count_call(
@@ -912,6 +932,9 @@ class EntityProfileStore:
 
     # The owner's corrections. Each is recorded in the row itself, as the profile card's delete_entry records a deleted
     # line, and none moves written_at (the day's call count) or updated_at (the rests of not_entity and failed rows).
+    # A turn reads the row itself, so a removal or a verdict applies from the next turn with no clear. A restore, a
+    # take-back and a line put back can add a key to the profiled vocabulary (the keys with at least one live line), and
+    # a line removed can take a key's last live line: the cached keys are cleared once each of those is committed.
 
     async def remove_line(self, key: str, line_id: str, by: str | None, session: AsyncSession | None = None) -> bool:
         """The owner removes one line of an active profile now. It moves to ``previous_lines`` with ``removed_by`` and
@@ -929,6 +952,8 @@ class EntityProfileStore:
             row.rejected = (list(row.rejected) + [str(hit.get("text", ""))])[-REJECTED_CAP:]
             row.tokens = profile_tokens(row.display_name or key, row.kind, row.lines) if row.lines else 0
             await s.flush()
+            # It may have been the profile's last live line: the key leaves the vocabulary.
+            _invalidate_after_commit(self.agent_id, s)
             return True
 
     async def restore_line(
@@ -970,6 +995,8 @@ class EntityProfileStore:
             row.rejected = [t for t in row.rejected if not (isinstance(t, str) and _norm(t) == _norm(line["text"]))]
             row.tokens = profile_tokens(row.display_name or key, row.kind, row.lines)
             await s.flush()
+            # It may be the profile's only live line now: the key joins the vocabulary.
+            _invalidate_after_commit(self.agent_id, s)
             return "restored"
 
     async def set_active(self, key: str, active: bool, session: AsyncSession | None = None) -> bool:
@@ -979,8 +1006,11 @@ class EntityProfileStore:
             row = await self._row(s, key, lock=True)
             if row is None:
                 return False
+            restored = active and not row.active
             row.active = active
             await s.flush()
+            if restored:
+                _invalidate_after_commit(self.agent_id, s)
             return True
 
     async def set_owner_verdict(
@@ -994,11 +1024,14 @@ class EntityProfileStore:
             row = await self._row(s, key, lock=True)
             if row is None or not row.active:
                 return False
+            taken_back = not not_entity and row.owner_verdict is not None
             if not not_entity:
                 row.owner_verdict = None
             elif row.owner_verdict is None:
                 row.owner_verdict = {"verdict": "not_entity", "by": by, "at": datetime.now(UTC).isoformat()}
             await s.flush()
+            if taken_back:
+                _invalidate_after_commit(self.agent_id, s)
             return True
 
 
