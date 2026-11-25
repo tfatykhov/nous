@@ -414,8 +414,8 @@ async def test_the_size_bound_counts_the_heading_and_dates_and_drops_whole_lines
 @pytest.mark.postgres_only
 async def test_a_cited_fact_superseded_after_the_write_makes_the_profile_eligible_again(db, session):
     agent = _agent()
-    # Three facts: with the cited one gone, two remain, still the minimum.
-    f1, f2, _f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
+    # Two facts, the minimum: with the cited one gone the key falls below it, and its profile is still written again.
+    f1, f2 = await _keyed(session, agent, "zephyrine", {}, {})
     llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2))})
     writer = _writer(db, agent, llm)
     await writer.run_sleep(session=session)
@@ -432,6 +432,42 @@ async def test_a_cited_fact_superseded_after_the_write_makes_the_profile_eligibl
     assert stats["written"] == 1 and len(llm.prompts) == 2
     assert f"[{str(f1.id)[:8]}]" not in llm.prompts[1]  # no longer a source row
     assert [ln["fact_ids"] for ln in (await _row(session, agent, "zephyrine")).lines] == [[str(f2.id)]]
+
+
+@pytest.mark.postgres_only
+async def test_a_profile_whose_facts_are_all_gone_is_emptied_without_a_call(db, session):
+    agent = _agent()
+    f1, f2 = await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), name="Zephyrine")})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    written_at = (await _row(session, agent, "zephyrine")).written_at
+
+    await session.execute(update(Fact).where(Fact.id.in_([f1.id, f2.id])).values(active=False))
+    stats = await writer.run_sleep(session=session)
+    row = await _row(session, agent, "zephyrine")
+    assert stats["cleared"] == 1 and len(llm.prompts) == 1
+    assert (row.status, row.lines, row.tokens, row.fact_count, row.display_name) == ("profile", [], 0, 0, "Zephyrine")
+    assert [ln["text"] for ln in row.previous_lines] == ["Zephyrine keeps bees."]
+    # No call was made, so the day's count does not move; a second run changes nothing.
+    assert row.written_at == written_at
+    again = await writer.run_sleep(session=session)
+    assert (again["cleared"], again["unchanged"], len(llm.prompts)) == (0, 1, 1)
+
+
+@pytest.mark.postgres_only
+async def test_a_profiled_key_past_the_most_profiles_bound_is_still_written_again(db, session):
+    agent = _agent()
+    (z1, z2) = await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", z1)), "alder": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm, entity_profile_max_profiles=1)
+    await writer.run_sleep(session=session)
+
+    # A key with more facts takes the one place; zephyrine's facts change.
+    await _keyed(session, agent, "alder", {}, {}, {})
+    await session.execute(update(Fact).where(Fact.id == z2.id).values(content="zephyrine moved inland"))
+    stats = await writer.run_sleep(session=session)
+    assert sorted(llm.keys) == ["alder", "zephyrine", "zephyrine"] and stats["candidates"] == 2
 
 
 @pytest.mark.postgres_only

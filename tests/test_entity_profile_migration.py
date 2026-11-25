@@ -61,6 +61,26 @@ def test_the_reader_role_is_not_given_the_table():
 
 
 @pytest.mark.postgres_only
+async def test_the_reader_role_has_no_privilege_on_the_table_and_the_app_role_has(db):
+    """Where the reader role exists (the DB roles job), it holds no privilege on the table. The login the tests run as
+    reads and writes it."""
+    async with db.engine.connect() as conn:
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            mine = await conn.scalar(
+                text("SELECT has_table_privilege(current_user, 'nous_system.entity_profile', :p)"), {"p": privilege}
+            )
+            assert mine is True, privilege
+        exists = await conn.scalar(text("SELECT count(*) FROM pg_roles WHERE rolname = 'nous_reader'"))
+        if not exists:
+            pytest.skip("no nous_reader role in this database")
+        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+            granted = await conn.scalar(
+                text("SELECT has_table_privilege('nous_reader', 'nous_system.entity_profile', :p)"), {"p": privilege}
+            )
+            assert granted is False, privilege
+
+
+@pytest.mark.postgres_only
 async def test_one_row_per_agent_and_key_with_the_defaults(db, session):
     agent = f"test-entity-profile-mig-{uuid.uuid4().hex[:8]}"
     insert = text(

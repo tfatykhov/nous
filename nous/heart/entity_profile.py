@@ -8,8 +8,10 @@ shown the key's newest facts, decides whether the key names an entity and writes
 stored and asked again only when the key's facts change. Code then checks the lines with the profile card's
 ``settle_entries`` (1 to 3 citations of the facts shown; more than half dropped keeps the old profile), drops a line
 that cites only the agent's own inferences or a fact that is no longer live, dates each line from its cited facts
-(never from the model) and drops whole lines from the end until the rendered profile fits. Every row written with a
-model call in the last 24 hours counts against ``entity_profile_max_calls_per_day``.
+(never from the model) and drops whole lines from the end until the rendered profile fits. A key that has a profile is
+visited even when it falls below the threshold or past the cut, so its profile is written again when its facts
+change, and emptied without a call when none is left. Every row written with a model call in the last 24 hours counts
+against ``entity_profile_max_calls_per_day``.
 """
 
 from __future__ import annotations
@@ -323,6 +325,16 @@ class EntityProfileStore:
             )
             return [_as_dict(row) for row in (await s.execute(stmt)).scalars()]
 
+    async def profiled_keys(self, session: AsyncSession | None = None) -> list[str]:
+        """The keys of the active rows with status ``profile``."""
+        async with _session_scope(self._db, session) as s:
+            stmt = select(EntityProfile.entity_key).where(
+                EntityProfile.agent_id == self.agent_id,
+                EntityProfile.active.is_(True),
+                EntityProfile.status == "profile",
+            )
+            return list((await s.execute(stmt)).scalars())
+
     async def written_last_day(self, session: AsyncSession | None = None) -> int:
         """Rows written with a model call in the last 24 hours: every row but ``owner`` rows, whose ``written_at``
         moves on each verdict, profile and failed reply."""
@@ -353,12 +365,13 @@ class EntityProfileStore:
         lines: list[dict],
         display_name: str | None = None,
         kind: str | None = None,
+        called: bool = True,
         session: AsyncSession | None = None,
     ) -> dict:
         """Replace the row's lines (the old ones become ``previous_lines``) and its status; ``rejected`` is kept.
 
         The row is locked and a rejected line is dropped here, so a line deleted while the model was writing does
-        not come back.
+        not come back. ``written_at`` moves only for a write that followed a model call (``called``).
         """
         async with _session_scope(self._db, session) as s:
             row = await self._row(s, key, lock=True)
@@ -386,7 +399,8 @@ class EntityProfileStore:
             row.fact_count = fact_count
             row.source_count = source_count
             row.tokens = tokens
-            row.written_at = now
+            if called:
+                row.written_at = now
             row.updated_at = now
             await s.flush()
             return _as_dict(row)
@@ -432,6 +446,7 @@ def _new_stats() -> dict[str, Any]:
         "owner": 0,
         "failed_closed": 0,
         "unchanged": 0,
+        "cleared": 0,
         "skipped_cap": 0,
         "inactive": 0,
         "errors": 0,
@@ -534,6 +549,22 @@ class EntityProfileWriter:
         async with _session_scope(self._db, session) as s:
             await self.store.write(key, "owner", "", fact_count=fact_count, source_count=0, lines=[], session=s)
 
+    async def _clear(self, key: str, digest: str, row: dict | None, session: AsyncSession | None) -> None:
+        name, kind = (row["display_name"], row["kind"]) if row is not None else (None, None)
+        async with _session_scope(self._db, session) as s:
+            await self.store.write(
+                key,
+                "profile",
+                digest,
+                fact_count=0,
+                source_count=0,
+                lines=[],
+                display_name=name,
+                kind=kind,
+                called=False,
+                session=s,
+            )
+
     async def run_sleep(
         self, interrupted: Callable[[], bool] | None = None, session: AsyncSession | None = None
     ) -> dict:
@@ -547,6 +578,12 @@ class EntityProfileWriter:
                 return stats
             async with _session_scope(self._db, session) as s:
                 candidates = await self._candidates(s)
+                # A key with a written profile is visited even below the threshold or past the cut, so a profile whose
+                # cited facts died is written again (or emptied when none of its facts is left).
+                listed = {key for key, _ in candidates}
+                for key in await self.store.profiled_keys(session=s):
+                    if key not in listed:
+                        candidates.append((key, await self._fact_count(s, key)))
                 rows = await self.store.rows([key for key, _ in candidates], session=s)
                 used = await self.store.written_last_day(session=s)
             stats["candidates"] = len(candidates)
@@ -577,8 +614,14 @@ class EntityProfileWriter:
                     async with _session_scope(self._db, session) as s:
                         facts = await self._source_facts(s, key)
                     digest = entity_source_hash(facts)
-                    if not facts or (row is not None and row["status"] != "owner" and row["source_hash"] == digest):
+                    if row is not None and row["status"] != "owner" and row["source_hash"] == digest:
                         stats["unchanged"] += 1
+                        continue
+                    if not facts:
+                        # Every fact of a profiled key is gone: empty the profile without a call (its lines move to
+                        # previous_lines).
+                        await self._clear(key, digest, row, session)
+                        stats["cleared"] += 1
                         continue
                     if calls_left <= 0:
                         stats["skipped_cap"] += 1
