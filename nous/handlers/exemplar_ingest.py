@@ -173,7 +173,7 @@ async def ingest_exemplars(
         episode_id,
         logger,
         log_prefix="F086 exemplar ingest",
-        # The live write path runs as the episode ends (episode_summarized): its pairs were said no later than now.
+        # The pairs were said no later than now: the write runs when the episode is summarized, at its end or later.
         mentioned_at=datetime.now(UTC),
     )
     logger.info(

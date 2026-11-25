@@ -190,7 +190,7 @@ def _temporal_kwargs(f: Fact) -> dict[str, Any]:
 def latest_statement_time(times: Iterable[datetime | None]) -> datetime | None:
     """The statement time of a derived fact: the latest of its sources' times, None when none is known.
 
-    The caller passes ``COALESCE(mentioned_at, learned_at)`` for a source fact and ``started_at`` for a
+    The caller passes ``COALESCE(mentioned_at, learned_at)`` for a source fact and ``ended_at`` for a
     source episode. A value that is not a datetime counts as unknown.
     """
     return max((t for t in times if isinstance(t, datetime)), default=None)

@@ -127,8 +127,6 @@ class KnowledgeExtractor:
             if not candidates:
                 return
 
-            # The compacted messages were said no later than now, the compaction.
-            mentioned_at = datetime.now(UTC)
             stored = 0
             for fact in candidates[:5]:
                 confidence = fact.get("confidence", 0.7)
@@ -186,7 +184,9 @@ class KnowledgeExtractor:
                     source="knowledge_extractor",
                     confidence=confidence,
                     category=fact.get("category"),
-                    mentioned_at=mentioned_at,
+                    # The compacted messages were said no later than now, the compaction. Taken per fact, so
+                    # the facts of one compaction keep the order they are stored in.
+                    mentioned_at=datetime.now(UTC),
                 )
                 result = await self._heart.learn(fact_input, exclude_ids=exclude_ids or None)
                 # F023: Don't count rejected facts as stored
