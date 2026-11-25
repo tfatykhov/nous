@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
+from itertools import count
 from uuid import UUID, uuid4
 
 import pytest
@@ -110,6 +111,15 @@ async def _said(db, agent: str) -> dict[UUID, datetime | None]:
         return {r.id: r.mentioned_at for r in rows}
 
 
+def _manifest_lines(path: str) -> list[dict]:
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _without(row: dict, *columns: str) -> dict:
+    return {k: v for k, v in row.items() if k not in columns}
+
+
 @pytest_asyncio.fixture
 async def agents(db):
     made: list[str] = []
@@ -128,8 +138,20 @@ async def agents(db):
         await s.commit()
 
 
+@pytest.fixture
+def manifest(tmp_path):
+    """A new manifest path per call."""
+    numbers = count(1)
+    return lambda: str(tmp_path / f"manifest-{next(numbers)}.jsonl")
+
+
+async def _apply_both(db, agent: str, manifest, **kw) -> bf.Report:
+    """--apply --reordering-rules: both tiers."""
+    return await bf.run(db, agent, apply=True, manifest=manifest(), reordering=True, **kw)
+
+
 async def _scenario(db, agent: str, other: str) -> tuple[dict[str, UUID], dict[str, datetime | None]]:
-    """One of every kind of legacy row, and the value each must end with (None: stays NULL)."""
+    """One of every kind of legacy row, and the value each must end with under both tiers (None: stays NULL)."""
     ep = await _episode(db, agent, _at(9), _at(11))
     ep_late_end = await _episode(db, agent, _at(9), _at(12))
     ep_open = await _episode(db, agent, _at(9))
@@ -202,6 +224,16 @@ async def _scenario(db, agent: str, other: str) -> tuple[dict[str, UUID], dict[s
         ("contra_loser", k3, _at(20, day=1)),
     ):
         ids[name], want[name] = fid, value
+    # Never later than learned_at: an episode that started after the row was learned, a merge whose source reads
+    # later than the merge itself.
+    ep_after = await _episode(db, agent, _at(9, day=5), _at(10, day=5))
+    await row("extractor_episode_after", "fact_extractor", _at(9, 9), None, episode=ep_after)
+    late = await row("merge_later_than_itself", "cluster_consolidation", _at(3, 45, day=1), None)
+    timed = await _fact(
+        db, agent, "user_direct", _at(9, 10), mentioned=_at(9, day=2), superseded_by=late, reason="merged"
+    )
+    await _cluster_event(db, agent, late, [timed])
+    ids["timed_source"], want["timed_source"] = timed, _at(9, day=2)
     return ids, want
 
 
@@ -219,14 +251,14 @@ async def _learned_through_heart(db, agent: str) -> tuple[UUID, UUID]:
     return valued.id, legacy.id
 
 
-async def test_each_rule_fills_what_the_writer_stores_and_nothing_else(db, agents):
+async def test_each_rule_fills_what_the_writer_stores_and_nothing_else(db, agents, manifest):
     agent, other = agents(), agents("other")
     ids, want = await _scenario(db, agent, other)
     valued, legacy = await _learned_through_heart(db, agent)
     before = await _said(db, agent)
     assert before[valued] == SAID and before[legacy] is None
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     after = await _said(db, agent)
     assert {name: after[fid] for name, fid in ids.items()} == want
@@ -234,7 +266,7 @@ async def test_each_rule_fills_what_the_writer_stores_and_nothing_else(db, agent
     async with db.session() as s:
         legacy_learned = await s.scalar(text("SELECT learned_at FROM heart.facts WHERE id = :i"), {"i": legacy})
     assert after[legacy] == legacy_learned
-    assert report.written == sum(1 for v in want.values() if v is not None) + 1
+    assert report.written == sum(1 for name, v in want.items() if v is not None and name != "timed_source") + 1
     rule = {fid: r for fid, _v, r in report.plan.fills}
     reason = dict(report.plan.kept)
     assert rule[ids["user_direct"]] == rule[ids["attachment"]] == bf.RULE_TURN
@@ -249,9 +281,30 @@ async def test_each_rule_fills_what_the_writer_stores_and_nothing_else(db, agent
     assert reason[ids["kept_mcp"]] == reason[ids["kept_mcp:notes"]] == bf.KEPT_MCP
     assert reason[ids["kept_legacy_source"]] == reason[ids["kept_None"]] == reason[ids["attachment_like"]]
     assert reason[ids["kept_legacy_source"]] == bf.KEPT_NO_RULE
+    assert reason[ids["extractor_episode_after"]] == reason[ids["merge_later_than_itself"]] == bf.KEPT_LATER
+    assert all(value <= report.plan.facts[fid].learned_at for fid, value, _r in report.plan.fills)
 
 
-async def test_the_dry_run_writes_nothing_and_plans_what_apply_writes(db, agents):
+async def test_the_default_tier_writes_only_fills_equal_to_learned_at(db, agents, manifest):
+    agent = agents()
+    ids, want = await _scenario(db, agent, agents("other"))
+    path = manifest()
+
+    report = await bf.run(db, agent, apply=True, manifest=path)
+
+    said = await _said(db, agent)
+    default = [f for f in report.plan.fills if report.plan.changes_nothing(f)]
+    second = [f for f in report.plan.fills if not report.plan.changes_nothing(f)]
+    assert default and second
+    assert report.written == report.planned == len(default)
+    assert all(said[fid] == value for fid, value, _r in default)
+    assert all(said[fid] is None for fid, _v, _r in second)
+    assert said[ids["fact_extractor"]] is None and said[ids["cluster"]] is None and said[ids["reflection"]] is None
+    assert said[ids["user_direct"]] == want["user_direct"]
+    assert all(line["mentioned_at"] == line["learned_at"] for line in _manifest_lines(path))
+
+
+async def test_the_dry_run_writes_nothing_and_reports_both_tiers(db, agents, manifest):
     agent = agents()
     await _scenario(db, agent, agents("other"))
     rows = await _rows(db, agent)
@@ -259,29 +312,37 @@ async def test_the_dry_run_writes_nothing_and_plans_what_apply_writes(db, agents
     dry = await bf.run(db, agent, apply=False)
 
     assert await _rows(db, agent) == rows  # every column, mentioned_at and updated_at included
-    assert dry.written == 0 and dry.nulls_after is None
-    lines = "\n".join(bf.format_report(dry))
+    assert dry.written == 0 and dry.nulls_after is None and dry.manifest is None
+    lines = "\n".join(bf.format_report(dry, calls_per_day=40))
+    default = [f for f in dry.plan.fills if dry.plan.changes_nothing(f)]
     assert "dry run, nothing written" in lines
-    assert f"planned: fill {len(dry.plan.fills)}, stay NULL {len(dry.plan.kept)}" in lines
-    assert "unchanged for " in lines and "no recency ordering changes" in lines
-    applied = await bf.run(db, agent, apply=True)
+    assert (
+        f"planned: default tier {len(default)}, second tier {len(dry.plan.fills) - len(default)}, "
+        f"stay NULL {len(dry.plan.kept)}"
+    ) in lines
+    assert "no reader's result or ordering changes" in lines
+    # fact_extractor, episode_summarizer and enumerative rows (learned 11:05, 11:05, 11:06) and an inactive merge
+    # source (11:05) of an episode that started at 09:00
+    assert "b: episode start: 4 (active 3, inactive 1), earlier than today by median 2h 05m, max 2h 06m" in lines
+    assert "stale-facts finding" in lines and "scripts/backfill_supersession.py" in lines
+    assert "daily limit of model calls (NOUS_ENTITY_PROFILE_MAX_CALLS_PER_DAY, 40)" in lines
+    applied = await _apply_both(db, agent, manifest)
     assert applied.plan.fills == dry.plan.fills and applied.plan.kept == dry.plan.kept
     assert applied.written == len(dry.plan.fills)
 
 
-async def test_apply_changes_only_mentioned_at_and_the_triggers_updated_at(db, agents):
+async def test_apply_changes_only_mentioned_at_and_the_triggers_updated_at(db, agents, manifest):
     agent = agents()
     await _scenario(db, agent, agents("other"))
     before = await _rows(db, agent)
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     after = await _rows(db, agent)
     planned = {fid for fid, _v, _r in report.plan.fills}
     assert set(after) == set(before)
     for fid in before:
-        rest = {k: v for k, v in before[fid].items() if k not in ("mentioned_at", "updated_at")}
-        assert {k: v for k, v in after[fid].items() if k not in ("mentioned_at", "updated_at")} == rest
+        assert _without(after[fid], "mentioned_at", "updated_at") == _without(before[fid], "mentioned_at", "updated_at")
         moved = (
             after[fid]["mentioned_at"] != before[fid]["mentioned_at"],
             after[fid]["updated_at"] != before[fid]["updated_at"],
@@ -292,21 +353,161 @@ async def test_apply_changes_only_mentioned_at_and_the_triggers_updated_at(db, a
     assert sum(report.nulls_before.values()) - sum(report.nulls_after.values()) == report.written
 
 
-async def test_a_second_apply_writes_nothing_and_says_so(db, agents):
+async def test_the_manifest_lists_every_row_written_with_its_value(db, agents, manifest):
     agent = agents()
     await _scenario(db, agent, agents("other"))
-    first = await bf.run(db, agent, apply=True)
+    path = manifest()
+
+    report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=4)
+
+    said = await _said(db, agent)
+    lines = _manifest_lines(path)
+    planned = {fid: (value, rule) for fid, value, rule in report.plan.fills}
+    assert len(lines) == report.written == len(planned)
+    for line in lines:
+        fid = UUID(line["id"])
+        assert line["agent_id"] == agent
+        assert datetime.fromisoformat(line["mentioned_at"]) == said[fid] == planned[fid][0]
+        assert line["rule"] == planned[fid][1]
+        assert datetime.fromisoformat(line["learned_at"]) == report.plan.facts[fid].learned_at
+    assert f"each is listed in the manifest {path}" in "\n".join(bf.format_report(report))
+
+
+async def test_a_stop_after_the_manifest_write_keeps_the_committed_batches_and_says_so(
+    db, agents, manifest, monkeypatch
+):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    rows = await _rows(db, agent)
+    path = manifest()
+    real = bf._record
+    calls: list[int] = []
+
+    def record_then_fail_on_the_second_batch(out, lines):
+        real(out, lines)
+        on_disk = {line["id"] for line in _manifest_lines(path)}  # read back through another handle
+        assert {line["id"] for line in lines} <= on_disk
+        calls.append(1)
+        if len(calls) == 2:  # the lines are on disk; the commit that follows never happens
+            raise OSError("the disk went away after the manifest write")
+
+    monkeypatch.setattr(bf, "_record", record_then_fail_on_the_second_batch)
+
+    report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=2)
+
+    assert report.batches == 1 and report.written == 2
+    assert report.error.startswith("batch 2 (rows 3-4 of ") and "rolled back: OSError" in report.error
+    said = await _said(db, agent)
+    first, failed = report.plan.fills[:2], report.plan.fills[2:4]
+    assert [said[fid] for fid, _v, _r in first] == [value for _fid, value, _r in first]
+    assert [said[fid] for fid, _v, _r in failed] == [None, None]
+    assert [UUID(line["id"]) for line in _manifest_lines(path)] == sorted(
+        [fid for fid, _v, _r in first], key=str
+    ) + sorted([fid for fid, _v, _r in failed], key=str)
+    out = "\n".join(bf.format_report(report))
+    assert "STOPPED: batch 2" in out
+    assert f"Committed before it: 1 batches, 2 of {len(report.plan.fills)} rows (both tiers)" in out
+    assert f"listed in the manifest {path}" in out
+
+    undone = await bf.undo(db, agent, path, apply=True)
+
+    # The committed rows are set back; the failed batch's rows were never written, so the undo leaves them alone.
+    assert (undone.lines, undone.matching, undone.changed, undone.undone) == (4, 2, 2, 2)
+    after = await _rows(db, agent)
+    for fid, _v, _r in failed:
+        assert after[fid] == rows[fid]  # updated_at included: not touched at all
+    for fid, _v, _r in first:
+        assert after[fid]["mentioned_at"] is None
+        assert _without(after[fid], "updated_at") == _without(rows[fid], "updated_at")
+
+
+async def test_undo_restores_skips_changed_rows_and_never_touches_another_agent(db, agents, manifest):
+    agent, other = agents(), agents("other")
+    await _scenario(db, agent, other)
+    theirs = await _fact(db, other, "user_direct", _at(9, 15))
+    mine_before = await _rows(db, agent)
+    mine_path, their_path = manifest(), manifest()
+    mine = await bf.run(db, agent, apply=True, manifest=mine_path, reordering=True)
+    await bf.run(db, other, apply=True, manifest=their_path)
+    their_rows = await _rows(db, other)
+    changed = mine.plan.fills[0][0]
+    async with db.session() as s:  # the app changes one filled row after the run
+        await s.execute(text("UPDATE heart.facts SET mentioned_at = :t WHERE id = :i"), {"t": SAID, "i": changed})
+        await s.commit()
+    with open(mine_path, "a", encoding="utf-8") as f:  # a line naming another agent's fact under this agent
+        stored = their_rows[theirs]["mentioned_at"]
+        f.write(json.dumps({"agent_id": agent, "id": str(theirs), "rule": "x", "mentioned_at": stored}) + "\n")
+    filled = await _rows(db, agent)
+
+    dry = await bf.undo(db, agent, mine_path, apply=False)
+
+    assert await _rows(db, agent) == filled
+    assert (dry.matching, dry.changed, dry.missing, dry.undone) == (mine.written - 1, 1, 1, 0)
+
+    report = await bf.undo(db, agent, mine_path, apply=True)
+
+    assert report.undone == mine.written - 1 and report.error is None
+    after = await _rows(db, agent)
+    for fid in mine_before:
+        if fid == changed:
+            assert datetime.fromisoformat(after[fid]["mentioned_at"]) == SAID
+        else:
+            assert after[fid]["mentioned_at"] == mine_before[fid]["mentioned_at"]
+        rest = _without(mine_before[fid], "updated_at", "mentioned_at")
+        assert _without(after[fid], "updated_at", "mentioned_at") == rest
+    assert await _rows(db, other) == their_rows
+
+    crossed = await bf.undo(db, agent, their_path, apply=True)  # their manifest, run for this agent
+
+    assert (crossed.lines, crossed.other_agent, crossed.matching, crossed.undone) == (1, 1, 0, 0)
+    assert await _rows(db, other) == their_rows
+    assert bf.CANNOT_UNDO in bf.format_undo(crossed)
+
+
+async def test_undo_skips_a_row_the_app_changes_after_the_undo_read_it(db, agents, manifest, monkeypatch):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    path = manifest()
+    filled = await bf.run(db, agent, apply=True, manifest=path)
+    real = bf._batches
+    changed = filled.plan.selected(False)[0][0]
+
+    async def a_writer_changes_one_row_first(*args, **kwargs):
+        async with db.session() as s:
+            await s.execute(text("UPDATE heart.facts SET mentioned_at = :t WHERE id = :i"), {"t": SAID, "i": changed})
+            await s.commit()
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(bf, "_batches", a_writer_changes_one_row_first)
+
+    report = await bf.undo(db, agent, path, apply=True)
+
+    assert report.error is None and report.matching == filled.written and report.undone == filled.written - 1
+    assert (await _said(db, agent))[changed] == SAID
+    assert "skipped because they changed during the undo: 1" in "\n".join(bf.format_undo(report))
+
+
+async def test_a_second_apply_writes_nothing_and_says_so(db, agents, manifest):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    used = manifest()
+    first = await bf.run(db, agent, apply=True, manifest=used, reordering=True)
     assert first.written > 0
     rows = await _rows(db, agent)
 
-    second = await bf.run(db, agent, apply=True)
+    second = await _apply_both(db, agent, manifest)
 
     assert second.written == 0 and second.plan.fills == []
     assert await _rows(db, agent) == rows
     assert "nothing to fill" in "\n".join(bf.format_report(second))
+    with pytest.raises(ValueError, match="--manifest"):
+        await bf.run(db, agent, apply=True)
+    with pytest.raises(FileExistsError):  # an earlier run's record is never overwritten
+        await bf.run(db, agent, apply=True, manifest=used)
+    assert len(_manifest_lines(used)) == first.written
 
 
-async def test_another_agents_rows_episodes_and_events_are_never_touched_or_used(db, agents):
+async def test_another_agents_rows_episodes_and_events_are_never_touched_or_used(db, agents, manifest):
     agent, other = agents(), agents("other")
     ep_other = await _episode(db, other, _at(8), _at(8, 30))
     theirs = [
@@ -326,7 +527,7 @@ async def test_another_agents_rows_episodes_and_events_are_never_touched_or_used
     src_2 = await _fact(db, agent, "user_direct", _at(10, 20), superseded_by=mine_cluster_2, reason="merged")
     await _cluster_event(db, agent, mine_cluster_2, [src_2, theirs[0]])
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     assert await _rows(db, other) == their_rows
     said = await _said(db, agent)
@@ -339,7 +540,7 @@ async def test_another_agents_rows_episodes_and_events_are_never_touched_or_used
     assert reason[mine_cluster_2] == bf.KEPT_BAD_LIST
 
 
-async def test_a_merge_of_a_merge_fills_on_the_second_pass_as_the_merge_writer_would(db, agents):
+async def test_a_merge_of_a_merge_fills_on_the_second_pass_as_the_merge_writer_would(db, agents, manifest):
     agent = agents()
     ep = await _episode(db, agent, _at(9), _at(11))
     outer = await _fact(db, agent, "cluster_consolidation", _at(3, day=2))
@@ -350,7 +551,7 @@ async def test_a_merge_of_a_merge_fills_on_the_second_pass_as_the_merge_writer_w
     await _cluster_event(db, agent, inner, [u, e])
     await _cluster_event(db, agent, outer, [inner, v])
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     said = await _said(db, agent)
     # Filled on pass 1 the outer merge would read the inner one's learned_at (a day later).
@@ -369,7 +570,7 @@ async def test_a_merge_of_a_merge_fills_on_the_second_pass_as_the_merge_writer_w
     assert (await _said(db, agent))[fresh] == said[outer]
 
 
-async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents):
+async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents, manifest):
     agent = agents()
 
     async def merge(source: str, learned: datetime) -> UUID:
@@ -404,7 +605,7 @@ async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents
     over_kept = await merge("cluster_consolidation", _at(3, day=2))
     await _cluster_event(db, agent, over_kept, [no_event])
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     said = await _said(db, agent)
     reason = dict(report.plan.kept)
@@ -424,40 +625,41 @@ async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents
     assert said[over_kept] == _at(3, day=1)
 
 
-async def test_limit_writes_the_first_planned_rows_and_a_later_run_the_rest(db, agents):
+async def test_limit_writes_the_first_planned_rows_and_a_later_run_the_rest(db, agents, manifest):
     agent = agents()
     ids, want = await _scenario(db, agent, agents("other"))
     dry = await bf.run(db, agent, apply=False)
 
-    first = await bf.run(db, agent, apply=True, limit=3, batch_size=2)
+    first = await _apply_both(db, agent, manifest, limit=3, batch_size=2)
 
     assert first.written == 3 and first.plan.fills == dry.plan.fills
     planned = [fid for fid, _v, _r in dry.plan.fills]
     said = await _said(db, agent)
     assert {fid for fid in planned if said[fid] is not None} == set(planned[:3])
-    rest = await bf.run(db, agent, apply=True)
+    rest = await _apply_both(db, agent, manifest)
     assert rest.written == len(dry.plan.fills) - 3
     said = await _said(db, agent)
     assert {name: said[fid] for name, fid in ids.items()} == want
 
 
-async def test_a_batch_that_would_change_another_column_is_rolled_back(db, agents, monkeypatch):
+async def test_a_batch_that_would_change_another_column_is_rolled_back(db, agents, manifest, monkeypatch):
     agent = agents()
     await _scenario(db, agent, agents("other"))
     rows = await _rows(db, agent)
     monkeypatch.setattr(
         bf,
-        "_UPDATE_BATCH",
-        text(str(bf._UPDATE_BATCH).replace("SET mentioned_at = v.t", "SET mentioned_at = v.t, recall_count = 7")),
+        "_UPDATE_FILL",
+        text(str(bf._UPDATE_FILL).replace("SET mentioned_at = v.t", "SET mentioned_at = v.t, recall_count = 7")),
     )
 
-    with pytest.raises(RuntimeError, match="rolled back"):
-        await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
+    assert report.batches == report.written == 0
+    assert report.error.startswith("batch 1 ") and "rolled back: RuntimeError: a column other than" in report.error
     assert await _rows(db, agent) == rows
 
 
-async def test_a_row_given_a_value_after_the_plan_keeps_it(db, agents, monkeypatch):
+async def test_a_row_given_a_value_after_the_plan_keeps_it(db, agents, manifest, monkeypatch):
     agent = agents()
     await _scenario(db, agent, agents("other"))
     real = bf._profiles_touched
@@ -474,18 +676,23 @@ async def test_a_row_given_a_value_after_the_plan_keeps_it(db, agents, monkeypat
 
     monkeypatch.setattr(bf, "_profiles_touched", plan_then_a_writer_fills_one)
 
-    report = await bf.run(db, agent, apply=True)
+    report = await _apply_both(db, agent, manifest)
 
     assert (await _said(db, agent))[taken[0]] == SAID
-    assert report.written == len(report.plan.fills) - 1
+    assert report.written == len(report.plan.fills) - 1 and report.error is None
 
 
-async def test_the_dry_run_counts_the_entity_profiles_a_fill_makes_due(db, agents):
+async def test_the_dry_run_counts_the_entity_profiles_each_tier_makes_due(db, agents):
     agent = agents()
-    filled = await _fact(db, agent, "user_direct", _at(9))
-    valued = await _fact(db, agent, "user_direct", _at(9, 5), mentioned=_at(9, 5))
+    ep = await _episode(db, agent, _at(9), _at(11))
+    keyed = {
+        "alice": (await _fact(db, agent, "user_direct", _at(9)), "profile"),  # default tier
+        "petrel": (await _fact(db, agent, "user_direct", _at(9, 5), mentioned=_at(9, 5)), "profile"),  # has a value
+        "harbour": (await _fact(db, agent, "fact_extractor", _at(11, 5), episode=ep), "profile"),  # second tier
+        "pier": (await _fact(db, agent, "user_direct", _at(9, 10)), "not_entity"),  # not asked again on a change
+    }
     async with db.session() as s:
-        for key, fid in (("alice", filled), ("petrel", valued)):
+        for key, (fid, status) in keyed.items():
             await s.execute(
                 text("INSERT INTO heart.fact_entity_keys (fact_id, entity_key, agent_id) VALUES (:f, :k, :a)"),
                 {"f": fid, "k": key, "a": agent},
@@ -493,20 +700,21 @@ async def test_the_dry_run_counts_the_entity_profiles_a_fill_makes_due(db, agent
             await s.execute(
                 text(
                     "INSERT INTO nous_system.entity_profile (agent_id, entity_key, status, source_hash) "
-                    "VALUES (:a, :k, 'profile', 'h')"
+                    "VALUES (:a, :k, :s, 'h')"
                 ),
-                {"a": agent, "k": key},
+                {"a": agent, "k": key, "s": status},
             )
         await s.commit()
 
     report = await bf.run(db, agent, apply=False)
 
-    assert report.profiles == 1  # alice's facts include the filled row, petrel's do not
-    assert "at most 1;" in "\n".join(bf.format_report(report))
+    assert report.profiles == (1, 2)
+    assert "at most 1 with the default tier, at most 2 with --reordering-rules" in "\n".join(bf.format_report(report))
 
 
 # ---------------------------------------------------------------------------
-# The two resolver cases of the statement-time reviews resolve as before the fill.
+# Resolver pins: the two pairs of the statement-time reviews resolve as before a default-tier fill; an extractor fill
+# (second tier) flips the in-turn pair it was meant to flip, and only with --reordering-rules.
 # ---------------------------------------------------------------------------
 
 
@@ -549,7 +757,7 @@ async def _stored(db, ids: list[UUID]) -> list[dict]:
 
 @pytest.mark.parametrize("pair", ["two_learn_fact_facts", "learn_fact_then_compaction"])
 @pytest.mark.parametrize("intervals", [False, True], ids=["intervals_off", "intervals_on"])
-async def test_the_later_correction_stays_current_after_the_fill(db, agents, pair, intervals):
+async def test_the_later_correction_stays_current_after_the_fill(db, agents, manifest, pair, intervals):
     """One episode open from 09:00: May 10 said at 09:05 (learn_fact), moved to May 3 at 11:30 (learn_fact) or kept
     by the knowledge extractor at the 13:00 compaction. Both rows are legacy: no said-time."""
     agent = agents()
@@ -586,8 +794,46 @@ async def test_the_later_correction_stays_current_after_the_fill(db, agents, pai
     assert [r["mentioned_at"] for r in before] == [None, None]
     assert _statuses(before, intervals) == [("current", "superseded")] * 2
 
-    await bf.run(db, agent, apply=True)
+    await bf.run(db, agent, apply=True, manifest=manifest())
 
     after = await _stored(db, [may_10, may_3])
     assert [r["mentioned_at"] for r in after] == [r["learned_at"] for r in after]
     assert _statuses(after, intervals) == [("current", "superseded")] * 2
+
+
+@pytest.mark.parametrize("reordering", [False, True], ids=["default_tier", "reordering_rules"])
+@pytest.mark.parametrize("intervals", [False, True], ids=["intervals_off", "intervals_on"])
+async def test_an_extractor_fill_flips_the_in_turn_pair_only_with_the_reordering_rules(
+    db, agents, manifest, reordering, intervals
+):
+    """Episode 09:00-15:00. learn_fact stores May 10 at 09:05. At 11:30 the user moves it to May 3 and only the
+    episode extractor keeps that, stored at 15:01. Both legacy rows. With the extractor's episode start filled
+    (09:00), May 3 reads earlier than May 10 and loses, where today it reads 15:01 and wins."""
+    agent = agents()
+    ep = await _episode(db, agent, _at(9), _at(15))
+    may_10 = await _fact(
+        db,
+        agent,
+        "user_direct",
+        _at(9, 5),
+        episode=ep,
+        event_date=date(2026, 5, 10),
+        content="Alice's dentist appointment is on May 10",
+    )
+    may_3 = await _fact(
+        db,
+        agent,
+        "episode_summarizer",
+        _at(15, 1),
+        episode=ep,
+        event_date=date(2026, 5, 3),
+        content="Alice's dentist appointment is on May 3",
+    )
+    assert _statuses(await _stored(db, [may_10, may_3]), intervals) == [("current", "superseded")] * 2
+
+    await bf.run(db, agent, apply=True, manifest=manifest(), reordering=reordering)
+
+    after = await _stored(db, [may_10, may_3])
+    assert after[1]["mentioned_at"] == (_at(9) if reordering else None)
+    flipped = reordering and intervals
+    assert _statuses(after, intervals) == [("superseded", "current") if flipped else ("current", "superseded")] * 2
