@@ -426,6 +426,9 @@ class CallContext:
     # F120: the kind of call a tool loop's own model calls are (nous.api.tool_loading.KINDS), set by the loop on the
     # context it passes to those calls only; None: not watched. Not a column.
     tool_loading_kind: str | None = None
+    # F120 On: the turn's nous.api.tool_loading.ToolWindow when its calls defer tools, set like tool_loading_kind; the
+    # runner builds the call's record from it. Not a column.
+    tool_window: Any = None
 
 
 def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:

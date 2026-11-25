@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import Limits from '../Limits.svelte';
 import { initRouter } from '../../lib/router';
 import { markupOf, scriptBlocks } from '../../lib/testing/css';
-import type { KindNumbers, LoadingAnswer, ToolRow } from '../../lib/tool_loading';
+import type { KindNumbers, LoadingAnswer, OnNumbers, ToolRow } from '../../lib/tool_loading';
 
-// F120 tool loading, watch only: the third sub tab of the Limits and tools screen, over GET and PUT
+// F120 tool loading: the third sub tab of the Limits and tools screen, over GET and PUT
 // /dashboard/tool-loading. The answers have the shapes nous/api/tool_loading_routes.py gives; every value is made up.
 
 type Answer = [number, unknown];
@@ -37,9 +37,13 @@ const KIND_WORDS: [string, string][] = [
 const numbers = (over: Partial<KindNumbers> = {}): KindNumbers[] =>
   KIND_WORDS.map(([key, words]) => ({
     key, words, on: key === 'chat', calls: 0, read_calls: 0, written_calls: 0, deferred_avg: 0, deferred_tokens_avg: 0,
-    index_tokens_avg: 0, saved_per_call: null, turns: 0, turns_used_left_out: 0, calls_used_left_out: 0,
+    index_tokens_avg: 0, saved_per_call: null, turns: 0, turns_used_left_out: 0, calls_used_left_out: 0, on_mode: null,
     ...(key === 'chat' ? over : {}),
   }));
+const inOn: OnNumbers = {
+  calls: 6, applied: 5, full_avg: 12, deferred_avg: 40, read_calls: 4, written_calls: 1, saved_per_call: 900,
+  turns: 2, loads_per_turn: 1.5, refusals_per_turn: 0, fallbacks: 0, not_applied: [{ why: 'turn', calls: 1 }],
+};
 const tool = (over: Partial<ToolRow>): ToolRow => ({
   name: 'x', server: null, registered: true, tokens_est: 100, calls_30d: 3, sessions_30d: 2, state: 'left_out',
   why: null, ...over,
@@ -57,6 +61,7 @@ function answer(over: Partial<LoadingAnswer> = {}): LoadingAnswer {
     updated_by: null,
     problem: null,
     recorded: { model_calls: true, tool_calls: true },
+    deferring_client: true,
     days: 7,
     numbers: numbers({
       calls: 12, read_calls: 9, written_calls: 2, deferred_avg: 3, deferred_tokens_avg: 1200, index_tokens_avg: 200,
@@ -134,6 +139,34 @@ describe('Limits and tools: tool loading', () => {
     expect(sent('PUT')).toEqual([{ url: '/dashboard/tool-loading', method: 'PUT', body: { mode: 'watch' } }]);
     expect(screen.getByText(/^Every tool is still sent in full\./)).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(said));
+  });
+
+  it('On is a mode like the others: saved when chosen, with its words and its numbers', async () => {
+    handlers['PUT /dashboard/tool-loading'] = () => {
+      current = answer({ mode: 'on', numbers: numbers({ on_mode: inOn }) });
+      return [200, { ...current, changed: true }];
+    };
+    render(Limits);
+    const mode = await screen.findByRole('group', { name: 'Mode' });
+    await fireEvent.click(within(mode).getByRole('radio', { name: 'On' }));
+    await screen.findByText('Saved. It applies from the next model call.');
+    expect(sent('PUT')).toEqual([{ url: '/dashboard/tool-loading', method: 'PUT', body: { mode: 'on' } }]);
+    expect((within(mode).getByRole('radio', { name: 'On' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/^In a kind switched on below, the tools outside the core set are left out/)).toBeTruthy();
+    expect(screen.getByText('On: 6 calls recorded, 5 sent with tools left out.')).toBeTruthy();
+    expect(screen.getByText('1 call sent with every tool in full: their turn began before On was chosen.')).toBeTruthy();
+    expect(screen.queryByText(/^On does nothing on this server/)).toBeNull(); // this server's client can
+  });
+
+  it('On on a server whose model client cannot leave tools out says so', async () => {
+    current = answer({ mode: 'on', deferring_client: false });
+    render(Limits);
+    expect(await screen.findByText(/^On does nothing on this server: the model client in use cannot leave tools out/)).toBeTruthy();
+    current = answer({ mode: 'watch', deferring_client: false });
+    cleanup();
+    render(Limits);
+    await screen.findByRole('group', { name: 'Mode' });
+    expect(screen.queryByText(/^On does nothing on this server/)).toBeNull(); // only said in On
   });
 
   it('a refused mode or kind change shows the server sentence and checks the saved choice again', async () => {

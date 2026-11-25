@@ -114,15 +114,15 @@ async def test_another_agents_row_is_never_read(session):
 async def test_a_malformed_row_is_off_with_one_warning_and_the_other_keys_still_load(session, caplog):
     agent = _agent()
     await _put(session, "vector_weight", 0.35)
-    await _put(session, config_key(agent), {"version": 1, "mode": "on"})
+    await _put(session, config_key(agent), {"version": 1, "mode": "full"})
     runtime = RuntimeConfig.get()
     with caplog.at_level(logging.WARNING, logger="nous.runtime_config"):
         await runtime.load_from_db(session, agent)
     assert runtime.get_vector_weight(Settings(_env_file=None)) == pytest.approx(0.35)
     assert runtime.get_tool_loading(agent) == OFF
-    assert runtime.tool_loading_problem(agent) == "the stored mode is not off or watch"
+    assert runtime.tool_loading_problem(agent) == "the stored mode is not off, watch or on"
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "F120" in r.getMessage()]
-    assert warnings == ["F120: the tool-loading setting is off: the stored mode is not off or watch"]
+    assert warnings == ["F120: the tool-loading setting is off: the stored mode is not off, watch or on"]
 
 
 @pytest.mark.postgres_only

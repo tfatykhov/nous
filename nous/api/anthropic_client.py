@@ -65,6 +65,7 @@ class StreamEvent:
     stop_reason: str = ""
     block_index: int = 0
     usage: dict[str, int] | None = None
+    status: int | None = None  # an error event's HTTP status, when the API answered with one (F120's fallback)
 
 
 # ---------------------------------------------------------------------------
@@ -931,6 +932,10 @@ class SdkAnthropicClient(_ModelCallRecording):
     headers with correct Python runtime values.
     """
 
+    # F120 On: deferred tool definitions and tool_reference blocks were tested through this client
+    # (scripts/ops/tool_loading_smoke.py); the httpx client was not, so a turn on it sends every tool in full.
+    supports_deferred_tools = True
+
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._client: Any = None  # anthropic.AsyncAnthropic
@@ -1133,7 +1138,7 @@ class SdkAnthropicClient(_ModelCallRecording):
                 if scope is not None:
                     scope.fail(e)
                 self._log_sdk_error(e)
-                yield StreamEvent(type="error", text=f"SDK stream error: {e}")
+                yield StreamEvent(type="error", text=f"SDK stream error: {e}", status=getattr(e, "status_code", None))
 
     async def call_streaming_aggregated(
         self, payload: dict[str, Any], *, call_context: CallContext | None = None

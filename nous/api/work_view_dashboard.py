@@ -23,7 +23,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.harness_dashboard import _is_tombstone, holds
 from nous.observability.model_call_text import BLOCK_PARTS
-from nous.observability.tool_patterns import PREV_ERROR_EXPR, REPEAT_KEY, REPEATED_SQL, RETRY_FAILED_SQL
+from nous.observability.tool_patterns import (
+    NOT_LOADER_SQL,
+    PREV_ERROR_EXPR,
+    REPEAT_KEY,
+    REPEATED_SQL,
+    RETRY_FAILED_SQL,
+)
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 30
@@ -967,7 +973,7 @@ WITH win AS (
     SELECT c.id, c.turn_id, c.call_index, c.session_id, c.tool_name, c.input_text, c.is_error, c.started_at,
            nullif(btrim(c.reason), '') AS reason, {_kind_case_sql("c.work_kind")} AS kind
     FROM nous_system.tool_call_log c
-    WHERE c.agent_id = :agent AND c.started_at >= now() - make_interval(days => :days)
+    WHERE c.agent_id = :agent AND c.started_at >= now() - make_interval(days => :days) AND c.{NOT_LOADER_SQL}
 )
 """
 

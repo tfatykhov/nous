@@ -215,14 +215,16 @@ async def _call(
         )
 
 
-async def _tool_call(conn, agent: str, turn: uuid.UUID, name: str, when: datetime, kind: str, session: str) -> None:
+async def _tool_call(
+    conn, agent: str, turn: uuid.UUID, name: str, when: datetime, kind: str, session: str, outcome: str = "success"
+) -> None:
     await conn.execute(
         text(
             "INSERT INTO nous_system.tool_call_log (agent_id, session_id, turn_id, call_index, work_kind, "
             "context_kind, tool_name, tool_name_called, outcome, started_at) "
-            "VALUES (:a, :s, :t, 0, 'chat', :k, :n, :n, 'success', :w)"
+            "VALUES (:a, :s, :t, 0, 'chat', :k, :n, :n, :o, :w)"
         ),
-        {"a": agent, "s": session, "t": turn, "k": kind, "n": name, "w": when},
+        {"a": agent, "s": session, "t": turn, "k": kind, "n": name, "o": outcome, "w": when},
     )
 
 
@@ -349,7 +351,7 @@ async def test_a_save_that_changes_nothing_still_replaces_an_unreadable_stored_v
         async with db.engine.begin() as conn:
             await conn.execute(
                 text("INSERT INTO nous_system.config (key, value) VALUES (:k, CAST(:v AS jsonb))"),
-                {"k": config_key(agent), "v": json.dumps({"version": 1, "mode": "on"})},
+                {"k": config_key(agent), "v": json.dumps({"version": 1, "mode": "full"})},
             )
         async with db.session() as session:
             await RuntimeConfig.get().load_from_db(session, agent)
@@ -466,7 +468,7 @@ async def test_the_core_set_adds_only_registered_names_keeps_stored_ones_and_can
 @pytest.mark.parametrize(
     ("body", "error"),
     [
-        (b'{"mode": "on"}', "The mode must be off or watch."),
+        (b'{"mode": "full"}', "The mode must be off, watch or on."),
         (b'{"mode": 1}', "Not accepted: mode."),
         (b'{"kinds": {"goal_session": true}}', "Not accepted: a kind of call this server does not know."),
         (b'{"kinds": {"chat": "yes"}}', "Not accepted: kinds."),
@@ -498,3 +500,105 @@ async def test_a_failed_store_sets_nothing():
     response = await _send(_app(_Broken(), _settings(agent)), "PUT", PATH, headers=OWNER, json={"mode": "watch"})
     assert (response.status_code, response.json()) == (500, {"error": "The request could not be processed."})
     assert RuntimeConfig.get().get_tool_loading(agent).mode == "off"
+
+
+# ---- On ---------------------------------------------------------------------------------------------------------
+
+
+def _on_record(kind: str, cache: str | None, **fields: Any) -> str:
+    """The record of a call in On (nous.api.tool_loading.on_record), with the recorder's model and cache state."""
+    record = {
+        "mode": "on",
+        "kind": kind,
+        "sent": 6,
+        "applied": False,
+        "why": None,
+        "fallback": None,
+        "full": 5,
+        "deferred": 0,
+        "deferred_tokens_est": 0,
+        "index_tokens_est": 0,
+        "loaded": 0,
+        **fields,
+    }
+    return json.dumps({**record, "model": "claude-x", "cache": cache})
+
+
+@pytest.mark.postgres_only
+async def test_the_calls_in_on_per_kind_apart_from_watch_only(db):
+    agent = _agent()
+    now = datetime.now(UTC)
+    t1, t2, t3, t4 = (uuid.uuid4() for _ in range(4))
+    names = ["bash", "db_query", "send_email", "dag_create", "load_tools"]
+    applied = {"applied": True, "full": 3, "deferred": 2, "deferred_tokens_est": 1000, "index_tokens_est": 200}
+    try:
+        async with db.engine.begin() as conn:
+            # turn 1 deferred: read, then written, after a load
+            await _call(conn, agent, t1, _on_record("chat", "read", **applied), names, now)
+            await _call(conn, agent, t1, _on_record("chat", "written", **applied, loaded=1), names, now)
+            # turn 2 fell back after a refused request: every tool in full, the loader still sent
+            await _call(
+                conn, agent, t2, _on_record("chat", "read", fallback="refused", index_tokens_est=200), names, now
+            )
+            # turn 3: On could not defer (its model)
+            await _call(conn, agent, t3, _on_record("chat", None, why="model"), names, now)
+            # a call recorded in Watch only in the same window stays in the Watch only numbers
+            await _call(conn, agent, t4, _record("chat", 2, 1000, 200, "read", ["bash"]), names, now)
+            for name, outcome in (("load_tools", "loaded"), ("send_email", "not_loaded"), ("send_email", "ran")):
+                await _tool_call(conn, agent, t1, name, now, "interactive", "s1", outcome)
+            await _tool_call(conn, agent, t2, "load_tools", now, "interactive", "s2", "nothing_loaded")
+        RuntimeConfig.get().set_tool_loading(agent, ToolLoadingConfig(mode="on", kinds=frozenset({"chat"})))
+        body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
+        chat = next(row for row in body["numbers"] if row["key"] == "chat")
+        assert (chat["calls"], chat["deferred_avg"], chat["turns"]) == (1, 2.0, 1)  # Watch only: its one call
+        assert chat["on_mode"] == {
+            "calls": 4,
+            "applied": 2,
+            "full_avg": 3.0,
+            "deferred_avg": 2.0,
+            "read_calls": 2,
+            "written_calls": 1,
+            # read: 800 deferred less the list, and the fallback's list alone; written: 800
+            "saved_per_call": round((((1000 - 200) + (0 - 200)) * 0.1 + (1000 - 200) * 1.25) / 3),
+            "turns": 2,
+            "loads_per_turn": 1.0,
+            "refusals_per_turn": 0.5,
+            "fallbacks": 1,
+            "not_applied": [{"why": "model", "calls": 1}],
+        }
+        assert next(row for row in body["numbers"] if row["key"] == "subtask")["on_mode"] is None
+        assert body["mode"] == "on" and body["deferring_client"] is True
+    finally:
+        await _cleanup(db, agent)
+
+
+async def test_the_read_answers_exactly_the_fields_the_card_reads_and_whether_the_client_can_defer():
+    """The answer's top-level fields and the card's ``LoadingAnswer`` (with ``Setting``) name the same fields."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "dashboard-app/src/lib/tool_loading.ts").read_text(encoding="utf-8")
+    setting = re.search(r"export interface Setting \{(.*?)\n\}", source, re.S).group(1)
+    answer = re.search(r"export interface LoadingAnswer extends Partial<Setting> \{(.*?)\n\}", source, re.S).group(1)
+    card = set(re.findall(r"^\s*(\w+)\??:", re.sub(r"/\*.*?\*/", "", setting + "\n" + answer, flags=re.S), re.M))
+    settings = _settings(_agent(), model_call_log_enabled=False, tool_call_log_enabled=False)
+    body = (await _send(_app(_NoDatabase(), settings), "GET", PATH, headers=OWNER)).json()
+    assert set(body) == card
+    assert body["deferring_client"] is True
+    httpx_backend = _settings(_agent(), model_call_log_enabled=False, tool_call_log_enabled=False, api_backend="httpx")
+    other = (await _send(_app(_NoDatabase(), httpx_backend), "GET", PATH, headers=OWNER)).json()
+    assert other["deferring_client"] is False
+
+
+@pytest.mark.postgres_only
+async def test_on_is_stored_like_the_other_modes(db):
+    agent = _agent()
+    try:
+        app = _app(db, _settings(agent))
+        saved = await _send(app, "PUT", PATH, headers=OWNER, json={"mode": "on", "kinds": {"heartbeat": True}})
+        assert saved.status_code == 200 and saved.json()["mode"] == "on"
+        stored = await _stored(db, agent)
+        assert (stored["mode"], stored["kinds"]) == ("on", ["heartbeat"])
+        assert RuntimeConfig.get().get_tool_loading(agent).mode == "on"
+    finally:
+        await _cleanup(db, agent)
