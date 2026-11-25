@@ -504,9 +504,8 @@ class Settings(BaseSettings):
         ge=0,
         description="Recent closed episode summaries the card writer sees, for currency only (0 shows none).",
     )
-    # Per-entity profiles (F119 PR 1: the writer, in shadow). The last sleep phase writes a short dated profile of
-    # each entity key with enough active facts; the owner reads them on GET /entity-profiles. Nothing is sent to the
-    # model in a turn.
+    # Per-entity profiles (F119). The last sleep phase writes a short dated profile of each entity key with enough
+    # active facts; the owner reads them on GET /entity-profiles. A turn gets them only with entity_profile_use on.
     entity_profile_writer_enabled: bool = Field(
         default=True,
         description=(
@@ -557,6 +556,15 @@ class Settings(BaseSettings):
             "Comma list of entity keys that name the owner. With user and assistant they get no profile and no "
             "model call (the profile card covers the owner). Normalised as entity keys are. Empty: only user and "
             "assistant."
+        ),
+    )
+
+    entity_profile_use: str = Field(
+        default="off",
+        description=(
+            "F119 PR 3: whether an interactive or MCP turn whose message names a profiled entity gets its profile: "
+            "off, trace (everything but the section; what would have been shown is recorded on the turn) or on. Read "
+            "on every turn; any other value is off, with one warning."
         ),
     )
 

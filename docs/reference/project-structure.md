@@ -49,7 +49,7 @@ nous/
 │   │   ├── procedures.py       # Procedural memory
 │   │   ├── job_runs.py         # Job lessons: a recurring job's runs from heart.subtasks and the execution ledger (own record only)
 │   │   ├── profile_card.py     # Bounded profile card: ProfileCardStore (one row per agent) and ProfileCardWriter (sleep phase, cited lines, fails closed)
-│   │   ├── entity_profile.py   # F119 per-entity profiles: EntityProfileStore (one row per agent and entity key) and EntityProfileWriter (last sleep phase, verdict, dated cited lines, daily call limit)
+│   │   ├── entity_profile.py   # F119 per-entity profiles: EntityProfileStore (one row per agent and entity key; the turn's two reads) and EntityProfileWriter (last sleep phase, verdict, dated cited lines, daily call limit); use_mode and match_profiled_keys for a turn (the context engine renders the section)
 │   │   ├── censors.py          # Guardrail censors
 │   │   ├── censor_actions.py   # F031: Censor action executor (read-only tools)
 │   │   ├── working_memory.py   # Short-term scratch space

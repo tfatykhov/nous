@@ -1,7 +1,9 @@
 """Per-entity profiles (F119): a short, dated profile of each entity the agent's facts talk about.
 
 The last sleep phase writes them (``EntityProfileWriter.run_sleep``) and the owner reads them on ``GET
-/entity-profiles``; nothing reads a profile in a turn yet. Candidates are the keys of ``heart.fact_entity_keys`` with at
+/entity-profiles``; with ``NOUS_ENTITY_PROFILE_USE`` (``use_mode``) a turn whose message names a profiled entity reads
+it (``match_profiled_keys``, ``EntityProfileStore.profiled_vocabulary`` and ``turn_profiles``; the context engine
+renders it). Candidates are the keys of ``heart.fact_entity_keys`` with at
 least ``entity_profile_min_facts`` active, unsuperseded facts. The keys ``user`` and ``assistant`` and the owner's own
 keys (``entity_profile_owner_keys``) are stored as ``owner`` without a model call. For any other key one model call,
 shown the key's newest facts, decides whether the key names an entity and writes its lines. A ``not_entity`` verdict is
@@ -26,6 +28,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -37,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
 from nous.handlers import LLMClient, call_background_llm_structured
-from nous.heart.keys import normalize_key
+from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.profile_card import (
     CHARS_PER_TOKEN,
     LINE_CHARS,
@@ -83,6 +86,23 @@ LIST_LIMIT_MAX = 1000
 ID_CHUNK = 5000
 # What Postgres text and JSONB cannot store: NUL, and lone surrogates (not valid UTF-8).
 _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
+
+# A turn (PR 3, NOUS_ENTITY_PROFILE_USE): the modes, the most profiles one turn reads, the section's size in tokens
+# (before the context engine's budget scaling) and the most matched keys the turn's record keeps.
+USE_MODES = ("off", "trace", "on")
+TURN_MAX_PROFILES = 3
+TURN_MAX_TOKENS = 400
+RECORD_MATCHED_MAX = 20
+# The keys a turn can match, cached per agent in this process. Profiles change only when a writer writes: this
+# process's writer clears the agent's entry on every write (``invalidate_profiled_vocabulary``), so its changes are seen
+# on the next turn. A write by another process cannot clear it, so an entry lives at most 300 seconds, as the
+# entity-key vocabulary's does (nous/heart/facts.py). A key whose last live line died since it was cached costs one
+# read that shows nothing: the turn's read checks every line again.
+VOCAB_TTL_SECONDS = 300.0
+_vocab_cache: dict[str, tuple[frozenset[str], float]] = {}
+# Bumped on every clear, so a read that started before a write does not store what it read.
+_vocab_gen: dict[str, int] = {}
+_warned_use_values: set[str] = set()
 
 _SYSTEM_PROMPT = (
     "You write a short profile of one entity for an AI agent's memory: one specific person, place, project, device, "
@@ -172,6 +192,42 @@ def _source_row(fact: Fact) -> str:
         overrides_prior=fact.overrides_prior,
     )
     return f"{_render_fact(shown)} | stated {_stated_on(fact) or 'unknown'}"
+
+
+def use_mode(settings: Any) -> str:
+    """``NOUS_ENTITY_PROFILE_USE`` as it reads now: ``off``, ``trace`` or ``on``, case and spaces ignored. An empty
+    value is off; any other value is off too, with one warning per value in this process."""
+    raw = getattr(settings, "entity_profile_use", "off")
+    mode = raw.strip().lower() if isinstance(raw, str) else ""
+    if mode in USE_MODES:
+        return mode
+    if mode and mode not in _warned_use_values:
+        _warned_use_values.add(mode)
+        logger.warning("NOUS_ENTITY_PROFILE_USE=%r is not off, trace or on: entity profiles stay off", raw)
+    return "off"
+
+
+def invalidate_profiled_vocabulary(agent_id: str) -> None:
+    """Drop the agent's cached profiled keys: the next turn reads them again."""
+    _vocab_cache.pop(agent_id, None)
+    _vocab_gen[agent_id] = _vocab_gen.get(agent_id, 0) + 1
+
+
+def match_profiled_keys(text: str, vocab: frozenset[str]) -> list[str]:
+    """The profiled keys ``text`` names, longest first and then by position, without a key whose words are a run of
+    words inside a longer key also named ("the X repo" gives ``x repo``, not also ``x`` and ``repo``).
+
+    The keyed fact leg's matcher (``extract_entity_candidates`` with ``vocab_only``): the message is normalised as
+    entity keys are and only its first 1,000 characters are read.
+    """
+    found = extract_entity_candidates(text, vocab=vocab, max_candidates=None, vocab_only=True)
+    words = {key: key.split() for key in found}
+
+    def _inside(short: list[str], long: list[str]) -> bool:
+        n = len(short)
+        return n < len(long) and any(long[i : i + n] == short for i in range(len(long) - n + 1))
+
+    return [key for key in found if not any(_inside(words[key], words[other]) for other in found)]
 
 
 def owner_keys(settings: Settings) -> set[str]:
@@ -357,6 +413,55 @@ GROUP BY k.key
 """
 
 
+# A turn's two reads. A stored line is ``{text, fact_ids, ...}``; anything else (a line that is not an object,
+# ``fact_ids`` that is not an array, an id that is not a UUID) reads as citing no live fact, never as an error.
+def _array_or_empty(expr: str) -> str:
+    """``expr`` when it is a JSONB array, else an empty one (so the set-returning functions never raise)."""
+    return f"CASE WHEN jsonb_typeof({expr}) = 'array' THEN {expr} ELSE CAST('[]' AS jsonb) END"
+
+
+_LINES = _array_or_empty("p.lines")
+_CITED = _array_or_empty("l.line -> 'fact_ids'")
+# Lines cite ``str(fact.id)``, so an id counts only in that form, the one ``CAST(f.id AS text)`` gives back.
+_LIVE_FACT = (
+    "f.agent_id = :agent AND f.active = true AND f.superseded_by IS NULL AND f.id = CASE WHEN c.fid ~ "
+    "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN CAST(c.fid AS uuid) END"
+)
+# The keys of the agent's active profile rows that have at least one line citing only live facts.
+_VOCAB_SQL = f"""
+SELECT p.entity_key
+FROM nous_system.entity_profile p
+WHERE p.agent_id = :agent AND p.active = true AND p.status = 'profile'
+  AND EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements({_LINES}) AS l(line)
+    WHERE jsonb_array_length({_CITED}) > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text({_CITED}) AS c(fid)
+        WHERE NOT EXISTS (SELECT 1 FROM heart.facts f WHERE {_LIVE_FACT})
+      )
+  )
+"""
+# The active profile rows of ``keys``, one row per cited id with the fact's statement times when it is live (NULL
+# when not), and one row with no id for a profile that cites none.
+_TURN_SQL = f"""
+WITH p AS (
+    SELECT entity_key, display_name, kind, lines
+    FROM nous_system.entity_profile
+    WHERE agent_id = :agent AND active = true AND status = 'profile' AND entity_key = ANY(CAST(:keys AS text[]))
+), cited AS (
+    SELECT DISTINCT p.entity_key, c.fid
+    FROM p
+    CROSS JOIN LATERAL jsonb_array_elements({_LINES}) AS l(line)
+    CROSS JOIN LATERAL jsonb_array_elements_text({_CITED}) AS c(fid)
+)
+SELECT p.entity_key, p.display_name, p.kind, p.lines, CAST(f.id AS text) AS fact_id, f.mentioned_at, f.learned_at
+FROM p
+LEFT JOIN cited c ON c.entity_key = p.entity_key
+LEFT JOIN heart.facts f ON {_LIVE_FACT}
+"""
+
+
 class EntityProfileStore:
     """Read and write one agent's entity profile rows."""
 
@@ -442,6 +547,41 @@ class EntityProfileStore:
             )
             return list((await s.execute(stmt)).scalars())
 
+    async def profiled_vocabulary(self) -> frozenset[str]:
+        """The keys a turn can match: those of the active ``profile`` rows with at least one line whose cited facts
+        are all live. One query in a session of its own, cached for ``VOCAB_TTL_SECONDS`` (see there)."""
+        cached = _vocab_cache.get(self.agent_id)
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < VOCAB_TTL_SECONDS:
+            return cached[0]
+        gen = _vocab_gen.get(self.agent_id, 0)
+        async with self._db.session() as s:
+            keys = frozenset((await s.execute(text(_VOCAB_SQL), {"agent": self.agent_id})).scalars())
+        # Stored only when no write cleared the entry while the query ran (no await between the test and the store).
+        if gen == _vocab_gen.get(self.agent_id, 0):
+            _vocab_cache[self.agent_id] = (keys, now)
+        return keys
+
+    async def turn_profiles(self, keys: list[str], session: AsyncSession | None = None) -> dict[str, dict]:
+        """The active ``profile`` rows of ``keys`` in one query: per key its ``display_name``, ``kind`` and stored
+        ``lines``, and ``facts``, the live facts its lines cite (by id, each with ``mentioned_at`` and
+        ``learned_at``). A cited fact missing from ``facts`` is not live: inactive, superseded or another agent's."""
+        if not keys:
+            return {}
+        out: dict[str, dict] = {}
+        async with _session_scope(self._db, session) as s:
+            result = await s.execute(text(_TURN_SQL), {"agent": self.agent_id, "keys": list(keys)})
+            for row in result:
+                profile = out.setdefault(
+                    row.entity_key,
+                    {"display_name": row.display_name, "kind": row.kind, "lines": row.lines, "facts": {}},
+                )
+                if row.fact_id is not None:
+                    profile["facts"][row.fact_id] = SimpleNamespace(
+                        mentioned_at=row.mentioned_at, learned_at=row.learned_at
+                    )
+        return out
+
     async def written_last_day(self, session: AsyncSession | None = None) -> int:
         """Rows written with a model call in the last 24 hours: every row but ``owner`` rows, whose ``written_at``
         moves on each verdict, profile and failed reply."""
@@ -510,6 +650,8 @@ class EntityProfileStore:
                 row.written_at = now
             row.updated_at = now
             await s.flush()
+            # The run clears it again once its writes are committed (run_sleep, rebuild).
+            invalidate_profiled_vocabulary(self.agent_id)
             return _as_dict(row)
 
     async def count_call(
@@ -819,6 +961,8 @@ class EntityProfileWriter:
                     # One entity's failure never stops the others (each writes in its own transaction).
                     logger.warning("Entity profile: one entity failed", exc_info=True)
                     stats["errors"] += 1
+            # Each write cleared the cached keys before its commit; a turn that read them in between saw the old rows.
+            invalidate_profiled_vocabulary(self.agent_id)
             stats["outcome"] = stats["outcome"] or "done"
             return stats
 
@@ -864,6 +1008,7 @@ class EntityProfileWriter:
                 stats["outcome"] = "at_limit"
             else:
                 stats["outcome"] = await self._ask(norm, count, facts, entity_source_hash(facts), row, stats, session)
+            invalidate_profiled_vocabulary(self.agent_id)  # as at the end of run_sleep
             written = await self.store.get(norm, session=session)
             # As the GET routes do: only the lines whose cited facts are all live now.
             stats["profile"] = (await self.store.with_live_lines([written], session=session))[0] if written else None

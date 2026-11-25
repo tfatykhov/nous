@@ -167,7 +167,8 @@ class TurnRecord:
     """One turn, as the runner saw it at the turn's end: the ``agent_turn_log`` columns except ``agent_id`` (the
     recorder's). ``id`` is the turn's ``turn_id``, the one its tool-call rows carry. Text and JSON fields are given
     raw; the recorder redacts and clips them. ``memory_context`` maps a kind of memory (decision, fact, procedure,
-    episode) to the ids recalled into the turn's context. ``started_at`` None means the time the row is written.
+    episode) to the ids recalled into the turn's context, and ``entity_profiles``, when the turn's Entity Profiles leg
+    ran (F119 PR 3), to its record: keys and numbers. ``started_at`` None means the time the row is written.
     F110: ``frame_reason`` is the frame's ``match_method``, ``critic_frame`` the frame the critic recommended as a label
     (a frame id, or ``unknown`` for anything else; None when the critic did not run or its model gave no frame) and
     ``had_error`` whether the turn ended with an error."""
@@ -183,7 +184,7 @@ class TurnRecord:
     critic_frame: str | None = None
     had_error: bool | None = None
     trigger_text: str | None = None
-    memory_context: dict[str, list[str]] | None = None
+    memory_context: dict[str, Any] | None = None
     critic: dict[str, Any] | None = None
     claim_check: dict[str, Any] | None = None
     reply_text: str | None = None
@@ -268,8 +269,9 @@ class ToolCallRecorder:
         self._writer.submit(lambda: self._insert(params), stats=self._stats)
 
     def record_turn(self, rec: TurnRecord) -> None:
-        """Redact and clip the turn's text, keep at most ``MEMORY_IDS_PER_KIND`` ids per kind of memory, then
-        schedule its UPSERT on ``id``. Synchronous; never raises."""
+        """Redact and clip the turn's text, keep at most ``MEMORY_IDS_PER_KIND`` ids per kind of memory (a record that
+        is not a list of ids, the entity profiles one, is redacted as the critic is), then schedule its UPSERT on
+        ``id``. Synchronous; never raises."""
         try:
             params = {f.name: getattr(rec, f.name) for f in fields(rec)}
             params["agent_id"] = self._agent_id
@@ -281,7 +283,10 @@ class ToolCallRecorder:
                 params["error"] = detail_text(rec.error, ERROR_TEXT_MAX_CHARS)
             memory = rec.memory_context
             if memory is not None:
-                memory = {kind: list(ids)[:MEMORY_IDS_PER_KIND] for kind, ids in memory.items()}
+                memory = {
+                    kind: list(ids)[:MEMORY_IDS_PER_KIND] if isinstance(ids, (list, tuple)) else _redacted_json(ids)
+                    for kind, ids in memory.items()
+                }
             params["memory_context"] = _json_param(memory)
             params["critic"] = _json_param(_redacted_json(rec.critic))
             params["claim_check"] = _json_param(_redacted_json(rec.claim_check))
