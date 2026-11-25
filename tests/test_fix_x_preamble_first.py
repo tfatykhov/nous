@@ -239,6 +239,11 @@ _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a request: the body of an incoming request to the second judge's settings routes (F118 PR 3), read "
         "from Starlette's stream and refused past 4096 bytes",
     ),
+    ("nous/heart/entity_profile.py", "_ReplySeen.call", "self._client.call"): (
+        1,
+        "passes on, unchanged, the payload call_background_llm_structured built with the preamble at block 0 "
+        "(F119: the wrapper only notes that a reply came back)",
+    ),
 }
 _REQUEST_METHODS = frozenset({"call", "stream", "call_streaming_aggregated"})
 

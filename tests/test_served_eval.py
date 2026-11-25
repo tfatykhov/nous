@@ -190,6 +190,9 @@ def test_never_apply_keeps_retrieval_knobs_whose_names_look_like_secrets() -> No
         "entity_key_min_chars",
         "profile_card_max_tokens",
         "supersession_key_resolution_enabled",
+        "entity_profile_max_tokens",
+        "entity_profile_owner_keys",
+        "entity_profile_max_calls_per_day",
     ):
         assert not settings.NEVER_APPLY.search(name), name
     for name in (

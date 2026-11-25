@@ -1430,6 +1430,16 @@ async def create_components(settings: Settings) -> dict:
             else:
                 logger.warning("NOUS_PROFILE_CARD_WRITER_ENABLED needs sleep: the profile card writer stays off")
 
+        # Entity profiles (F119): the last sleep phase writes per-entity profiles, in shadow (needs sleep)
+        if settings.entity_profile_writer_enabled:
+            if sleep_handler is not None:
+                from nous.heart.entity_profile import EntityProfileWriter
+
+                sleep_handler._entity_profile_writer = EntityProfileWriter(database, settings, api_client)
+                logger.info("Entity profiles: EntityProfileWriter wired into sleep handler")
+            else:
+                logger.warning("NOUS_ENTITY_PROFILE_WRITER_ENABLED needs sleep: the entity profile writer stays off")
+
         try:
             from nous.handlers.decision_reviewer import DecisionReviewer
 

@@ -21,7 +21,8 @@ Clock: each session runs at its BEAM date. Its episode is dated before summarizi
 (the summarizer resolves relative dates against ``started_at``), and every fact
 written while the session (or the sleep cycle after its batch) is processed gets
 that date as ``created_at``/``learned_at`` (and ``mentioned_at`` where the column
-exists). arms.EVAL_OVERRIDES turns the sleep stale scan off for every arm; what
+exists). arms.EVAL_OVERRIDES turns the sleep stale scan off for every arm, and
+arms.EVAL_DEFAULTS the entity profile writer for every arm that does not name it; what
 still reads the wall clock is listed in arms.CLOCK_NOTES and recorded with the run.
 With ``sleep=True`` a full sleep cycle runs after each batch (BEAM batches are days
 apart). Sleep reflection reads only episodes started within
@@ -262,6 +263,10 @@ async def open_stack(
                 from nous.heart.profile_card import ProfileCardWriter
 
                 sleep_handler._profile_card_writer = ProfileCardWriter(db, settings, llm)
+            if settings.entity_profile_writer_enabled:  # main.py: entity profiles are written in the last sleep phase
+                from nous.heart.entity_profile import EntityProfileWriter
+
+                sleep_handler._entity_profile_writer = EntityProfileWriter(db, settings, llm)
 
         async with db.session() as s:
             columns = set(

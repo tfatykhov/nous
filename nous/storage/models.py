@@ -2355,6 +2355,35 @@ class ProfileCard(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class EntityProfile(Base):
+    """Migration 123 (F119): one entity's profile, one row per agent and entity key.
+
+    Written by ``nous.heart.entity_profile``: the sleep phase and ``POST /entity-profiles/rebuild`` replace ``lines``
+    (the old ones move to ``previous_lines``). Each line is ``{id, text, fact_ids, said_on, date_from}``. ``status``
+    is ``profile``, ``not_entity``, ``owner``, ``asked`` or ``failed``; ``active`` is the soft delete.
+    """
+
+    __tablename__ = "entity_profile"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    entity_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lines: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    previous_lines: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    rejected: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    source_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    fact_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class MemoryWriteHealthDaily(Base):
     """Migration 099: the daily memory write-health rollup, one row per agent per UTC day.
 

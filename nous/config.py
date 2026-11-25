@@ -504,6 +504,70 @@ class Settings(BaseSettings):
         ge=0,
         description="Recent closed episode summaries the card writer sees, for currency only (0 shows none).",
     )
+    # Per-entity profiles (F119 PR 1: the writer, in shadow). The last sleep phase writes a short dated profile of
+    # each entity key with enough active facts; the owner reads them on GET /entity-profiles. Nothing is sent to the
+    # model in a turn.
+    entity_profile_writer_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run the entity profile sleep phase and allow POST /entity-profiles/rebuild (on by default; false "
+            "switches both off). Shadow: profiles are readable on GET /entity-profiles and never sent to the model."
+        ),
+    )
+    entity_profile_min_facts: int = Field(
+        default=10,
+        ge=1,
+        description="Active, unsuperseded facts an entity key needs before the sleep phase writes its profile.",
+    )
+    entity_profile_max_profiles: int = Field(
+        default=150,
+        ge=1,
+        description="Most entity keys the sleep phase considers, those with the most active facts first.",
+    )
+    entity_profile_max_calls_per_day: int = Field(
+        default=40,
+        ge=1,
+        description=(
+            "Most model calls the sleep phase makes for entity profiles in any 24 hours. An entity written with a "
+            "call is not asked again for 24 hours, so the rows written in the last 24 hours are the calls made; only "
+            "the owner's rebuild of such an entity adds a call beyond them."
+        ),
+    )
+    entity_profile_max_lines: int = Field(
+        default=8,
+        ge=1,
+        description="Most lines one entity profile keeps.",
+    )
+    entity_profile_max_tokens: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Size bound of one entity profile in tokens (characters / 4) as rendered, heading and dates included; "
+            "whole lines are dropped from the end to fit."
+        ),
+    )
+    entity_profile_source_limit: int = Field(
+        default=40,
+        ge=1,
+        description="The newest active facts of an entity key the profile writer reads.",
+    )
+    entity_profile_owner_keys: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Comma list of entity keys that name the owner. With user and assistant they get no profile and no "
+            "model call (the profile card covers the owner). Normalised as entity keys are. Empty: only user and "
+            "assistant."
+        ),
+    )
+
+    @field_validator("entity_profile_owner_keys", mode="before")
+    @classmethod
+    def _split_entity_profile_owner_keys(cls, v: object) -> object:
+        """Split the env string ourselves (NoDecode) into its stripped, non-empty entries."""
+        if isinstance(v, str):
+            return [p.strip() for p in v.split(",") if p.strip()]
+        return v
+
     fact_pin_top_k: int = Field(
         default=0,
         ge=0,

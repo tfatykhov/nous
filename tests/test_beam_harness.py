@@ -373,6 +373,15 @@ def test_build_settings_applies_override_and_eval_overrides(monkeypatch: pytest.
     assert "NOUS_SLEEP_REFLECTION_HOURS" not in os.environ
 
 
+def test_eval_defaults_apply_unless_the_arm_names_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOUS_ENTITY_PROFILE_WRITER_ENABLED", "true")  # an environment value is not an arm's
+    assert arms.EVAL_DEFAULTS == {"entity_profile_writer_enabled": False}
+    assert arms.build_settings(DB_URL, "a", {}).entity_profile_writer_enabled is False
+    named = arms.build_settings(DB_URL, "a", {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "true"})
+    assert named.entity_profile_writer_enabled is True
+    assert set(arms.EVAL_DEFAULTS) <= arms.ARM_SETTINGS and set(arms.EVAL_DEFAULTS) <= set(arms.SNAPSHOT_FIELDS)
+
+
 def test_build_settings_rejects_malformed_db_url() -> None:
     with pytest.raises(SystemExit):
         arms.build_settings("not-a-url", "a", {})
@@ -717,6 +726,70 @@ async def test_sleep_stack_wires_the_profile_card_writer_behind_its_flag(db, fla
     async with harness.open_stack(settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), sleep=True) as stack:
         writer = stack.sleep_handler._profile_card_writer
     assert isinstance(writer, ProfileCardWriter) is wired
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(("flag", "wired"), [("true", True), ("false", False), (None, False)])
+async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, flag: str | None, wired: bool) -> None:
+    """As main.py does: with sleep on, the entity profile writer is injected exactly when its flag is on. An eval
+    arm that does not name the flag runs without it (arms.EVAL_DEFAULTS)."""
+    from conftest import MockEmbeddingProvider
+
+    from nous.heart.entity_profile import EntityProfileWriter
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    overrides = {} if flag is None else {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": flag}
+    settings = arms.build_settings(db_url, "beam-entity-profile-check", overrides)
+    async with harness.open_stack(settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), sleep=True) as stack:
+        writer = stack.sleep_handler._entity_profile_writer
+    assert isinstance(writer, EntityProfileWriter) is wired
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(("overrides", "on"), [({}, False), ({"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "true"}, True)])
+async def test_a_sleep_asks_about_an_entity_only_when_the_arm_turns_the_writer_on(db, overrides, on) -> None:
+    """A full sleep cycle over a key with enough facts: an eval arm that does not name the writer makes no profile
+    call and writes no row; an arm that turns it on asks the model about the key (the fake model raises, so the
+    row is left as counted with no reply: asked)."""
+    from conftest import MockEmbeddingProvider
+    from sqlalchemy import select
+
+    from nous.storage.models import EntityProfile, Fact, FactEntityKey
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    agent = f"beam-entity-profile-{uuid.uuid4().hex[:8]}"
+    settings = arms.build_settings(db_url, agent, overrides)
+    assert settings.entity_profile_writer_enabled is on
+    llm = FakeLLM()
+    prompts: list[str] = []
+    answer = llm.call
+
+    async def recording(payload: dict) -> SimpleNamespace:
+        prompts.append(json.dumps(payload["messages"]))
+        return await answer(payload)
+
+    llm.call = recording
+    try:
+        async with harness.open_stack(settings, llm=llm, embeddings=MockEmbeddingProvider(), sleep=True) as stack:
+            await harness.ensure_agent(stack)
+            async with db.session() as s:
+                facts = [
+                    Fact(id=uuid.uuid4(), agent_id=agent, content=f"Larkspur garden note {i}", category="technical")
+                    for i in range(settings.entity_profile_min_facts)
+                ]
+                s.add_all(facts)
+                await s.flush()
+                s.add_all([FactEntityKey(fact_id=f.id, entity_key="larkspur garden", agent_id=agent) for f in facts])
+                await s.commit()
+            now = datetime.now(UTC)
+            await harness.run_sleep(stack, now, now)
+        async with db.session() as s:
+            rows = (await s.execute(select(EntityProfile).where(EntityProfile.agent_id == agent))).scalars().all()
+        asked = [p for p in prompts if "store_entity_profile" in p or "entity key" in p]
+        assert bool(asked) is on
+        assert [(r.entity_key, r.status) for r in rows] == ([("larkspur garden", "asked")] if on else [])
+    finally:
+        assert await purge_agent(db, agent) == []
 
 
 @pytest.mark.postgres_only

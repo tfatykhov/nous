@@ -69,7 +69,7 @@ DECLARE
     -- A check on a table that a migration after 106 creates waits for that migration (CI runs this script once with
     -- the migrations up to 106 and again after the later ones): until the migration is recorded the check is skipped
     -- and counted apart. Once it is, the check runs and its table must exist.
-    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122"}';
+    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122", "reader cannot read the entity profiles": "123"}';
     waiting int := 0;
     upsert text := 'INSERT INTO scoring.task_scores (agent_id, task_kind, task_id, finished_at, scorer_version, outcome) '
                    || 'VALUES (''verify'', ''subtask'', ''verify-1'', now(), 0, ''done_self'') '
@@ -162,6 +162,7 @@ BEGIN
         ('reader cannot read the pending resolutions', 'nous_reader', 'SELECT evidence FROM heart.pending_resolutions', 'error', NULL),
         ('reader cannot read the judge verdicts', 'nous_reader', 'SELECT verdict FROM nous_system.judge_verdicts', 'error', NULL),
         ('reader cannot read the second judge settings', 'nous_reader', 'SELECT model FROM nous_system.judge_second_settings', 'error', NULL),
+        ('reader cannot read the entity profiles', 'nous_reader', 'SELECT lines FROM nous_system.entity_profile', 'error', NULL),
         ('reader cannot INSERT', 'nous_reader', 'INSERT INTO heart.subtasks DEFAULT VALUES', 'error', NULL),
         ('reader cannot read a server file', 'nous_reader', 'SELECT pg_read_file(''/etc/hostname'')', 'error', NULL),
         ('reader cannot run a program', 'nous_reader', 'COPY (SELECT 1) TO PROGRAM ''true''', 'error', NULL),

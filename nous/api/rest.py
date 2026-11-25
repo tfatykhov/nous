@@ -881,6 +881,98 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse(result)
 
+    # ------------------------------------------------------------------
+    # Entity profiles (F119: written by the last sleep phase, in shadow; the owner reads them or rebuilds one)
+    # ------------------------------------------------------------------
+
+    def _entity_profile_store():
+        from nous.heart.entity_profile import EntityProfileStore
+
+        return EntityProfileStore(database, settings.agent_id)
+
+    async def list_entity_profiles(request: Request) -> JSONResponse:
+        """GET /entity-profiles?limit= — the profiles with their status and size, the keys with the most facts first
+        (``limit`` default 200, at most 1000). ``lines`` counts the lines whose cited facts are all live now."""
+        from nous.heart.entity_profile import LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX
+
+        try:
+            limit = int(request.query_params.get("limit", str(LIST_LIMIT_DEFAULT)))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        limit = max(1, min(limit, LIST_LIMIT_MAX))
+        try:
+            store = _entity_profile_store()
+            rows = await store.with_live_lines(await store.list(limit=limit))
+        except Exception as e:
+            logger.error("list_entity_profiles failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        fields = ("key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at")
+        profiles = [{**{k: row[k] for k in fields}, "lines": len(row["lines"])} for row in rows]
+        return JSONResponse({"writer_enabled": settings.entity_profile_writer_enabled, "profiles": profiles})
+
+    async def get_entity_profile(request: Request) -> JSONResponse:
+        """GET /entity-profiles/{key} — one profile: its dated lines whose cited facts are all live now, with the fact
+        ids each cites, the rejected lines, and the active facts that name the key in their text without carrying it
+        as an entity key (``unkeyed_mentions``, approximate)."""
+        from nous.heart.keys import normalize_key
+
+        key = normalize_key(request.path_params["key"])
+        unkeyed: dict[str, int] = {}
+        try:
+            store = _entity_profile_store()
+            row = await store.get(key) if key else None
+            if row is not None and row["active"]:
+                (row,) = await store.with_live_lines([row])
+                unkeyed = await store.unkeyed_mentions([key])
+        except Exception as e:
+            logger.error("get_entity_profile failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if row is None or not row["active"]:
+            return JSONResponse({"error": "no profile for this key"}, status_code=404)
+        fields = (
+            "key", "display_name", "kind", "status", "lines", "rejected", "fact_count", "source_count", "tokens",
+            "written_at",
+        )  # fmt: skip
+        return JSONResponse({**{k: row[k] for k in fields}, "unkeyed_mentions": unkeyed.get(key, 0)})
+
+    async def rebuild_entity_profile(request: Request) -> JSONResponse:
+        """POST /entity-profiles/rebuild — write one entity's profile now (body ``{"key": ...}``); 409 when the writer
+        is off, asleep or running, 400 without a key, 404 when no active fact carries the key, 429 when the day's
+        model calls are used. An owner key written with a call in the last 24 hours answers ``held`` (200)."""
+        from nous.heart.keys import normalize_key
+
+        # The body is read first: nothing is awaited between the check below and the writer, so two requests whose
+        # bodies arrive together cannot both pass it.
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        try:
+            # sleep_handler is a lazy proxy in prod: reading it raises RuntimeError while the component is unset.
+            writer = getattr(sleep_handler, "_entity_profile_writer", None) if sleep_handler else None
+            running = writer is not None and (sleep_handler.is_sleeping or writer.busy)
+        except (RuntimeError, AttributeError):
+            writer, running = None, False
+        if writer is None:
+            return JSONResponse({"error": "the entity profile writer is off"}, status_code=409)
+        if running:
+            return JSONResponse({"error": "a sleep cycle or another rebuild is running"}, status_code=409)
+        raw = body.get("key") if isinstance(body, dict) else None
+        key = normalize_key(raw) if isinstance(raw, str) else None
+        if not key:
+            return JSONResponse({"error": "key is required: one entity key"}, status_code=400)
+        try:
+            result = await writer.rebuild(key)
+        except Exception as e:
+            logger.error("rebuild_entity_profile failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if result.get("outcome") == "no_facts":
+            return JSONResponse({"error": "no active fact carries this key", **result}, status_code=404)
+        if result.get("outcome") == "at_limit":
+            refused = {"error": "the day's model calls for entity profiles are used", **result}
+            return JSONResponse(refused, status_code=429)
+        return JSONResponse(result)
+
     async def list_chunks(request: Request) -> JSONResponse:
         """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
 
@@ -4149,6 +4241,9 @@ def create_app(
         Route("/profile-card", get_profile_card),
         owner_guard.route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
         owner_guard.route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
+        Route("/entity-profiles", list_entity_profiles),
+        owner_guard.route("/entity-profiles/rebuild", rebuild_entity_profile, methods=["POST"]),
+        Route("/entity-profiles/{key}", get_entity_profile),
         owner_guard.route("/facts/{fact_id}", update_fact, methods=["PUT"]),
         owner_guard.route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),
