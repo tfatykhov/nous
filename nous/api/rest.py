@@ -892,29 +892,55 @@ def create_app(
         return EntityProfileStore(database, settings.agent_id)
 
     async def list_entity_profiles(request: Request) -> JSONResponse:
-        """GET /entity-profiles?limit= — the profiles with their status and size, the keys with the most facts first
-        (``limit`` default 200, at most 1000). ``lines`` counts the lines whose cited facts are all live now."""
-        from nous.heart.entity_profile import LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX
+        """GET /entity-profiles?limit=&offset=&q=&status= — the profiles with their status and size, the keys with the
+        most facts first (``limit`` default 200, at most 1000, from ``offset``, at most 10,000,000). ``q`` keeps the
+        keys and names that contain it; ``status`` is one of ``LIST_STATUSES`` (``removed``: the profiles the owner
+        removed; with none, every profile not removed). ``total`` counts the rows that match both, ``counts`` the rows
+        per status that match ``q``. ``lines`` counts the lines whose cited facts are all live now."""
+        from nous.heart.entity_profile import (
+            LIST_LIMIT_DEFAULT,
+            LIST_LIMIT_MAX,
+            LIST_OFFSET_MAX,
+            LIST_STATUSES,
+            list_row,
+        )
 
         try:
             limit = int(request.query_params.get("limit", str(LIST_LIMIT_DEFAULT)))
+            offset = int(request.query_params.get("offset", "0"))
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
         limit = max(1, min(limit, LIST_LIMIT_MAX))
+        offset = max(0, min(offset, LIST_OFFSET_MAX))
+        q = request.query_params.get("q", "").strip() or None
+        status = request.query_params.get("status") or None
+        if status is not None and status not in LIST_STATUSES:
+            return JSONResponse({"error": f"status must be one of {', '.join(LIST_STATUSES)}"}, status_code=400)
         try:
             store = _entity_profile_store()
-            rows = await store.with_live_lines(await store.list(limit=limit))
+            rows = await store.with_live_lines(await store.list(limit=limit, offset=offset, q=q, status=status))
+            counts = await store.counts(q=q)
         except Exception as e:
             logger.error("list_entity_profiles failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
-        fields = ("key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at")
-        profiles = [{**{k: row[k] for k in fields}, "lines": len(row["lines"])} for row in rows]
-        return JSONResponse({"writer_enabled": settings.entity_profile_writer_enabled, "profiles": profiles})
+        total = counts[status] if status is not None else sum(n for s, n in counts.items() if s != "removed")
+        return JSONResponse(
+            {
+                "writer_enabled": settings.entity_profile_writer_enabled,
+                "profiles": [list_row(row) for row in rows],
+                "counts": counts,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
 
     async def get_entity_profile(request: Request) -> JSONResponse:
         """GET /entity-profiles/{key} — one profile: its dated lines whose cited facts are all live now, with the fact
-        ids each cites, the rejected lines, and the active facts that name the key in their text without carrying it
-        as an entity key (``unkeyed_mentions``, approximate)."""
+        ids each cites, the rejected lines, the lines the owner removed (``removed_lines``, newest first, with who and
+        when), the owner's verdict, and the active facts that name the key in their text without carrying it as an
+        entity key (``unkeyed_mentions``, approximate). 404 for a profile the owner removed."""
+        from nous.heart.entity_profile import detail_body
         from nous.heart.keys import normalize_key
 
         key = normalize_key(request.path_params["key"])
@@ -930,16 +956,89 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
         if row is None or not row["active"]:
             return JSONResponse({"error": "no profile for this key"}, status_code=404)
-        fields = (
-            "key", "display_name", "kind", "status", "lines", "rejected", "fact_count", "source_count", "tokens",
-            "written_at",
-        )  # fmt: skip
-        return JSONResponse({**{k: row[k] for k in fields}, "unkeyed_mentions": unkeyed.get(key, 0)})
+        return JSONResponse(detail_body(row, unkeyed.get(key, 0)))
+
+    # The owner's corrections (F119 PR 2). Each answers 404 when there is nothing to change.
+
+    def _profile_key(request: Request) -> str | None:
+        from nous.heart.keys import normalize_key
+
+        return normalize_key(request.path_params["key"])
+
+    async def _owner_change(request: Request, name: str, change: Any) -> JSONResponse:
+        """Run one owner change (``change(store, key)`` answers whether there was something to change)."""
+        key = _profile_key(request)
+        try:
+            done = bool(key) and await change(_entity_profile_store(), key)
+        except Exception as e:
+            logger.error("%s failed: %s", name, e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if not done:
+            return JSONResponse({"error": "no such profile or line"}, status_code=404)
+        return JSONResponse({"status": "done", "key": key})
+
+    async def remove_entity_profile_line(request: Request) -> JSONResponse:
+        """DELETE /entity-profiles/{key}/lines/{line_id} — remove one line now; no later write brings back a line with
+        its text or citing exactly the same facts."""
+        by = owner_guard.proof(request)
+        line_id = request.path_params["line_id"]
+        return await _owner_change(
+            request, "remove_entity_profile_line", lambda store, key: store.remove_line(key, line_id, by)
+        )
+
+    async def restore_entity_profile_line(request: Request) -> JSONResponse:
+        """POST /entity-profiles/{key}/lines/{line_id}/restore — put a removed line back; 409 when the key has no
+        profile now, a fact the line cites is no longer live, or the profile would be over its line or size bound."""
+        key = _profile_key(request)
+        bounds = {"max_lines": settings.entity_profile_max_lines, "max_tokens": settings.entity_profile_max_tokens}
+        try:
+            store = _entity_profile_store()
+            outcome = await store.restore_line(key, request.path_params["line_id"], **bounds) if key else None
+        except Exception as e:
+            logger.error("restore_entity_profile_line failed: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if outcome == "no_profile":
+            return JSONResponse({"error": "this key has no profile now"}, status_code=409)
+        if outcome == "too_big":
+            too_big = (
+                f"putting it back would make the profile longer than its bound of {bounds['max_lines']} lines and "
+                f"{bounds['max_tokens']} tokens; remove another line first"
+            )
+            return JSONResponse({"error": too_big}, status_code=409)
+        if outcome == "not_live":
+            return JSONResponse({"error": "a fact this line cites is no longer live"}, status_code=409)
+        if outcome != "restored":
+            return JSONResponse({"error": "no such profile or line"}, status_code=404)
+        return JSONResponse({"status": "done", "key": key})
+
+    async def remove_entity_profile(request: Request) -> JSONResponse:
+        """DELETE /entity-profiles/{key} — remove the whole profile (soft): never listed as current, written or asked
+        about until restored."""
+        return await _owner_change(request, "remove_entity_profile", lambda store, key: store.set_active(key, False))
+
+    async def restore_entity_profile(request: Request) -> JSONResponse:
+        """POST /entity-profiles/{key}/restore — bring back a profile the owner removed, as it was."""
+        return await _owner_change(request, "restore_entity_profile", lambda store, key: store.set_active(key, True))
+
+    async def mark_entity_profile_not_entity(request: Request) -> JSONResponse:
+        """POST /entity-profiles/{key}/not-entity — the owner says the key is not an entity: it is not asked about or
+        written again until the owner takes that back."""
+        by = owner_guard.proof(request)
+        return await _owner_change(
+            request, "mark_entity_profile_not_entity", lambda store, key: store.set_owner_verdict(key, True, by)
+        )
+
+    async def unmark_entity_profile_not_entity(request: Request) -> JSONResponse:
+        """DELETE /entity-profiles/{key}/not-entity — take back the owner's "not an entity"."""
+        return await _owner_change(
+            request, "unmark_entity_profile_not_entity", lambda store, key: store.set_owner_verdict(key, False, None)
+        )
 
     async def rebuild_entity_profile(request: Request) -> JSONResponse:
         """POST /entity-profiles/rebuild — write one entity's profile now (body ``{"key": ...}``); 409 when the writer
         is off, asleep or running, 400 without a key, 404 when no active fact carries the key, 429 when the day's
-        model calls are used. An owner key written with a call in the last 24 hours answers ``held`` (200)."""
+        model calls are used. A key written with a call in the last 24 hours answers ``held`` (200, no call) with
+        ``next_at``, when it can be written again."""
         from nous.heart.keys import normalize_key
 
         # The body is read first: nothing is awaited between the check below and the writer, so two requests whose
@@ -4245,6 +4344,14 @@ def create_app(
         Route("/entity-profiles", list_entity_profiles),
         owner_guard.route("/entity-profiles/rebuild", rebuild_entity_profile, methods=["POST"]),
         Route("/entity-profiles/{key}", get_entity_profile),
+        owner_guard.route("/entity-profiles/{key}", remove_entity_profile, methods=["DELETE"]),
+        owner_guard.route("/entity-profiles/{key}/restore", restore_entity_profile, methods=["POST"]),
+        owner_guard.route("/entity-profiles/{key}/not-entity", mark_entity_profile_not_entity, methods=["POST"]),
+        owner_guard.route("/entity-profiles/{key}/not-entity", unmark_entity_profile_not_entity, methods=["DELETE"]),
+        owner_guard.route("/entity-profiles/{key}/lines/{line_id}", remove_entity_profile_line, methods=["DELETE"]),
+        owner_guard.route(
+            "/entity-profiles/{key}/lines/{line_id}/restore", restore_entity_profile_line, methods=["POST"]
+        ),
         owner_guard.route("/facts/{fact_id}", update_fact, methods=["PUT"]),
         owner_guard.route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),

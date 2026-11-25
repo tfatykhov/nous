@@ -16,6 +16,7 @@ from nous.storage.models import EntityProfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "sql" / "migrations" / "123_entity_profile.sql"
+MIGRATION_125 = ROOT / "sql" / "migrations" / "125_entity_profile_owner_verdict.sql"
 
 
 def _sql() -> str:
@@ -50,6 +51,10 @@ def test_the_migration_has_nothing_the_splitter_or_text_would_mangle():
 def test_the_columns_match_the_orm_model():
     body = _split_sql_statements(_sql())[0]
     sql_columns = set(re.findall(r"^\s{4}([a-z_]+)\s+(?:VARCHAR|JSONB|TEXT|INT|BOOLEAN|TIMESTAMPTZ)", body, re.M))
+    # Migration 125 adds the owner's verdict.
+    sql_columns |= set(
+        re.findall(r"ADD COLUMN IF NOT EXISTS ([a-z_]+) JSONB", MIGRATION_125.read_text(encoding="utf-8"))
+    )
     assert sql_columns == {c.name for c in EntityProfile.__table__.columns}
     assert EntityProfile.__table__.fullname == "nous_system.entity_profile"
     assert [c.name for c in EntityProfile.__table__.primary_key.columns] == ["agent_id", "entity_key"]
@@ -92,13 +97,24 @@ async def test_one_row_per_agent_and_key_with_the_defaults(db, session):
     row = (
         await session.execute(
             text(
-                "SELECT lines, previous_lines, rejected, tokens, fact_count, source_count, active"
+                "SELECT lines, previous_lines, rejected, tokens, fact_count, source_count, active, owner_verdict"
                 " FROM nous_system.entity_profile WHERE agent_id = :a AND entity_key = :k"
             ),
             {"a": agent, "k": "zephyrine"},
         )
     ).one()
-    assert tuple(row) == ([], [], [], 0, 0, 0, True)
+    assert tuple(row) == ([], [], [], 0, 0, 0, True, None)
     with pytest.raises(IntegrityError):
         async with session.begin_nested():
             await session.execute(insert, {"a": agent, "k": "zephyrine"})
+
+
+def test_migration_125_adds_one_nullable_column_and_nothing_else():
+    sql = MIGRATION_125.read_text(encoding="utf-8")
+    (statement,) = _split_sql_statements(sql)
+    assert re.sub(r"\s+", " ", statement).strip().rstrip(";") == (
+        "ALTER TABLE nous_system.entity_profile ADD COLUMN IF NOT EXISTS owner_verdict JSONB"
+    )
+    assert all(";" not in ln for ln in sql.splitlines() if ln.lstrip().startswith("--"))
+    assert "/*" not in sql and "$$" not in sql
+    assert "entity_profile" not in (ROOT / "scripts" / "ops" / "db_roles.sql").read_text(encoding="utf-8")

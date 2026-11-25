@@ -510,7 +510,8 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "Run the entity profile sleep phase and allow POST /entity-profiles/rebuild (on by default; false "
-            "switches both off). Shadow: profiles are readable on GET /entity-profiles and never sent to the model."
+            "switches both off). Profiles are readable on GET /entity-profiles and reach a turn only with "
+            "NOUS_ENTITY_PROFILE_USE."
         ),
     )
     entity_profile_min_facts: int = Field(
@@ -527,9 +528,9 @@ class Settings(BaseSettings):
         default=40,
         ge=1,
         description=(
-            "Most model calls the sleep phase makes for entity profiles in any 24 hours. An entity written with a "
-            "call is not asked again for 24 hours, so the rows written in the last 24 hours are the calls made; only "
-            "the owner's rebuild of such an entity adds a call beyond them."
+            "Most model calls made for entity profiles in any 24 hours, by the sleep phase and the owner's rebuild "
+            "alike. An entity written with a call is not written again for 24 hours, so the rows written in the last "
+            "24 hours are the calls made; the limit has no exception."
         ),
     )
     entity_profile_max_lines: int = Field(

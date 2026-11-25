@@ -1016,7 +1016,8 @@ async def test_an_inactive_row_is_never_written_again(db, session):
     await _keyed(session, agent, "zephyrine", {"content": "a change"})
 
     stats = await writer.run_sleep(session=session)
-    assert stats["inactive"] == 1 and len(llm.prompts) == 1
+    # A removed profile is not even a candidate (F119 PR 2), so it takes no place among them.
+    assert stats["candidates"] == 0 and len(llm.prompts) == 1
     assert (await writer.rebuild("zephyrine", session=session))["outcome"] == "inactive"
 
 
@@ -1035,18 +1036,25 @@ async def test_a_rebuild_asks_for_one_key_even_when_unchanged_within_the_daily_l
     await writer.run_sleep(session=session)
     assert len(llm.prompts) == 2
 
-    # Two rows written in the last 24 hours: the day's calls are used.
+    # Written in the last 24 hours: its row stands for that call, so the rebuild makes none (no exception).
     held = await writer.rebuild("Zephyrine's", session=session)
-    assert (held["outcome"], held["key"], len(llm.prompts)) == ("at_limit", "zephyrine", 2)
+    assert (held["outcome"], held["key"], len(llm.prompts)) == ("held", "zephyrine", 2)
 
+    # zephyrine's 24 hours have passed; quillon's call still counts, one of the two: the rebuild asks, unchanged facts
+    # and all.
     await session.execute(
         update(EntityProfile)
-        .where(EntityProfile.agent_id == agent, EntityProfile.entity_key == "quillon")
+        .where(EntityProfile.agent_id == agent, EntityProfile.entity_key == "zephyrine")
         .values(written_at=datetime.now(UTC) - timedelta(hours=25))
     )
     result = await writer.rebuild("Zephyrine's", session=session)
     assert (result["outcome"], len(llm.prompts)) == ("written", 3)
     assert result["profile"]["lines"][0]["text"] == "Zephyrine keeps bees."
+
+    # Both rows written in the last 24 hours: the day's calls are used, and a key with no row is refused.
+    await _keyed(session, agent, "birchwood", {}, {})
+    refused = await writer.rebuild("birchwood", session=session)
+    assert (refused["outcome"], len(llm.prompts)) == ("at_limit", 3)
 
 
 @pytest.mark.postgres_only
@@ -1059,7 +1067,7 @@ async def test_a_rebuild_answers_with_live_lines_only(db, session):
 
     await session.execute(update(Fact).where(Fact.id == f1.id).values(active=False))
     result = await writer.rebuild("zephyrine", session=session)
-    assert result["outcome"] == "at_limit" and len(llm.prompts) == 1
+    assert result["outcome"] == "held" and len(llm.prompts) == 1
     assert [ln["text"] for ln in result["profile"]["lines"]] == ["Zephyrine sails."]
 
 
@@ -1330,6 +1338,7 @@ async def test_get_lists_the_profiles_and_one_profile_in_full_with_live_lines_on
         zephyrine = listed["profiles"][1]
         assert set(zephyrine) == {
             "key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at", "lines",
+            "active", "owner_verdict",
         }  # fmt: skip
         assert (zephyrine["status"], zephyrine["lines"]) == ("profile", 1)  # the line on a dead fact is not counted
 
@@ -1454,8 +1463,16 @@ def test_the_routes_are_guarded_as_the_profile_cards(tmp_path):
     assert guarded[("GET", "/entity-profiles")] is guarded[("GET", "/profile-card")] is False
     assert guarded[("GET", "/entity-profiles/{key}")] is False
     assert guarded[("POST", "/entity-profiles/rebuild")] is guarded[("POST", "/profile-card/rebuild")] is True
-    assert {path for (_m, path) in guarded if path.startswith("/entity-profiles")} == {
-        "/entity-profiles",
-        "/entity-profiles/rebuild",
-        "/entity-profiles/{key}",
+    assert {(m, path) for (m, path) in guarded if path.startswith("/entity-profiles")} == {
+        ("GET", "/entity-profiles"),
+        ("POST", "/entity-profiles/rebuild"),
+        ("GET", "/entity-profiles/{key}"),
+        ("DELETE", "/entity-profiles/{key}"),
+        ("POST", "/entity-profiles/{key}/restore"),
+        ("POST", "/entity-profiles/{key}/not-entity"),
+        ("DELETE", "/entity-profiles/{key}/not-entity"),
+        ("DELETE", "/entity-profiles/{key}/lines/{line_id}"),
+        ("POST", "/entity-profiles/{key}/lines/{line_id}/restore"),
     }
+    # Every change the owner makes is behind the same guard as the rebuild.
+    assert all(guarded[(m, p)] for (m, p) in guarded if p.startswith("/entity-profiles") and m != "GET")

@@ -1,8 +1,15 @@
 <script lang="ts">
   import { fmtUtc } from '../lib/harness';
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
+  import FilterBar from '../lib/ui/FilterBar.svelte';
+  import ProfileDetail from './browser/ProfileDetail.svelte';
+  import {
+    EMPTY_TEXT, INTRO_TEXT, NO_MATCH_TEXT, PAGE_SIZE as PROFILE_PAGE_SIZE, SEARCH_PLACEHOLDER, TAB_LABEL, WRITER_OFF_TEXT,
+    filterOptions, nameText, readList, statusText,
+    type ListStatus, type ProfileList, type ProfileRow,
+  } from '../lib/entity_profiles';
   import type {
     FactsResponse,
     EpisodesResponse,
@@ -21,7 +28,7 @@
 
   // ── Tab definitions ───────────────────────────────────────────────────────
 
-  type TabId = 'facts' | 'episodes' | 'decisions' | 'procedures' | 'censors' | 'chunks';
+  type TabId = 'facts' | 'episodes' | 'decisions' | 'procedures' | 'censors' | 'chunks' | 'profiles';
 
   const TABS: { id: TabId; label: string }[] = [
     { id: 'facts',      label: 'Facts' },
@@ -30,6 +37,7 @@
     { id: 'procedures', label: 'Procedures' },
     { id: 'censors',    label: 'Censors' },
     { id: 'chunks',     label: 'Chunks' },
+    { id: 'profiles',   label: TAB_LABEL },
   ];
 
   const PAGE_SIZE = 20;
@@ -126,6 +134,61 @@
     finally { loadingChunks = false; }
   }
 
+  // F119 PR 2: entity profiles (lib/entity_profiles.ts), searched by name and filtered by status. A row opens to
+  // ProfileDetail, which reads the profile and makes the owner's corrections; after each, its sentence is held here,
+  // above the table (it stays when the change takes the row out of the list), and the list is read again
+  // (without "Reading…", so the open row stays open).
+  let searchProfiles  = $state('');
+  let statusProfiles  = $state('');
+  let offsetProfiles  = $state(0);
+  let dataProfiles    = $state<ProfileList | null>(null);
+  let loadingProfiles = $state(false);
+  let errorProfiles   = $state<string | null>(null);
+  let noteProfiles    = $state<{ text: string; ok: boolean } | null>(null);
+  // Only the newest read's answer is shown: a quiet read after a correction and a page click can answer out of order.
+  let readProfilesSeq = 0;
+
+  async function loadProfiles(quiet = false) {
+    const seq = ++readProfilesSeq;
+    if (!quiet) loadingProfiles = true;
+    errorProfiles = null;
+    try {
+      const answer = await readList({ q: searchProfiles.trim(), status: statusProfiles as ListStatus | '', offset: offsetProfiles });
+      if (seq !== readProfilesSeq) return;
+      // A correction took the last row of a later page out of the list: read the last page that has rows instead.
+      if (answer.profiles.length === 0 && answer.total > 0 && offsetProfiles > 0) {
+        offsetProfiles = Math.max(0, Math.ceil(answer.total / PROFILE_PAGE_SIZE) - 1) * PROFILE_PAGE_SIZE;
+        return await loadProfiles(quiet);
+      }
+      dataProfiles = answer;
+    }
+    catch (e) { if (seq === readProfilesSeq) errorProfiles = e instanceof Error ? e.message : 'Failed to load'; }
+    finally { if (seq === readProfilesSeq) loadingProfiles = false; }
+  }
+
+  /** A new search or filter: the last correction's sentence no longer speaks of what is shown. */
+  function searchProfilesAgain() {
+    offsetProfiles = 0;
+    noteProfiles = null;
+    void loadProfiles();
+  }
+
+  async function profileChanged(note: { text: string; ok: boolean }) {
+    noteProfiles = note;
+    await loadProfiles(true);
+    await tick();
+    document.getElementById('profiles-note')?.focus();
+  }
+
+  // A new status filter reads the list again from its first page (the filter is bound, so it has no event).
+  let lastStatusProfiles = '';
+  $effect(() => {
+    const status = statusProfiles;
+    if (status === lastStatusProfiles) return;
+    lastStatusProfiles = status;
+    untrack(() => searchProfilesAgain());
+  });
+
   function switchTab(tab: TabId) {
     activeTab = tab;
     // Load on first open; cached until search/offset changes
@@ -135,6 +198,7 @@
     if (tab === 'procedures' && !dataProcedures && !loadingProcedures) loadProcedures();
     if (tab === 'censors'    && !dataCensors    && !loadingCensors)    loadCensors();
     if (tab === 'chunks'     && !dataChunks     && !loadingChunks)     loadChunks();
+    if (tab === 'profiles'   && !dataProfiles   && !loadingProfiles)   loadProfiles();
   }
 
   // Load initial tab on mount — onMount avoids subscribing to search/offset $state
@@ -691,6 +755,76 @@
         </div>
       {/if}
     {/if}
+
+  <!-- ═══════════════════════ PROFILES (F119) ═══════════════════════ -->
+  {:else if activeTab === 'profiles'}
+    <p class="tab-intro">{INTRO_TEXT}</p>
+    {#if dataProfiles && !dataProfiles.writer_enabled}<p class="tab-intro writer-off" role="status">{WRITER_OFF_TEXT}</p>{/if}
+    <div class="controls-bar">
+      <input
+        class="search-input"
+        type="text"
+        placeholder={SEARCH_PLACEHOLDER}
+        aria-label={SEARCH_PLACEHOLDER}
+        bind:value={searchProfiles}
+        onkeydown={(e) => e.key === 'Enter' && searchProfilesAgain()}
+      />
+      <button class="btn" onclick={searchProfilesAgain}>Search</button>
+    </div>
+    <div class="controls-bar">
+      <FilterBar options={filterOptions(dataProfiles?.counts ?? null)} bind:value={statusProfiles} label="Status" />
+    </div>
+    {#if noteProfiles}
+      <p class="profiles-note" class:save-err={!noteProfiles.ok} id="profiles-note" tabindex="-1"
+        role={noteProfiles.ok ? 'status' : 'alert'}>{noteProfiles.text}</p>
+    {/if}
+
+    {#if loadingProfiles}
+      <p class="status-msg">Loading…</p>
+    {:else if errorProfiles}
+      <p class="status-msg error">{errorProfiles}</p>
+    {:else if dataProfiles}
+      {#if dataProfiles.profiles.length === 0}
+        {@const none = Object.values(dataProfiles.counts).every((c) => c === 0) && !searchProfiles.trim()}
+        <p class="empty">{none ? EMPTY_TEXT : NO_MATCH_TEXT}</p>
+      {:else}
+        <div class="table-card">
+        <DataTable
+          mode="cards"
+          columns={[
+            { key: 'name_fmt',    label: 'Name' },
+            { key: 'kind_fmt',    label: 'Kind' },
+            { key: 'status_fmt',  label: 'Status' },
+            { key: 'lines',       label: 'Lines' },
+            { key: 'fact_count',  label: 'Facts' },
+            { key: 'written_fmt', label: 'Written' },
+          ]}
+          rows={dataProfiles.profiles.map((p: ProfileRow) => ({
+            ...p,
+            name_fmt:    nameText(p),
+            kind_fmt:    p.kind ?? '—',
+            status_fmt:  statusText(p),
+            written_fmt: fmtDate(p.written_at),
+          }))}
+          rowKey={(r: ProfileRow) => r.key}
+          rowLabel={(r: ProfileRow) => nameText(r)}
+        >
+          {#snippet detail(row: ProfileRow)}
+            <ProfileDetail {row} onchanged={profileChanged} />
+          {/snippet}
+        </DataTable>
+        </div>
+
+        {@const pi = pageInfo(offsetProfiles, dataProfiles.total)}
+        <div class="pagination">
+          <button class="btn" disabled={pi.currentPage <= 1}
+            onclick={() => { offsetProfiles -= PROFILE_PAGE_SIZE; loadProfiles(); }}>Previous</button>
+          <span class="page-info">Page {pi.currentPage} of {pi.totalPages} ({dataProfiles.total} items)</span>
+          <button class="btn" disabled={pi.currentPage >= pi.totalPages}
+            onclick={() => { offsetProfiles += PROFILE_PAGE_SIZE; loadProfiles(); }}>Next</button>
+        </div>
+      {/if}
+    {/if}
   {/if}
 
 </div>
@@ -857,6 +991,36 @@
     font-size: 0.875rem;
     padding: 2rem 0;
     text-align: center;
+  }
+
+  /* ── Profiles: a sentence above the search ── */
+  .tab-intro {
+    font-size: 0.8125rem;
+    color: var(--muted);
+    margin: 0 0 0.75rem;
+    max-width: 80ch;
+  }
+
+  .tab-intro.writer-off {
+    color: var(--warn-text);
+  }
+
+  /* The last correction's sentence, above the table. */
+  .profiles-note {
+    font-size: 0.8125rem;
+    color: var(--save-ok);
+    margin: 0 0 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .profiles-note.save-err {
+    color: var(--save-err);
+  }
+
+  .profiles-note:focus {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
   }
 
   /* ── Detail grid (inside expanded rows) ── */

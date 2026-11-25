@@ -45,6 +45,14 @@ const CHUNKS = {
   chunks: [{ id: 'k-1', episode_id: 'e-1234567890', chunk_index: 0, content: 'a chunk', created_at: T }],
   total: 1, limit: 20, offset: 0,
 };
+// GET /entity-profiles, with the field names list_row (nous/heart/entity_profile.py) sends.
+const PROFILES = {
+  writer_enabled: true,
+  profiles: [{ key: 'quillon', display_name: 'Quillon Marsh', kind: 'person', status: 'profile', fact_count: 12,
+    source_count: 12, tokens: 40, written_at: T, active: true, owner_verdict: null, lines: 3 }],
+  counts: { profile: 1, not_entity: 0, owner: 0, asked: 0, failed: 0, removed: 0 },
+  total: 1, limit: 20, offset: 0,
+};
 
 let putStatus = 200;
 function install() {
@@ -55,7 +63,7 @@ function install() {
     const path = url.split('?')[0];
     const body = path === '/facts' ? FACTS : path === '/episodes' ? EPISODES : path === '/decisions' ? DECISIONS
       : path === '/decisions/d-1' ? DECISION : path === '/procedures' ? PROCEDURES : path === '/censors' ? CENSORS
-      : path === '/chunks' ? CHUNKS : null;
+      : path === '/chunks' ? CHUNKS : path === '/entity-profiles' ? PROFILES : null;
     if (!body) return { ok: false, status: 404, json: async () => ({}) } as Response;
     return { ok: true, status: 200, json: async () => body } as Response;
   }));
@@ -70,6 +78,7 @@ const TABS: [string, string[], number][] = [
   ['Procedures', ['Name', 'Domain', 'Activations', 'Effectiveness'], 1],
   ['Censors', ['Trigger', 'Action', 'Reason', 'Domain', 'Activations', 'Active'], 1],
   ['Chunks', ['Content', 'Idx', 'Episode', 'Created'], 1],
+  ['Profiles', ['Name', 'Kind', 'Status', 'Lines', 'Facts', 'Written'], 1],
 ];
 
 async function openTab(name: string) {
@@ -88,7 +97,7 @@ const bodyRows = (table: HTMLElement) => Array.from(table.querySelectorAll('tbod
 const fields = (panel: Element) => Array.from(panel.querySelectorAll('.dl')).map((d) => d.textContent?.trim());
 
 describe('Browse', () => {
-  it('six tabs, each with every column header and every fixture row, inside a card', async () => {
+  it('seven tabs, each with every column header and every fixture row, inside a card', async () => {
     install();
     render(Browser);
     expect(screen.getAllByRole('tab').map((t) => t.textContent?.trim())).toEqual(TABS.map(([n]) => n));

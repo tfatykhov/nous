@@ -44,10 +44,10 @@ describe('phone tables', () => {
     expect(tags.length).toBeGreaterThanOrEqual(n);
   });
 
-  it('list tables are stacked rows on a phone: Browse (all six) and the Recent DAGs', () => {
+  it('list tables are stacked rows on a phone: Browse (all seven) and the Recent DAGs', () => {
     const browse = markupOf(read('views/Browser.svelte'));
-    expect(browse.match(/<DataTable\b/g)).toHaveLength(6);
-    expect(browse.match(/mode="cards"/g)).toHaveLength(6);
+    expect(browse.match(/<DataTable\b/g)).toHaveLength(7);
+    expect(browse.match(/mode="cards"/g)).toHaveLength(7);
     expect(markupOf(read('views/DagView.svelte'))).not.toMatch(/mode="scroll"/);
   });
 
