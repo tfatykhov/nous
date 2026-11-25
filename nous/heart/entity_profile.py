@@ -23,8 +23,8 @@ again about an entity written in that window.
 The owner corrects profiles from the dashboard (F119 PR 2): a removed line moves to ``previous_lines`` with who and
 when and its text joins ``rejected``, and no later write brings back a line with that text or citing exactly the same
 facts; a removed profile (``active`` false) and a key the owner called not an entity (``owner_verdict``) are never
-asked about or written until the owner takes it back. ``previous_lines`` keeps the lines that left a profile, at most
-``PREVIOUS_CAP``.
+asked about or written until the owner takes it back, and the latter is neither a candidate nor a profiled key.
+``previous_lines`` keeps the lines that left a profile, at most ``PREVIOUS_CAP``.
 """
 
 from __future__ import annotations
@@ -985,8 +985,12 @@ class EntityProfileWriter:
 
     async def _candidates(self, session: AsyncSession) -> list[tuple[str, int]]:
         """Keys with at least ``entity_profile_min_facts`` active, unsuperseded facts, the most facts first (at most
-        ``entity_profile_max_profiles``)."""
+        ``entity_profile_max_profiles``). A key the owner called not an entity is not a candidate, so it takes no place
+        among them."""
         n = func.count()
+        not_entity = select(EntityProfile.entity_key).where(
+            EntityProfile.agent_id == self.agent_id, EntityProfile.owner_verdict.is_not(None)
+        )
         stmt = (
             select(FactEntityKey.entity_key, n)
             .join(Fact, Fact.id == FactEntityKey.fact_id)
@@ -995,6 +999,7 @@ class EntityProfileWriter:
                 Fact.agent_id == self.agent_id,
                 Fact.active.is_(True),
                 Fact.superseded_by.is_(None),
+                FactEntityKey.entity_key.not_in(not_entity),
             )
             .group_by(FactEntityKey.entity_key)
             .having(n >= self._settings.entity_profile_min_facts)
@@ -1135,7 +1140,8 @@ class EntityProfileWriter:
                         stats["inactive"] += 1
                         continue
                     if row is not None and row["owner_verdict"] is not None:
-                        # The owner called it not an entity: never asked again until the owner takes that back.
+                        # The owner called it not an entity (after the candidates were read): never asked again until
+                        # the owner takes that back.
                         stats["owner_not_entity"] += 1
                         continue
                     written = datetime.fromisoformat(row["written_at"]) if row is not None else None

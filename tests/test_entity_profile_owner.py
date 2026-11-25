@@ -295,7 +295,8 @@ async def test_an_owner_not_entity_survives_sleep_cycles_doubled_facts_and_thirt
     await _days_later(session, agent, 31)
     for _cycle in range(3):
         stats = await writer.run_sleep(session=session)
-        assert (stats["owner_not_entity"], stats["asked"]) == (1, 0)
+        # Not a candidate at all: not asked, not listed for a rewrite.
+        assert (stats["candidates"], stats["asked"]) == (0, 0)
     assert (await writer.rebuild("spreadsheet", session=session))["outcome"] == "owner_not_entity"
     assert len(llm.prompts) == 1
     # Marking it again keeps the first who and when.
@@ -363,6 +364,22 @@ async def test_an_owner_change_during_a_run_is_seen_before_the_next_call_and_the
     assert (stats["asked"], stats["owner_not_entity"]) == (1, 1)
     alder = await _row(session, agent, "alder")
     assert (alder.active, list(alder.lines)) == (False, alder_lines)
+
+
+@pytest.mark.postgres_only
+async def test_a_key_the_owner_called_not_an_entity_takes_no_place_among_the_candidates(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {}, {}, {})
+    await _keyed(session, agent, "quillon", {}, {})
+    store = EntityProfileStore(db, agent)
+    await store.write("spreadsheet", "failed", "", fact_count=4, source_count=4, lines=[], session=session)
+    await store.set_owner_verdict("spreadsheet", True, "owner", session=session)
+    await _days_later(session, agent, 8)  # the failed row's rest is over: only the verdict holds it back
+    llm = FakeLLM({"quillon": {"verdict": "not_entity"}})
+
+    # One place among the candidates: the key with the most facts is the owner's "not an entity"; the next one gets it.
+    stats = await _writer(db, agent, llm, entity_profile_max_profiles=1).run_sleep(session=session)
+    assert (stats["candidates"], llm.keys) == (1, ["quillon"])
 
 
 @pytest.mark.postgres_only
