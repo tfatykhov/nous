@@ -30,13 +30,13 @@ reason). Each rule stores what the writer of that source stores now (FactInput.m
   any other source.
 
 Two tiers. The default tier writes only fills equal to the row's learned_at (rules a and c, rule b with no episode end
-at hand): a NULL already reads as learned_at (COALESCE(mentioned_at, learned_at)), so no reader's result or ordering
-changes. The second tier, written only with --reordering-rules, holds every fill earlier than learned_at: the
-extractors' episode start, the session reflection's episode end, merged facts. These change how pairs of facts order
-under the recency resolvers: an extractor fill reads earlier than every in-turn fact of its episode, even one said
-before the extracted statement, and ties with the rows migration 097 stamped with that episode's start. The dry run
-reports both tiers per rule and per source, split by active and inactive, and how much earlier the second tier's rows
-would read (median and maximum).
+at hand, and a session reflection whose episode end is capped at learned_at): a NULL already reads as learned_at
+(COALESCE(mentioned_at, learned_at)), so no reader's result or ordering changes. The second tier, written only with
+--reordering-rules, holds every fill earlier than learned_at: the extractors' episode start, the session reflection's
+episode end, merged facts. These change how pairs of facts order under the recency resolvers: an extractor fill reads
+earlier than every in-turn fact of its episode, even one said before the extracted statement, and ties with the rows
+migration 097 stamped with that episode's start. The dry run reports both tiers per rule and per source, split by
+active and inactive, and how much earlier the second tier's rows would read (median and maximum).
 
 Side effects of --apply, in either tier:
   - updated_at moves to the time of the write on every row written (the set_updated_at trigger, never disabled here).
@@ -49,21 +49,29 @@ Side effects of --apply, in either tier:
     dry run counts them per tier.
 
 Record and undo. --apply needs --manifest PATH, a new file: before each batch commits, one JSON line per row it writes
-(agent_id, id, rule, mentioned_at, learned_at) is written and flushed to disk. A run that stops prints what it
-committed and where the manifest is; a batch that failed after its lines were written leaves them there, with its rows
-still NULL.
+(agent_id, id, rule, mentioned_at, learned_at) is written and flushed to disk. Keep the manifest where it outlives the
+run: inside a container, copy it out right after the run, since a container's own files go when it is recreated. A
+run that stops (an error, a manifest that cannot be written or closed, Ctrl-C) prints what it committed and where the
+manifest is. A batch that stopped after its lines were written leaves them there; as of that run its rows are still
+NULL, unless the stop came during the commit itself.
 --undo-from PATH sets mentioned_at back to NULL for the agent's rows the manifest lists, only where the stored value
-still equals the manifest's, dry run unless --apply, and counts the rows it skips. It cannot undo: the updated_at move
-(it moves again), the profiles made due (due again), a time that a merge written in between inherited from a filled
-row, or a deactivation the app made on a filled time.
+still equals the manifest's, dry run unless --apply, and counts the rows it skips, unreadable lines (a line cut by a
+failed write) included. An undo matches by id and value, whichever run wrote the value: the lines of a stopped batch
+also match rows a later run filled with the same value. It cannot undo: the updated_at move (it moves again), the
+profiles made due (due again), a time that a merge written in between inherited from a filled row, or a deactivation
+the app made on a filled time. A --reordering-rules run split into several manifests is undone newest first, or all of
+them, or a merge filled by a later run keeps a time derived from sources an earlier manifest sets back.
 
 Mechanics. A dry run reads one snapshot in a READ ONLY transaction and writes nothing. --apply (and --undo-from with
---apply) writes in batches of --batch-size, each a short transaction of its own with lock_timeout 5 s: it locks the
-batch's rows (FOR NO KEY UPDATE, in id order), hashes each row without mentioned_at and updated_at, updates
+--apply) writes in batches of --batch-size, each a short transaction of its own: it locks the batch's rows with FOR NO
+KEY UPDATE SKIP LOCKED, in id order, so it never waits on the application's transactions and never makes one of
+their statements wait or fail; a row another transaction holds is skipped, counted and left for a later run (it still
+matches, so the next run plans it again). It hashes each row it locked without mentioned_at and updated_at, updates
 mentioned_at with its own guard (still NULL; for an undo, still the manifest's value), hashes again and rolls the
-batch back and stops if any hash differs. No trigger is disabled and no table lock is taken. Every other column,
-search_tsv and the embedding included, is unchanged. A run that stops keeps the batches it committed; the next run
-plans again from what is stored. A second --apply finds nothing.
+batch back and stops if any hash differs. A 1 s lock_timeout is only a backstop for a table lock (a migration). No
+trigger is disabled and no table lock is taken. Every other column, search_tsv and the embedding included, is
+unchanged. A run that stops keeps the batches it committed; the next run plans again from what is stored. A second
+--apply finds nothing.
 
 Usage, from the repository root (or with the nous package importable)::
 
@@ -128,10 +136,17 @@ KEPT_LATER = "the value would be later than the row's learned_at"
 KEPT_WAITING = "merge: a source merge got no time"
 
 SAMPLE = 5
-LOCK_TIMEOUT = "5s"
+LOCK_TIMEOUT = "1s"  # a backstop for a table lock only: row locks are skipped, never waited for
 CANNOT_UNDO = (
     "An undo cannot take back: the updated_at move (it moves again), the entity profiles made due (due again), a time "
-    "that a merge written in between inherited from a filled row, or a deactivation the app made on a filled time."
+    "that a merge written in between inherited from a filled row, or a deactivation the app made on a filled time. "
+    "If a --reordering-rules run was split into several manifests, undo them newest first, or all of them: a merge "
+    "filled by a later run keeps a time derived from sources an earlier manifest sets back."
+)
+STOP_NOTE = (
+    "If the stopped batch got as far as its manifest lines, they are there too; as of this run its rows are still "
+    "NULL (unless the stop came during the commit itself). An undo matches by id and value, whichever run wrote the "
+    "value, so it skips those rows until a later run fills them."
 )
 
 Fill = tuple[UUID, datetime, str]  # (fact id, value, rule)
@@ -180,7 +195,9 @@ class Report:
     planned: int = 0  # rows this run set out to write
     batches: int = 0
     written: int = 0
-    error: str | None = None
+    held: int = 0  # rows skipped because another transaction held them, left for a later run
+    error: str | None = None  # what stopped the batches, or the manifest's close
+    after_error: str | None = None  # the read after the last batch failed: no before -> after counts
     nulls_after: Counter | None = None
     rows_hash_before: str | None = None
     rows_hash_after: str | None = None
@@ -194,12 +211,26 @@ class UndoReport:
     apply: bool
     manifest: str
     lines: int = 0
+    unreadable: int = 0  # lines that do not parse (a line cut by a failed write), skipped
     other_agent: int = 0  # lines of another agent, left alone
     matching: int = 0  # rows whose stored value still equals the manifest's
     changed: int = 0  # rows whose stored value differs (NULL included)
     missing: int = 0  # ids that are no fact of this agent
     batches: int = 0
     undone: int = 0
+    held: int = 0  # rows skipped because another transaction held them
+    error: str | None = None
+
+
+@dataclass
+class Batches:
+    """What a batched write did: committed batches and rows, rows held by another transaction, the hashes, the stop."""
+
+    committed: int = 0
+    written: int = 0
+    held: int = 0
+    before: dict[UUID, str] = field(default_factory=dict)
+    after: dict[UUID, str] = field(default_factory=dict)
     error: str | None = None
 
 
@@ -328,22 +359,27 @@ _AGENT_HASH = (
 )
 _PAIRS = "(SELECT unnest(CAST(:ids AS uuid[])) AS id, unnest(CAST(:ts AS timestamptz[])) AS t) AS v"
 
-_LOCK_FILL = text(
-    f"SELECT f.id, {_ROW_HASH} FROM heart.facts f JOIN {_PAIRS} ON f.id = v.id "
-    "WHERE f.agent_id = :a AND f.mentioned_at IS NULL ORDER BY f.id FOR NO KEY UPDATE OF f"
-)
-_UPDATE_FILL = text(
-    f"UPDATE heart.facts f SET mentioned_at = v.t FROM {_PAIRS} "
-    f"WHERE f.id = v.id AND f.agent_id = :a AND f.mentioned_at IS NULL RETURNING f.id, {_ROW_HASH}"
-)
-_LOCK_UNDO = text(
-    f"SELECT f.id, {_ROW_HASH} FROM heart.facts f JOIN {_PAIRS} ON f.id = v.id "
-    "WHERE f.agent_id = :a AND f.mentioned_at = v.t ORDER BY f.id FOR NO KEY UPDATE OF f"
-)
-_UPDATE_UNDO = text(
-    f"UPDATE heart.facts f SET mentioned_at = NULL FROM {_PAIRS} "
-    f"WHERE f.id = v.id AND f.agent_id = :a AND f.mentioned_at = v.t RETURNING f.id, {_ROW_HASH}"
-)
+# Per batch: lock what is free (a row another transaction holds is skipped, never waited for), update only the rows
+# locked, each statement with its own guard; count the rows that still match the guard but were held.
+_FILL_GUARD = "f.mentioned_at IS NULL"
+_UNDO_GUARD = "f.mentioned_at = v.t"
+
+
+def _batch_sql(set_to: str, guard: str) -> tuple:
+    lock = text(
+        f"SELECT f.id, {_ROW_HASH} FROM heart.facts f JOIN {_PAIRS} ON f.id = v.id "
+        f"WHERE f.agent_id = :a AND {guard} ORDER BY f.id FOR NO KEY UPDATE OF f SKIP LOCKED"
+    )
+    update = text(
+        f"UPDATE heart.facts f SET mentioned_at = {set_to} FROM {_PAIRS} "
+        f"WHERE f.id = v.id AND f.agent_id = :a AND {guard} RETURNING f.id, {_ROW_HASH}"
+    )
+    held = text(f"SELECT count(*) FROM heart.facts f JOIN {_PAIRS} ON f.id = v.id WHERE f.agent_id = :a AND {guard}")
+    return lock, update, held
+
+
+_FILL_SQL = _batch_sql("v.t", _FILL_GUARD)
+_UNDO_SQL = _batch_sql("NULL", _UNDO_GUARD)
 
 
 async def _read(session, agent_id: str) -> tuple[dict, dict, dict]:
@@ -449,48 +485,63 @@ def _record(out: IO[str], lines: list[dict]) -> None:
     os.fsync(out.fileno())
 
 
+def _stop(where: str, exc: BaseException) -> str:
+    """One line for the summary: where it stopped, the exception's type and the first line of its text (a database
+    error's later lines hold the statement and its parameters)."""
+    if isinstance(exc, asyncio.CancelledError) and (task := asyncio.current_task()) is not None:
+        task.uncancel()  # Ctrl-C under asyncio.run arrives as a cancellation: take it here so the summary still prints
+    return f"{where}: {type(exc).__name__}: {(str(exc).splitlines() or [''])[0]}"
+
+
 async def _batches(
     db: Database,
     agent_id: str,
     pairs: list[tuple[UUID, datetime]],
-    lock,
-    update,
+    sql: tuple,
     batch_size: int,
     before_commit: Callable[[set[UUID]], None],
-) -> tuple[int, int, dict, dict, str | None]:
-    """Write ``pairs`` (id, time) with ``update`` in batches, each a short transaction: lock the rows, hash them,
-    update, hash again, roll back on any difference. Returns (batches committed, rows written, hashes before, hashes
-    after, the error that stopped it or None)."""
-    before: dict[UUID, str] = {}
-    after: dict[UUID, str] = {}
-    batches = written = 0
+) -> Batches:
+    """Write ``pairs`` (id, time) in batches, each a short transaction: lock the free rows, hash them, update them,
+    hash again, roll back on any difference. A stop (an error, Ctrl-C) ends the loop and is returned, not raised."""
+    lock, update, held = sql
+    done = Batches()
     for start in range(0, len(pairs), batch_size):
         batch = pairs[start : start + batch_size]
-        params = {"a": agent_id, "ids": [i for i, _t in batch], "ts": [t for _i, t in batch]}
         try:
             async with db.session() as session:
                 await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+                params = {"a": agent_id, "ids": [i for i, _t in batch], "ts": [t for _i, t in batch]}
                 locked = dict((await session.execute(lock, params)).all())
-                changed = dict((await session.execute(update, params)).all())
+                mine = [(i, t) for i, t in batch if i in locked]
+                theirs = [(i, t) for i, t in batch if i not in locked]
+                changed = dict(
+                    (
+                        await session.execute(
+                            update, {"a": agent_id, "ids": [i for i, _t in mine], "ts": [t for _i, t in mine]}
+                        )
+                    ).all()
+                )
                 if changed != locked:
                     await session.rollback()
                     raise RuntimeError("a column other than mentioned_at and updated_at differs after the update")
+                busy = 0
+                if theirs:  # not locked: held by another transaction if it still matches, else changed since the plan
+                    busy = await session.scalar(
+                        held, {"a": agent_id, "ids": [i for i, _t in theirs], "ts": [t for _i, t in theirs]}
+                    )
                 before_commit(set(changed))
                 await session.commit()
-        except Exception as exc:  # stop here; the caller reports what was committed
-            return (
-                batches,
-                written,
-                before,
-                after,
-                f"batch {batches + 1} (rows {start + 1}-{start + len(batch)} of {len(pairs)}) rolled back: "
-                f"{type(exc).__name__}: {(str(exc).splitlines() or [''])[0]}",  # a database error's first line
+        except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:  # the caller reports what committed
+            done.error = _stop(
+                f"batch {done.committed + 1} (rows {start + 1}-{start + len(batch)} of {len(pairs)})", exc
             )
-        batches += 1
-        written += len(changed)
-        before.update(locked)
-        after.update(changed)
-    return batches, written, before, after, None
+            return done
+        done.committed += 1
+        done.written += len(changed)
+        done.held += busy
+        done.before.update(locked)
+        done.after.update(changed)
+    return done
 
 
 async def run(
@@ -529,57 +580,75 @@ async def run(
     report.manifest, report.planned = manifest, len(todo)
     rule_of = {fid: rule for fid, _v, rule in todo}
     value_of = {fid: value for fid, value, _r in todo}
-    with open(manifest, "x", encoding="utf-8") as out:  # a new file: never overwrite an earlier run's record
+    out = open(manifest, "x", encoding="utf-8")  # a new file: never overwrite an earlier run's record
 
-        def record(ids: set[UUID]) -> None:
-            _record(
-                out,
-                [
-                    {
-                        "agent_id": agent_id,
-                        "id": str(fid),
-                        "rule": rule_of[fid],
-                        "mentioned_at": value_of[fid].isoformat(),
-                        "learned_at": facts[fid].learned_at.isoformat(),
-                    }
-                    for fid in sorted(ids, key=str)
-                ],
-            )
-
-        report.batches, report.written, before, after, report.error = await _batches(
-            db, agent_id, [(fid, v) for fid, v, _r in todo], _LOCK_FILL, _UPDATE_FILL, batch_size, record
+    def record(ids: set[UUID]) -> None:
+        _record(
+            out,
+            [
+                {
+                    "agent_id": agent_id,
+                    "id": str(fid),
+                    "rule": rule_of[fid],
+                    "mentioned_at": value_of[fid].isoformat(),
+                    "learned_at": facts[fid].learned_at.isoformat(),
+                }
+                for fid in sorted(ids, key=str)
+            ],
         )
-    report.rows_hash_before, report.rows_hash_after = _digest(before), _digest(after)
+
+    closing = None
+    try:
+        done = await _batches(db, agent_id, [(fid, v) for fid, v, _r in todo], _FILL_SQL, batch_size, record)
+    finally:
+        try:
+            out.close()  # after a failed write it flushes the rest of a cut line again, and can fail again
+        except OSError as exc:
+            closing = _stop("closing the manifest (every committed batch's lines were already on disk)", exc)
+    report.batches, report.written, report.held = done.committed, done.written, done.held
+    report.error = "; ".join(e for e in (done.error, closing) if e) or None
+    report.rows_hash_before, report.rows_hash_after = _digest(done.before), _digest(done.after)
     if report.error is None:
-        async with db.session() as session:
-            await session.execute(text("SET TRANSACTION READ ONLY"))
-            report.nulls_after = await _nulls(session, agent_id)
-            report.agent_hash_after = await _agent_hash(session, agent_id)
-            await session.rollback()
+        try:
+            async with db.session() as session:
+                await session.execute(text("SET TRANSACTION READ ONLY"))
+                report.nulls_after = await _nulls(session, agent_id)
+                report.agent_hash_after = await _agent_hash(session, agent_id)
+                await session.rollback()
+        except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:  # the batches are committed: report them
+            report.after_error = _stop("the read after the last batch", exc)
     return report
 
 
-def _read_manifest(path: str, agent_id: str) -> tuple[dict[UUID, datetime], int, int]:
-    """The manifest's rows of ``agent_id`` (id -> value written), its line count and its lines of another agent."""
+def _read_manifest(path: str, agent_id: str) -> tuple[dict[UUID, datetime], int, int, int]:
+    """The manifest's rows of ``agent_id`` (id -> value written), its line count, its unreadable lines (a line cut by
+    a failed write, which only a batch that never committed can leave) and its lines of another agent."""
     rows: dict[UUID, datetime] = {}
-    lines = other = 0
+    lines = unreadable = other = 0
     with open(path, encoding="utf-8") as f:
         for raw in f:
             if not raw.strip():
                 continue
             lines += 1
-            entry = json.loads(raw)
-            if entry["agent_id"] != agent_id:
+            try:
+                entry = json.loads(raw)
+                owner, fid, value = entry["agent_id"], UUID(entry["id"]), datetime.fromisoformat(entry["mentioned_at"])
+            except (ValueError, KeyError, TypeError):
+                unreadable += 1
+                continue
+            if owner != agent_id:
                 other += 1
                 continue
-            rows[UUID(entry["id"])] = datetime.fromisoformat(entry["mentioned_at"])
-    return rows, lines, other
+            rows[fid] = value
+    return rows, lines, unreadable, other
 
 
 async def undo(db: Database, agent_id: str, manifest: str, *, apply: bool, batch_size: int = 100) -> UndoReport:
     """Set mentioned_at back to NULL for the agent's rows ``manifest`` lists, where the stored value still equals it."""
-    rows, lines, other = _read_manifest(manifest, agent_id)
-    report = UndoReport(agent_id=agent_id, apply=apply, manifest=manifest, lines=lines, other_agent=other)
+    rows, lines, unreadable, other = _read_manifest(manifest, agent_id)
+    report = UndoReport(
+        agent_id=agent_id, apply=apply, manifest=manifest, lines=lines, unreadable=unreadable, other_agent=other
+    )
     async with db.session() as session:
         await session.execute(text("SET TRANSACTION READ ONLY"))
         result = await session.execute(
@@ -595,9 +664,8 @@ async def undo(db: Database, agent_id: str, manifest: str, *, apply: bool, batch
     report.missing = sum(1 for fid in rows if fid not in stored)
     report.changed = len(rows) - report.matching - report.missing
     if apply:
-        report.batches, report.undone, _before, _after, report.error = await _batches(
-            db, agent_id, matching, _LOCK_UNDO, _UPDATE_UNDO, batch_size, lambda _ids: None
-        )
+        done = await _batches(db, agent_id, matching, _UNDO_SQL, batch_size, lambda _ids: None)
+        report.batches, report.undone, report.held, report.error = done.committed, done.written, done.held, done.error
     return report
 
 
@@ -711,14 +779,22 @@ def format_report(report: Report, limit: int | None = None, calls_per_day: int |
         return out
 
     tier = "both tiers" if report.reordering else "the default tier"
+    keep = (
+        f"Keep the manifest {report.manifest}: if this ran inside a container, copy it out now, before anything else, "
+        "since a container's own files go when it is recreated."
+    )
+    held = (
+        f"skipped because another transaction held them: {report.held} (still NULL as of this run; a later run plans "
+        "them again)"
+    )
     out.append("")
     if report.error is not None:
         out += [
             f"STOPPED: {report.error}",
             f"Committed before it: {report.batches} batches, {report.written} of {report.planned} rows ({tier}), "
-            f"listed in the manifest {report.manifest}. If the failed batch got as far as its manifest lines, they "
-            "are there too; its rows are still NULL, and --undo-from skips them. Run the dry run again, then --apply "
-            "with a new --manifest path.",
+            f"listed in the manifest {report.manifest}; {held}. {STOP_NOTE} Run the dry run again, then --apply with "
+            "a new --manifest path.",
+            keep,
         ]
         return out
     if not plan.fills:
@@ -731,6 +807,14 @@ def format_report(report: Report, limit: int | None = None, calls_per_day: int |
         f"wrote {report.written} of {report.planned} rows ({tier}) in {report.batches} batches; each is listed in the "
         f"manifest {report.manifest}"
     )
+    out.append(f"{held}; the other {report.planned - report.written - report.held} changed since the plan")
+    if report.after_error is not None:
+        out += [
+            f"the read after the last batch failed, so the before -> after counts and the hash of all facts are "
+            f"missing: {report.after_error}",
+            keep,
+        ]
+        return out
     out.append("rows without mentioned_at per source, before -> after:")
     after = report.nulls_after or Counter()
     for source in sorted(set(report.nulls_before) | set(after)):
@@ -749,6 +833,7 @@ def format_report(report: Report, limit: int | None = None, calls_per_day: int |
         "hash of all this agent's facts without mentioned_at, updated_at and the recall and confirmation counters: "
         f"before {report.agent_hash_before}, after {report.agent_hash_after} ({note})"
     )
+    out.append(keep)
     return out
 
 
@@ -756,7 +841,8 @@ def format_undo(report: UndoReport) -> list[str]:
     mode = "--apply" if report.apply else "dry run, nothing written (--apply writes)"
     out = [
         f"undo mentioned_at from {report.manifest}, agent {report.agent_id}: {mode}",
-        f"manifest lines: {report.lines}; of another agent, left alone: {report.other_agent}",
+        f"manifest lines: {report.lines}; of another agent, left alone: {report.other_agent}; unreadable, skipped: "
+        f"{report.unreadable} (a line cut by a failed write, from a batch that never committed)",
         f"rows whose stored value still equals the manifest's: {report.matching}",
         f"skipped, the stored value changed since (NULL included): {report.changed}",
         f"skipped, not a fact of this agent: {report.missing}",
@@ -764,9 +850,11 @@ def format_undo(report: UndoReport) -> list[str]:
     if report.apply:
         if report.error is not None:
             out.append(f"STOPPED: {report.error}")
+        changed = report.matching - report.undone - report.held
         out.append(
-            f"set back to NULL: {report.undone} rows in {report.batches} batches; skipped because they changed during "
-            f"the undo: {report.matching - report.undone if report.error is None else 'not counted after the stop'}"
+            f"set back to NULL: {report.undone} rows in {report.batches} batches; skipped because another transaction "
+            f"held them: {report.held} (run the undo again); skipped because they changed during the undo: "
+            f"{changed if report.error is None else 'not counted after the stop'}"
         )
     out.append(CANNOT_UNDO)
     return out
@@ -791,10 +879,11 @@ async def main_async(args: argparse.Namespace) -> int:
                 batch_size=args.batch_size,
             )
             calls = getattr(settings, "entity_profile_max_calls_per_day", None)
-            lines, failed = format_report(report, args.limit, calls), report.error is not None
+            lines = format_report(report, args.limit, calls)
+            failed = report.error is not None or report.after_error is not None
+        print("\n".join(lines))  # before the disconnect, so a second Ctrl-C there cannot lose it
     finally:
         await db.disconnect()
-    print("\n".join(lines))
     return 1 if failed else 0
 
 

@@ -6,6 +6,7 @@ that already carry one are written through ``heart.learn``. Each test uses its o
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, date, datetime, timedelta
 from itertools import count
@@ -396,7 +397,7 @@ async def test_a_stop_after_the_manifest_write_keeps_the_committed_batches_and_s
     report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=2)
 
     assert report.batches == 1 and report.written == 2
-    assert report.error.startswith("batch 2 (rows 3-4 of ") and "rolled back: OSError" in report.error
+    assert report.error.startswith("batch 2 (rows 3-4 of ") and "): OSError: the disk went away" in report.error
     said = await _said(db, agent)
     first, failed = report.plan.fills[:2], report.plan.fills[2:4]
     assert [said[fid] for fid, _v, _r in first] == [value for _fid, value, _r in first]
@@ -429,10 +430,9 @@ async def _hold(db, fid: UUID, mode: str):
     return conn, trans
 
 
-async def test_the_batch_lock_does_not_wait_on_a_foreign_key_check(db, agents, manifest, monkeypatch):
+async def test_the_batch_lock_does_not_skip_a_row_under_a_foreign_key_check(db, agents, manifest):
     agent = agents()
     await _scenario(db, agent, agents("other"))
-    monkeypatch.setattr(bf, "LOCK_TIMEOUT", "200ms")
     first = (await bf.run(db, agent, apply=False)).plan.fills[0][0]
     conn, trans = await _hold(db, first, "KEY SHARE")  # what an insert that points at the fact takes
     try:
@@ -441,30 +441,180 @@ async def test_the_batch_lock_does_not_wait_on_a_foreign_key_check(db, agents, m
         await trans.rollback()
         await conn.close()
 
-    assert report.error is None and report.written == len(report.plan.fills)
+    assert report.error is None and report.held == 0 and report.written == len(report.plan.fills)
 
 
-async def test_a_lock_wait_stops_the_run_with_a_summary_of_what_was_committed(db, agents, manifest, monkeypatch):
+async def test_a_row_another_transaction_holds_is_skipped_counted_and_filled_by_a_rerun(db, agents, manifest):
     agent = agents()
     await _scenario(db, agent, agents("other"))
-    monkeypatch.setattr(bf, "LOCK_TIMEOUT", "200ms")
     plan = (await bf.run(db, agent, apply=False)).plan
+    held, value, _rule = plan.fills[3]  # a row of batch 2
     path = manifest()
-    conn, trans = await _hold(db, plan.fills[3][0], "NO KEY UPDATE")  # a row of batch 2, held by another writer
+    conn, trans = await _hold(db, held, "NO KEY UPDATE")  # the application in the middle of a write
     try:
         report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=3)
+        assert (await _said(db, agent))[held] is None
     finally:
         await trans.rollback()
         await conn.close()
 
-    assert (report.batches, report.written) == (1, 3)
-    assert report.error.startswith("batch 2 (rows 4-6 of ") and "lock timeout" in report.error
-    assert "\n" not in report.error
+    # Not waited for (a wait would have ended in the lock timeout and stopped the run), counted, left NULL.
+    assert report.error is None and report.held == 1 and report.written == len(plan.fills) - 1
+    assert str(held) not in {line["id"] for line in _manifest_lines(path)}
+    assert "skipped because another transaction held them: 1 (still NULL as of this run" in "\n".join(
+        bf.format_report(report)
+    )
+
+    rerun = await _apply_both(db, agent, manifest)
+
+    assert (rerun.written, rerun.held) == (1, 0) and (await _said(db, agent))[held] == value
+
+
+async def test_undo_skips_a_row_another_transaction_holds_and_a_second_undo_sets_it_back(db, agents, manifest):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    path = manifest()
+    filled = await bf.run(db, agent, apply=True, manifest=path)
+    held = filled.plan.selected(False)[2][0]
+    conn, trans = await _hold(db, held, "NO KEY UPDATE")
+    try:
+        first = await bf.undo(db, agent, path, apply=True, batch_size=2)
+    finally:
+        await trans.rollback()
+        await conn.close()
+
+    assert first.error is None and first.held == 1 and first.undone == filled.written - 1
+    assert (await _said(db, agent))[held] is not None
+    assert "held them: 1 (run the undo again)" in "\n".join(bf.format_undo(first))
+
+    second = await bf.undo(db, agent, path, apply=True)
+
     said = await _said(db, agent)
-    assert [said[fid] is not None for fid, _v, _r in plan.fills[:6]] == [True] * 3 + [False] * 3
-    assert len(_manifest_lines(path)) == 3  # batch 2 stopped before its manifest lines
+    assert second.undone == 1 and all(said[UUID(line["id"])] is None for line in _manifest_lines(path))
+
+
+class _DiskFillsUp:
+    """A manifest whose disk fills up after the first batch: the next write leaves half a line, and the close, which
+    flushes it again, fails too."""
+
+    def __init__(self, real):
+        self.real, self.flushed, self.broken = real, False, False
+
+    def write(self, text_: str) -> int:
+        if self.flushed:
+            self.real.write(text_[: len(text_) // 2])
+            self.broken = True
+            raise OSError(28, "No space left on device")
+        return self.real.write(text_)
+
+    def flush(self) -> None:
+        self.real.flush()
+        self.flushed = True
+
+    def fileno(self) -> int:
+        return self.real.fileno()
+
+    def close(self) -> None:
+        self.real.close()
+        if self.broken:
+            raise OSError(28, "No space left on device")
+
+
+async def test_a_manifest_that_breaks_part_way_still_gives_the_summary(db, agents, manifest, monkeypatch):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    path = manifest()
+    builtin_open = open
+    monkeypatch.setattr(
+        bf,
+        "open",
+        lambda p, mode="r", **kw: (
+            _DiskFillsUp(builtin_open(p, mode, **kw)) if mode == "x" else builtin_open(p, mode, **kw)
+        ),
+        raising=False,
+    )
+
+    report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=2)
+
+    assert (report.batches, report.written) == (1, 2)
+    assert report.error.startswith("batch 2 (rows 3-4 of ") and "No space left on device" in report.error
+    assert "; closing the manifest (every committed batch's lines were already on disk): OSError" in report.error
+    said = await _said(db, agent)
+    assert [said[fid] is not None for fid, _v, _r in report.plan.fills[:4]] == [True, True, False, False]
     out = "\n".join(bf.format_report(report))
-    assert f"Committed before it: 1 batches, 3 of {len(plan.fills)} rows (both tiers)" in out and path in out
+    assert "STOPPED: batch 2" in out and f"Committed before it: 1 batches, 2 of {len(report.plan.fills)}" in out
+    assert f"Keep the manifest {path}" in out
+    with builtin_open(path, encoding="utf-8") as f:
+        assert len(f.read().splitlines()) == 3  # two whole lines and a cut one
+
+
+async def test_undo_skips_an_unreadable_line_and_undoes_the_rest(db, agents, manifest):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    path = manifest()
+    filled = await bf.run(db, agent, apply=True, manifest=path)
+    with open(path, "a", encoding="utf-8") as f:  # a line cut by a failed write
+        f.write(json.dumps({"agent_id": agent, "id": str(uuid4()), "rule": "x", "mentioned_at": "2026"})[:40])
+
+    report = await bf.undo(db, agent, path, apply=True)
+
+    assert (report.lines, report.unreadable, report.undone) == (filled.written + 1, 1, filled.written)
+    assert report.error is None
+    assert "unreadable, skipped: 1" in "\n".join(bf.format_undo(report))
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, asyncio.CancelledError], ids=["ctrl_c", "cancelled"])
+async def test_ctrl_c_in_a_batch_rolls_it_back_and_still_gives_the_summary(
+    db, agents, manifest, monkeypatch, interrupt
+):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    path = manifest()
+    real = bf._record
+    calls: list[int] = []
+
+    def record_until_interrupted(out, lines):
+        calls.append(1)
+        if len(calls) == 2:  # Ctrl-C in batch 2, after its update and before its commit
+            raise interrupt()
+        real(out, lines)
+
+    monkeypatch.setattr(bf, "_record", record_until_interrupted)
+
+    report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=2)
+
+    assert (report.batches, report.written) == (1, 2)
+    assert report.error.startswith("batch 2 (rows 3-4 of ") and f"): {interrupt.__name__}" in report.error
+    said = await _said(db, agent)  # the task goes on: a cancellation taken in the batch does not cancel this
+    assert [said[fid] is not None for fid, _v, _r in report.plan.fills[:4]] == [True, True, False, False]
+    out = "\n".join(bf.format_report(report))
+    assert "STOPPED: batch 2" in out and f"Keep the manifest {path}" in out
+
+
+@pytest.mark.parametrize("failure", [OSError("the connection dropped"), KeyboardInterrupt()], ids=["error", "ctrl_c"])
+async def test_a_failure_in_the_read_after_the_last_batch_still_gives_the_summary(
+    db, agents, manifest, monkeypatch, failure
+):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    real = bf._nulls
+    calls: list[int] = []
+
+    async def nulls_then_fail(session, agent_id):
+        calls.append(1)
+        if len(calls) == 2:  # the read after the last batch
+            raise failure
+        return await real(session, agent_id)
+
+    monkeypatch.setattr(bf, "_nulls", nulls_then_fail)
+
+    report = await _apply_both(db, agent, manifest)
+
+    assert report.error is None and report.written == len(report.plan.fills)
+    assert report.after_error.startswith(f"the read after the last batch: {type(failure).__name__}")
+    out = "\n".join(bf.format_report(report))
+    assert f"wrote {report.written} of {report.written} rows" in out
+    assert "the read after the last batch failed" in out and "Keep the manifest" in out
 
 
 async def test_undo_restores_skips_changed_rows_and_never_touches_another_agent(db, agents, manifest):
@@ -688,20 +838,34 @@ async def test_limit_writes_the_first_planned_rows_and_a_later_run_the_rest(db, 
     assert {name: said[fid] for name, fid in ids.items()} == want
 
 
+def _with_update(set_clause: str) -> tuple:
+    lock, update, held = bf._FILL_SQL
+    return lock, text(str(update).replace("SET mentioned_at = v.t", set_clause)), held
+
+
 async def test_a_batch_that_would_change_another_column_is_rolled_back(db, agents, manifest, monkeypatch):
     agent = agents()
     await _scenario(db, agent, agents("other"))
     rows = await _rows(db, agent)
-    monkeypatch.setattr(
-        bf,
-        "_UPDATE_FILL",
-        text(str(bf._UPDATE_FILL).replace("SET mentioned_at = v.t", "SET mentioned_at = v.t, recall_count = 7")),
-    )
+    monkeypatch.setattr(bf, "_FILL_SQL", _with_update("SET mentioned_at = v.t, recall_count = 7"))
 
     report = await _apply_both(db, agent, manifest)
 
     assert report.batches == report.written == 0
-    assert report.error.startswith("batch 1 ") and "rolled back: RuntimeError: a column other than" in report.error
+    assert report.error.startswith("batch 1 ") and "): RuntimeError: a column other than" in report.error
+    assert await _rows(db, agent) == rows
+
+
+async def test_a_database_error_stops_the_run_with_one_line(db, agents, manifest, monkeypatch):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    rows = await _rows(db, agent)
+    monkeypatch.setattr(bf, "_FILL_SQL", _with_update("SET mentioned_at = v.t, no_such_column = 1"))
+
+    report = await _apply_both(db, agent, manifest)
+
+    # The first line only: the statement and its parameters follow on later lines of a database error.
+    assert report.batches == 0 and "no_such_column" in report.error and "\n" not in report.error
     assert await _rows(db, agent) == rows
 
 
