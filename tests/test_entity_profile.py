@@ -119,6 +119,14 @@ async def _row(session, agent: str, key: str) -> EntityProfile | None:
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def _a_day_later(session, agent: str, *keys: str) -> None:
+    """Move the agent's rows (or those of ``keys``) 25 hours into the past: their 24 hours have passed."""
+    stmt = update(EntityProfile).where(EntityProfile.agent_id == agent)
+    if keys:
+        stmt = stmt.where(EntityProfile.entity_key.in_(keys))
+    await session.execute(stmt.values(written_at=datetime.now(UTC) - timedelta(hours=25)))
+
+
 # ---------------------------------------------------------------------------
 # Candidates
 # ---------------------------------------------------------------------------
@@ -227,6 +235,9 @@ async def test_a_not_entity_verdict_is_stored_and_asked_again_only_when_the_fact
     assert second["unchanged"] == 1 and len(llm.prompts) == 1
 
     await _keyed(session, agent, "spreadsheet", {"content": "the spreadsheet has a new tab"})
+    held = await writer.run_sleep(session=session)
+    assert held["held"] == 1 and len(llm.prompts) == 1  # the verdict's call is less than 24 hours old
+    await _a_day_later(session, agent)
     third = await writer.run_sleep(session=session)
     assert third["not_entity"] == 1 and len(llm.prompts) == 2
 
@@ -349,13 +360,16 @@ async def test_a_bad_reply_keeps_the_old_profile(db, session, reply):
             }[reply]
         }
     )
+    await _a_day_later(session, agent)
     stats = await writer.run_sleep(session=session)
 
     assert stats["failed_closed"] == 1 and stats["written"] == 0
     after = await _row(session, agent, "zephyrine")
     assert (after.status, after.lines, after.source_hash) == ("profile", old_lines, old_hash)
     assert after.written_at > old_written  # the call counts toward the day
-    # The digest was not moved, so the key is asked again next time.
+    # The digest was not moved, so the key is asked again once its 24 hours have passed.
+    assert (await writer.run_sleep(session=session))["held"] == 1 and len(writer._llm.prompts) == 1
+    await _a_day_later(session, agent)
     await writer.run_sleep(session=session)
     assert len(writer._llm.prompts) == 2
 
@@ -371,6 +385,8 @@ async def test_a_first_reply_that_cannot_be_used_leaves_a_failed_row_that_counts
     row = await _row(session, agent, "zephyrine")
     assert stats["failed_closed"] == 1 and (row.status, row.lines, row.source_hash) == ("failed", [], "")
     assert await writer.store.written_last_day(session=session) == 1
+    assert (await writer.run_sleep(session=session))["held"] == 1 and llm.keys == ["zephyrine"]
+    await _a_day_later(session, agent)
     await writer.run_sleep(session=session)
     assert llm.keys == ["zephyrine", "zephyrine"]
 
@@ -428,6 +444,7 @@ async def test_a_cited_fact_superseded_after_the_write_makes_the_profile_eligibl
     (replacement,) = await _keyed(session, agent, [], {"content": "unrelated replacement"})
     await session.execute(update(Fact).where(Fact.id == f1.id).values(superseded_by=replacement.id, active=False))
     llm.replies["zephyrine"] = _entity(_line("Zephyrine sails.", f2))
+    await _a_day_later(session, agent)
     stats = await writer.run_sleep(session=session)
     assert stats["written"] == 1 and len(llm.prompts) == 2
     assert f"[{str(f1.id)[:8]}]" not in llm.prompts[1]  # no longer a source row
@@ -463,9 +480,10 @@ async def test_a_profiled_key_past_the_most_profiles_bound_is_still_written_agai
     writer = _writer(db, agent, llm, entity_profile_max_profiles=1)
     await writer.run_sleep(session=session)
 
-    # A key with more facts takes the one place; zephyrine's facts change.
+    # A key with more facts takes the one place; zephyrine's facts change, a day later.
     await _keyed(session, agent, "alder", {}, {}, {})
     await session.execute(update(Fact).where(Fact.id == z2.id).values(content="zephyrine moved inland"))
+    await _a_day_later(session, agent)
     stats = await writer.run_sleep(session=session)
     assert sorted(llm.keys) == ["alder", "zephyrine", "zephyrine"] and stats["candidates"] == 2
 
@@ -484,13 +502,89 @@ async def test_the_daily_limit_holds_across_cycles_and_frees_after_24_hours(db, 
     assert (second["asked"], second["skipped_cap"], second["unchanged"]) == (0, 1, 2)
     assert len(llm.prompts) == 2
 
-    await session.execute(
-        update(EntityProfile)
-        .where(EntityProfile.agent_id == agent)
-        .values(written_at=datetime.now(UTC) - timedelta(hours=25))
-    )
+    await _a_day_later(session, agent)
     third = await writer.run_sleep(session=session)
     assert third["asked"] == 1 and sorted(llm.keys) == ["alder", "birchwood", "cedarfall"]
+
+
+async def _change_each(session, agent: str, keys: list[str], cycle: int) -> None:
+    for key in keys:
+        await _keyed(session, agent, key, {"content": f"{key} changed before cycle {cycle}"})
+
+
+@pytest.mark.postgres_only
+async def test_ten_entities_changing_before_each_of_six_cycles_in_a_day_cost_ten_calls(db, session):
+    agent = _agent()
+    keys = [f"entity {name}" for name in "abcdefghij"]
+    for key in keys:
+        await _keyed(session, agent, key, {}, {})
+    llm = FakeLLM({key: {"verdict": "not_entity"} for key in keys})
+    writer = _writer(db, agent, llm)
+
+    held = 0
+    for cycle in range(6):
+        if cycle:
+            await _change_each(session, agent, keys, cycle)
+        stats = await writer.run_sleep(session=session)
+        held += stats["held"]
+    assert len(llm.prompts) == 10 and sorted(llm.keys) == keys
+    assert held == 50  # every entity, changed in each of the five later cycles, waited
+    assert await writer.store.written_last_day(session=session) == 10
+
+    # A day after their calls, each changed entity is asked again.
+    await _a_day_later(session, agent)
+    await _change_each(session, agent, keys, 6)
+    assert (await writer.run_sleep(session=session))["asked"] == 10 and len(llm.prompts) == 20
+
+
+@pytest.mark.postgres_only
+async def test_the_daily_limit_is_never_exceeded_across_cycles(db, session):
+    agent = _agent()
+    keys = [f"entity {name}" for name in "abcdefghij"]
+    for key in keys:
+        await _keyed(session, agent, key, {}, {})
+    llm = FakeLLM({key: {"verdict": "not_entity"} for key in keys})
+    writer = _writer(db, agent, llm, entity_profile_max_calls_per_day=4)
+
+    for cycle in range(6):
+        if cycle:
+            await _change_each(session, agent, keys, cycle)
+        await writer.run_sleep(session=session)
+        assert len(llm.prompts) == await writer.store.written_last_day(session=session) <= 4
+    assert len(llm.prompts) == 4
+
+
+@pytest.mark.postgres_only
+async def test_emptying_a_profile_makes_no_call_and_takes_no_place_in_the_day(db, session):
+    agent = _agent()
+    z1, z2 = await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", z1)), "quillon": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm, entity_profile_max_calls_per_day=1)
+    await writer.run_sleep(session=session)
+    await _a_day_later(session, agent)
+
+    # Zephyrine's facts all go and a new key arrives: the emptying is free, so the one call of the day is quillon's.
+    await session.execute(update(Fact).where(Fact.id.in_([z1.id, z2.id])).values(active=False))
+    await _keyed(session, agent, "quillon", {}, {})
+    stats = await writer.run_sleep(session=session)
+    assert (stats["cleared"], stats["asked"], stats["skipped_cap"]) == (1, 1, 0)
+    assert llm.keys == ["zephyrine", "quillon"]
+    assert await writer.store.written_last_day(session=session) == 1
+
+
+@pytest.mark.postgres_only
+async def test_a_profile_written_in_the_last_day_is_emptied_at_once_and_still_counts_its_call(db, session):
+    agent = _agent()
+    z1, z2 = await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", z1))})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+
+    await session.execute(update(Fact).where(Fact.id.in_([z1.id, z2.id])).values(active=False))
+    stats = await writer.run_sleep(session=session)
+    assert (stats["cleared"], stats["held"], len(llm.prompts)) == (1, 0, 1)
+    assert (await _row(session, agent, "zephyrine")).lines == []
+    assert await writer.store.written_last_day(session=session) == 1  # the first call, still in its 24 hours
 
 
 @pytest.mark.postgres_only
@@ -500,11 +594,7 @@ async def test_new_keys_are_asked_before_a_not_entity_verdict_is_asked_again(db,
     llm = FakeLLM({"spreadsheet": {"verdict": "not_entity"}, "zephyrine": {"verdict": "not_entity"}})
     writer = _writer(db, agent, llm, entity_profile_max_calls_per_day=1)
     await writer.run_sleep(session=session)
-    await session.execute(
-        update(EntityProfile)
-        .where(EntityProfile.agent_id == agent)
-        .values(written_at=datetime.now(UTC) - timedelta(hours=25))
-    )
+    await _a_day_later(session, agent)
 
     await _keyed(session, agent, "spreadsheet", {"content": "one more"})
     await _keyed(session, agent, "zephyrine", {}, {})
@@ -844,7 +934,7 @@ async def test_get_lists_the_profiles_and_one_profile_in_full(db):
     try:
         app = _app(db, agent)
         listed = (await _call(app, "GET", "/entity-profiles")).json()
-        assert listed["writer_enabled"] is False
+        assert listed["writer_enabled"] is True  # the default
         assert [p["key"] for p in listed["profiles"]] == ["spreadsheet", "zephyrine"]
         zephyrine = listed["profiles"][1]
         assert set(zephyrine) == {

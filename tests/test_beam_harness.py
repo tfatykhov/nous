@@ -735,6 +735,52 @@ async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, f
 
 
 @pytest.mark.postgres_only
+@pytest.mark.parametrize(("overrides", "on"), [({"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "false"}, False), ({}, True)])
+async def test_a_sleep_asks_about_an_entity_by_default_and_never_with_the_flag_off(db, overrides, on) -> None:
+    """A full sleep cycle over a key with enough facts: by default the entity profile phase asks the model about it
+    (the fake model refuses, so a failed row is left); with the flag off no such call is made and no row is written."""
+    from conftest import MockEmbeddingProvider
+    from sqlalchemy import select
+
+    from nous.storage.models import EntityProfile, Fact, FactEntityKey
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    agent = f"beam-entity-profile-{uuid.uuid4().hex[:8]}"
+    settings = arms.build_settings(db_url, agent, overrides)
+    assert settings.entity_profile_writer_enabled is on
+    llm = FakeLLM()
+    prompts: list[str] = []
+    answer = llm.call
+
+    async def recording(payload: dict) -> SimpleNamespace:
+        prompts.append(json.dumps(payload["messages"]))
+        return await answer(payload)
+
+    llm.call = recording
+    try:
+        async with harness.open_stack(settings, llm=llm, embeddings=MockEmbeddingProvider(), sleep=True) as stack:
+            await harness.ensure_agent(stack)
+            async with db.session() as s:
+                facts = [
+                    Fact(id=uuid.uuid4(), agent_id=agent, content=f"Larkspur garden note {i}", category="technical")
+                    for i in range(settings.entity_profile_min_facts)
+                ]
+                s.add_all(facts)
+                await s.flush()
+                s.add_all([FactEntityKey(fact_id=f.id, entity_key="larkspur garden", agent_id=agent) for f in facts])
+                await s.commit()
+            now = datetime.now(UTC)
+            await harness.run_sleep(stack, now, now)
+        async with db.session() as s:
+            rows = (await s.execute(select(EntityProfile).where(EntityProfile.agent_id == agent))).scalars().all()
+        asked = [p for p in prompts if "store_entity_profile" in p or "entity key" in p]
+        assert bool(asked) is on
+        assert [(r.entity_key, r.status) for r in rows] == ([("larkspur garden", "failed")] if on else [])
+    finally:
+        assert await purge_agent(db, agent) == []
+
+
+@pytest.mark.postgres_only
 async def test_stack_publishes_the_arms_fusion_settings_for_its_lifetime(db, monkeypatch: pytest.MonkeyPatch) -> None:
     """hybrid search re-reads NOUS_RRF_K and friends from the environment per query."""
     from conftest import MockEmbeddingProvider

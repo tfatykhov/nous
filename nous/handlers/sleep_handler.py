@@ -3141,15 +3141,15 @@ class SleepHandler:
             sleep_stats["entity_profiles_rewritten"] = stats.get("written", 0)
             keys = (
                 "candidates", "asked", "written", "not_entity", "owner", "failed_closed", "unchanged", "cleared",
-                "skipped_cap", "inactive", "errors", "dropped", "inferred_dropped", "dead_dropped", "trimmed",
+                "held", "skipped_cap", "inactive", "errors", "dropped", "inferred_dropped", "dead_dropped", "trimmed",
             )  # fmt: skip
             counts = {key: stats.get(key, 0) for key in keys}
             # Nested, not flat ints: the consolidation audit sums every top-level int.
             sleep_stats["entity_profile"] = {"outcome": stats.get("outcome", ""), **counts}
             logger.info(
                 "Sleep entity profiles: %s, %d candidates, %d asked, %d written, %d not_entity, %d owner, "
-                "%d failed_closed, %d unchanged, %d cleared, %d skipped_cap, %d inactive, %d errors, %d dropped, "
-                "%d inferred_dropped, %d dead_dropped, %d trimmed",
+                "%d failed_closed, %d unchanged, %d cleared, %d held, %d skipped_cap, %d inactive, %d errors, "
+                "%d dropped, %d inferred_dropped, %d dead_dropped, %d trimmed",
                 stats.get("outcome", ""),
                 *counts.values(),
             )

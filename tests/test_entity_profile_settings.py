@@ -1,4 +1,4 @@
-"""Entity profile settings (F119 PR 1): defaults (the writer off), environment names, bounds, the owner keys list,
+"""Entity profile settings (F119 PR 1): defaults (the writer on), environment names, bounds, the owner keys list,
 compose lines and doc rows."""
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from nous.heart.entity_profile import owner_keys
 ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULTS = {
-    "entity_profile_writer_enabled": False,
+    "entity_profile_writer_enabled": True,
     "entity_profile_min_facts": 10,
     "entity_profile_max_profiles": 150,
     "entity_profile_max_calls_per_day": 40,
@@ -31,12 +31,17 @@ def test_the_defaults():
     assert {k: getattr(s, k) for k in DEFAULTS} == DEFAULTS
 
 
+def test_the_writer_is_on_by_default_and_false_switches_it_off(monkeypatch):
+    assert Settings.model_fields["entity_profile_writer_enabled"].default is True
+    monkeypatch.setenv("NOUS_ENTITY_PROFILE_WRITER_ENABLED", "false")
+    assert Settings(_env_file=None).entity_profile_writer_enabled is False
+
+
 def test_the_environment_names(monkeypatch):
-    monkeypatch.setenv("NOUS_ENTITY_PROFILE_WRITER_ENABLED", "true")
     monkeypatch.setenv("NOUS_ENTITY_PROFILE_MAX_CALLS_PER_DAY", "5")
     monkeypatch.setenv("NOUS_ENTITY_PROFILE_OWNER_KEYS", " Pat , ,Quinn Avery's")
     s = Settings(_env_file=None)
-    assert (s.entity_profile_writer_enabled, s.entity_profile_max_calls_per_day) == (True, 5)
+    assert s.entity_profile_max_calls_per_day == 5
     assert s.entity_profile_owner_keys == ["Pat", "Quinn Avery's"]
     assert owner_keys(s) == {"user", "assistant", "pat", "quinn avery"}
 

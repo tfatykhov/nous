@@ -10,8 +10,10 @@ stored and asked again only when the key's facts change. Code then checks the li
 that cites only the agent's own inferences or a fact that is no longer live, dates each line from its cited facts
 (never from the model) and drops whole lines from the end until the rendered profile fits. A key that has a profile is
 visited even when it falls below the threshold or past the cut, so its profile is written again when its facts
-change, and emptied without a call when none is left. Every row written with a model call in the last 24 hours counts
-against ``entity_profile_max_calls_per_day``.
+change, and emptied without a call when none is left. A row written with a model call stands for that call for 24 hours:
+the entity is not asked again until they have passed, so the rows written in the last 24 hours are the calls made in
+them and ``entity_profile_max_calls_per_day`` bounds the sleep phase exactly. The owner's rebuild may ask again about
+an entity written in that window.
 """
 
 from __future__ import annotations
@@ -399,7 +401,7 @@ class EntityProfileStore:
             row.fact_count = fact_count
             row.source_count = source_count
             row.tokens = tokens
-            if called:
+            if called or row.written_at is None:
                 row.written_at = now
             row.updated_at = now
             await s.flush()
@@ -447,6 +449,7 @@ def _new_stats() -> dict[str, Any]:
         "failed_closed": 0,
         "unchanged": 0,
         "cleared": 0,
+        "held": 0,
         "skipped_cap": 0,
         "inactive": 0,
         "errors": 0,
@@ -569,13 +572,20 @@ class EntityProfileWriter:
         self, interrupted: Callable[[], bool] | None = None, session: AsyncSession | None = None
     ) -> dict:
         """The sleep phase's run: owner keys are stored without a call, a key whose facts are unchanged is skipped,
-        and at most the day's remaining calls are made. An interrupted sleep stops between entities."""
+        and at most the day's remaining calls are made. An interrupted sleep stops between entities.
+
+        An entity whose row was written with a call in the last 24 hours (a profile, a verdict or a reply that could
+        not be used) is not visited again until they have passed, whatever changed, so the rows written in the last 24
+        hours are the calls made in them. Only emptying a profile none of whose facts is left, which makes no call and
+        moves no ``written_at``, is done at any time.
+        """
         interrupted = interrupted or (lambda: False)
         async with self._lock:
             stats = _new_stats()
             if self._llm is None:
                 stats["outcome"] = "no_llm"
                 return stats
+            since = datetime.now(UTC) - _DAY
             async with _session_scope(self._db, session) as s:
                 candidates = await self._candidates(s)
                 # A key with a written profile is visited even below the threshold or past the cut, so a profile whose
@@ -606,8 +616,16 @@ class EntityProfileWriter:
                     if row is not None and not row["active"]:
                         stats["inactive"] += 1
                         continue
+                    # Counted by written_last_day: the row stands for one call until 24 hours have passed.
+                    held = (
+                        row is not None
+                        and row["status"] != "owner"
+                        and datetime.fromisoformat(row["written_at"]) > since
+                    )
                     if key in owners:
-                        if row is None or row["status"] != "owner":
+                        if held:
+                            stats["held"] += 1
+                        elif row is None or row["status"] != "owner":
                             await self._save_owner(key, count, session)
                             stats["owner"] += 1
                         continue
@@ -619,9 +637,12 @@ class EntityProfileWriter:
                         continue
                     if not facts:
                         # Every fact of a profiled key is gone: empty the profile without a call (its lines move to
-                        # previous_lines).
+                        # previous_lines), held or not.
                         await self._clear(key, digest, row, session)
                         stats["cleared"] += 1
+                        continue
+                    if held:
+                        stats["held"] += 1
                         continue
                     if calls_left <= 0:
                         stats["skipped_cap"] += 1
@@ -637,7 +658,8 @@ class EntityProfileWriter:
 
     async def rebuild(self, key: str, session: AsyncSession | None = None) -> dict:
         """The owner's run for one key: asks the model even when the key's facts are unchanged, within the daily limit
-        (``at_limit``: no call). The result carries the row as written (``profile``)."""
+        (``at_limit``: no call). An entity written in the last 24 hours may be asked again: its row already counts, so
+        this call is the one the count does not see. The result carries the row as written (``profile``)."""
         async with self._lock:
             stats = _new_stats()
             norm = normalize_key(key) if isinstance(key, str) else None

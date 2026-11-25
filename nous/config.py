@@ -508,10 +508,10 @@ class Settings(BaseSettings):
     # each entity key with enough active facts; the owner reads them on GET /entity-profiles. Nothing is sent to the
     # model in a turn.
     entity_profile_writer_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Run the entity profile sleep phase and allow POST /entity-profiles/rebuild. Shadow: profiles are "
-            "readable on GET /entity-profiles and never sent to the model. Land dark."
+            "Run the entity profile sleep phase and allow POST /entity-profiles/rebuild (on by default; false "
+            "switches both off). Shadow: profiles are readable on GET /entity-profiles and never sent to the model."
         ),
     )
     entity_profile_min_facts: int = Field(
@@ -528,8 +528,9 @@ class Settings(BaseSettings):
         default=40,
         ge=1,
         description=(
-            "Most entity profiles the sleep phase writes with a model call in any 24 hours, counted from the rows "
-            "written in the last 24 hours."
+            "Most model calls the sleep phase makes for entity profiles in any 24 hours. An entity written with a "
+            "call is not asked again for 24 hours, so the rows written in the last 24 hours are the calls made; only "
+            "the owner's rebuild of such an entity adds a call beyond them."
         ),
     )
     entity_profile_max_lines: int = Field(
