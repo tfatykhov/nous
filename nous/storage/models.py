@@ -2359,8 +2359,9 @@ class EntityProfile(Base):
     """Migration 123 (F119): one entity's profile, one row per agent and entity key.
 
     Written by ``nous.heart.entity_profile``: the sleep phase and ``POST /entity-profiles/rebuild`` replace ``lines``
-    (the old ones move to ``previous_lines``). Each line is ``{id, text, fact_ids, said_on, date_from}``. ``status``
-    is ``profile``, ``not_entity``, ``owner``, ``asked`` or ``failed``; ``active`` is the soft delete.
+    (the lines that leave are added to ``previous_lines``). Each line is ``{id, text, fact_ids, said_on, date_from}``.
+    ``status`` is ``profile``, ``not_entity``, ``owner``, ``asked`` or ``failed``; ``active`` is the soft delete.
+    ``owner_verdict`` (migration 125) is null or the owner's ``{verdict: "not_entity", by, at}``.
     """
 
     __tablename__ = "entity_profile"
@@ -2379,6 +2380,8 @@ class EntityProfile(Base):
     source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # none_as_null: a verdict taken back is SQL NULL (what the writer and the list test), not a JSON null.
+    owner_verdict: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     written_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

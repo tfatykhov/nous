@@ -1330,6 +1330,7 @@ async def test_get_lists_the_profiles_and_one_profile_in_full_with_live_lines_on
         zephyrine = listed["profiles"][1]
         assert set(zephyrine) == {
             "key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at", "lines",
+            "active", "owner_verdict",
         }  # fmt: skip
         assert (zephyrine["status"], zephyrine["lines"]) == ("profile", 1)  # the line on a dead fact is not counted
 
@@ -1454,8 +1455,16 @@ def test_the_routes_are_guarded_as_the_profile_cards(tmp_path):
     assert guarded[("GET", "/entity-profiles")] is guarded[("GET", "/profile-card")] is False
     assert guarded[("GET", "/entity-profiles/{key}")] is False
     assert guarded[("POST", "/entity-profiles/rebuild")] is guarded[("POST", "/profile-card/rebuild")] is True
-    assert {path for (_m, path) in guarded if path.startswith("/entity-profiles")} == {
-        "/entity-profiles",
-        "/entity-profiles/rebuild",
-        "/entity-profiles/{key}",
+    assert {(m, path) for (m, path) in guarded if path.startswith("/entity-profiles")} == {
+        ("GET", "/entity-profiles"),
+        ("POST", "/entity-profiles/rebuild"),
+        ("GET", "/entity-profiles/{key}"),
+        ("DELETE", "/entity-profiles/{key}"),
+        ("POST", "/entity-profiles/{key}/restore"),
+        ("POST", "/entity-profiles/{key}/not-entity"),
+        ("DELETE", "/entity-profiles/{key}/not-entity"),
+        ("DELETE", "/entity-profiles/{key}/lines/{line_id}"),
+        ("POST", "/entity-profiles/{key}/lines/{line_id}/restore"),
     }
+    # Every change the owner makes is behind the same guard as the rebuild.
+    assert all(guarded[(m, p)] for (m, p) in guarded if p.startswith("/entity-profiles") and m != "GET")

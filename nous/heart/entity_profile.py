@@ -19,6 +19,12 @@ before it is made (its row's ``written_at`` moves first), and a row written with
 hours: the entity is not asked again until they have passed, so the rows written in the last 24 hours are the calls
 made in them and ``entity_profile_max_calls_per_day`` bounds the sleep phase exactly. The owner's rebuild may ask
 again about an entity written in that window.
+
+The owner corrects profiles from the dashboard (F119 PR 2): a removed line moves to ``previous_lines`` with who and
+when and its text joins ``rejected``, and no later write brings back a line with that text or citing exactly the same
+facts; a removed profile (``active`` false) and a key the owner called not an entity (``owner_verdict``) are never
+asked about or written until the owner takes it back. ``previous_lines`` keeps the lines that left a profile, at most
+``PREVIOUS_CAP``.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
@@ -45,6 +51,7 @@ from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.profile_card import (
     CHARS_PER_TOKEN,
     LINE_CHARS,
+    REJECTED_CAP,
     _norm,
     _one_line,
     _render_fact,
@@ -83,6 +90,12 @@ FAILED_REASK = timedelta(days=7)
 # GET /entity-profiles: rows a list answers with by default, and at most.
 LIST_LIMIT_DEFAULT = 200
 LIST_LIMIT_MAX = 1000
+# The list's status filter: a row's writer status, or ``removed`` (the owner removed the profile). A row the owner
+# called not an entity is listed under ``not_entity``.
+LIST_STATUSES = ("profile", "not_entity", "owner", "asked", "failed", "removed")
+# Lines that left a profile (replaced, dropped on a dead fact, or removed by the owner), kept newest last. A line the
+# owner removed is dropped only when no other line is left to drop.
+PREVIOUS_CAP = 50
 # The most fact ids one query looks up (one bind parameter each; asyncpg takes at most 32,767 a query).
 ID_CHUNK = 5000
 # What Postgres text and JSONB cannot store: NUL, and lone surrogates (not valid UTF-8).
@@ -322,14 +335,17 @@ def settle_lines(
     name: str,
     kind: str | None,
     settings: Settings,
+    removed: set[frozenset[str]] | None = None,
 ) -> tuple[list[dict] | None, dict[str, int]]:
     """Check the model's lines; None means keep the old profile (fail closed).
 
     ``settle_entries`` drops a line with no text, over ``LINE_CHARS``, with more than 3 citations or one outside the
     facts shown (``dropped``), drops a rejected line and a repeat, and fails closed when none is left or more than half
-    were dropped. Then a line whose cited facts are all the agent's own inferences is dropped (``inferred_dropped``),
-    each line is dated from its cited facts, and whole lines are dropped from the end until the profile has at most
-    ``entity_profile_max_lines`` lines and its rendered size fits ``entity_profile_max_tokens`` (``trimmed``).
+    were dropped. A line citing exactly the facts of a line the owner removed (``removed``) is dropped too
+    (``rejected_dropped``). Then a line whose cited facts are all the agent's own inferences is dropped
+    (``inferred_dropped``), each line is dated from its cited facts, and whole lines are dropped from the end until the
+    profile has at most ``entity_profile_max_lines`` lines and its rendered size fits ``entity_profile_max_tokens``
+    (``trimmed``).
     """
     lines, counts = settle_entries(raw, facts, set(), rejected, _NO_BOUND, _NO_BOUND, max_cites=MAX_CITES)
     counts["inferred_dropped"] = 0
@@ -338,6 +354,9 @@ def settle_lines(
     by_id = {str(f.id): f for f in facts}
     kept: list[dict] = []
     for line in lines:
+        if frozenset(line["fact_ids"]) in (removed or set()):
+            counts["rejected_dropped"] += 1
+            continue
         cited = [by_id[i] for i in line["fact_ids"] if i in by_id]
         if cited and all(FACT_SOURCE_MARKERS.get(f.source or "") == "inferred" for f in cited):
             counts["inferred_dropped"] += 1
@@ -407,6 +426,27 @@ def _cites(line: Any) -> set[str]:
     return {i for i in ids if isinstance(i, str)} if isinstance(ids, list) else set()
 
 
+def _owner_removed(line: Any) -> bool:
+    """A previous line the owner removed (it carries ``removed_at``)."""
+    return isinstance(line, dict) and bool(line.get("removed_at"))
+
+
+def removed_cites(previous: list) -> set[frozenset[str]]:
+    """The cited-fact sets of the lines the owner removed: a new line citing exactly one of them is not written."""
+    return {frozenset(_cites(line)) for line in previous if _owner_removed(line) and _cites(line)}
+
+
+def _bounded_previous(entries: list) -> list:
+    """At most ``PREVIOUS_CAP`` previous lines, the oldest dropped first; a line the owner removed is dropped only when
+    no other line is left to drop, so the writer keeps skipping it."""
+    over = len(entries) - PREVIOUS_CAP
+    if over <= 0:
+        return entries
+    others = [i for i, line in enumerate(entries) if not _owner_removed(line)]
+    dropped = set(others[:over])
+    return [line for i, line in enumerate(entries) if i not in dropped][-PREVIOUS_CAP:]
+
+
 def _as_dict(row: EntityProfile) -> dict:
     return {
         "key": row.entity_key,
@@ -421,10 +461,31 @@ def _as_dict(row: EntityProfile) -> dict:
         "source_count": row.source_count,
         "tokens": row.tokens,
         "active": row.active,
+        "owner_verdict": row.owner_verdict,
         "written_at": _iso(row.written_at),
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
+
+
+def list_row(row: dict) -> dict:
+    """One row of ``GET /entity-profiles`` from a store row whose ``lines`` are its live lines."""
+    fields = (
+        "key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at", "active",
+        "owner_verdict",
+    )  # fmt: skip
+    return {**{k: row[k] for k in fields}, "lines": len(row["lines"])}
+
+
+def detail_body(row: dict, unkeyed: int) -> dict:
+    """``GET /entity-profiles/{key}`` from a store row whose ``lines`` are its live lines: the lines, the lines the
+    owner removed (newest first, each with who and when) and the active facts that name the key without carrying it."""
+    fields = (
+        "key", "display_name", "kind", "status", "lines", "rejected", "fact_count", "source_count", "tokens",
+        "written_at", "owner_verdict",
+    )  # fmt: skip
+    removed = [line for line in row["previous_lines"] if _owner_removed(line)][::-1]
+    return {**{k: row[k] for k in fields}, "removed_lines": removed, "unkeyed_mentions": unkeyed}
 
 
 # How many active facts name each key in their content or subject (the facts' full-text vector, English stemming)
@@ -523,17 +584,65 @@ class EntityProfileStore:
             )
             return {row.entity_key: _as_dict(row) for row in (await s.execute(stmt)).scalars()}
 
-    async def list(self, limit: int | None = None, session: AsyncSession | None = None) -> list[dict]:
-        """The active rows, the keys with the most facts first (at most ``limit``)."""
+    def _matching(self, stmt: Any, q: str | None) -> Any:
+        """``stmt`` limited to this agent's rows whose key or name contains ``q`` (any case, taken literally)."""
+        stmt = stmt.where(EntityProfile.agent_id == self.agent_id)
+        if q:
+            pattern = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            stmt = stmt.where(
+                or_(
+                    EntityProfile.entity_key.ilike(pattern, escape="\\"),
+                    EntityProfile.display_name.ilike(pattern, escape="\\"),
+                )
+            )
+        return stmt
+
+    @staticmethod
+    def _shown(stmt: Any, status: str | None) -> Any:
+        """``stmt`` limited to the rows the list shows under ``status`` (one of ``LIST_STATUSES``; None: every active
+        row). ``removed`` is the rows the owner removed; ``not_entity`` includes the rows the owner called not an
+        entity, and no other status does."""
+        if status == "removed":
+            return stmt.where(EntityProfile.active.is_(False))
+        stmt = stmt.where(EntityProfile.active.is_(True))
+        if status == "not_entity":
+            return stmt.where(or_(EntityProfile.status == "not_entity", EntityProfile.owner_verdict.is_not(None)))
+        if status is not None:
+            return stmt.where(EntityProfile.status == status, EntityProfile.owner_verdict.is_(None))
+        return stmt
+
+    async def list(
+        self,
+        limit: int | None = None,
+        session: AsyncSession | None = None,
+        *,
+        offset: int = 0,
+        q: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """The rows shown under ``status`` whose key or name contains ``q``, the keys with the most facts first (at most
+        ``limit``, from ``offset``). With neither filter: the active rows."""
         async with _session_scope(self._db, session) as s:
             stmt = (
-                select(EntityProfile)
-                .where(EntityProfile.agent_id == self.agent_id, EntityProfile.active.is_(True))
+                self._shown(self._matching(select(EntityProfile), q), status)
                 .order_by(EntityProfile.fact_count.desc(), EntityProfile.entity_key)
                 .limit(limit)
+                .offset(offset)
                 .execution_options(populate_existing=True)
             )
             return [_as_dict(row) for row in (await s.execute(stmt)).scalars()]
+
+    async def counts(self, q: str | None = None, session: AsyncSession | None = None) -> dict[str, int]:
+        """How many rows whose key or name contains ``q`` each status of ``LIST_STATUSES`` shows (0 for none)."""
+        shown = case(
+            (EntityProfile.active.is_(False), "removed"),
+            (EntityProfile.owner_verdict.is_not(None), "not_entity"),
+            else_=EntityProfile.status,
+        )
+        async with _session_scope(self._db, session) as s:
+            stmt = self._matching(select(shown, func.count()), q).group_by(shown)
+            found = {status: int(n) for status, n in (await s.execute(stmt)).all()}
+        return {status: found.get(status, 0) for status in LIST_STATUSES}
 
     async def live_ids(self, ids: set[str], session: AsyncSession | None = None) -> set[str]:
         """The ids among ``ids`` of this agent's active, unsuperseded facts (an id that is not a UUID is not live)."""
@@ -567,12 +676,13 @@ class EntityProfileStore:
         ]
 
     async def profiled_keys(self, session: AsyncSession | None = None) -> list[str]:
-        """The keys of the active rows with status ``profile``."""
+        """The keys of the active rows with status ``profile`` that the owner has not called not an entity."""
         async with _session_scope(self._db, session) as s:
             stmt = select(EntityProfile.entity_key).where(
                 EntityProfile.agent_id == self.agent_id,
                 EntityProfile.active.is_(True),
                 EntityProfile.status == "profile",
+                EntityProfile.owner_verdict.is_(None),
             )
             return list((await s.execute(stmt)).scalars())
 
@@ -644,15 +754,27 @@ class EntityProfileStore:
         called: bool = True,
         session: AsyncSession | None = None,
     ) -> dict:
-        """Replace the row's lines (the old ones become ``previous_lines``) and its status; ``rejected`` is kept.
+        """Replace the row's lines and its status; ``rejected`` is kept. The lines that leave are added to
+        ``previous_lines`` (at most ``PREVIOUS_CAP``).
 
-        The row is locked and a rejected line is dropped here, so a line deleted while the model was writing does
-        not come back. ``written_at`` moves only for a write that followed a model call (``called``).
+        The row is locked and a rejected line, or a new line citing exactly the facts of a line the owner removed, is
+        dropped here, so a line deleted while the model was writing does not come back. A row the owner removed or
+        called not an entity is left as it is. ``written_at`` moves only for a write that followed a model call
+        (``called``).
         """
         async with _session_scope(self._db, session) as s:
             row = await self._row(s, key, lock=True)
+            if row is not None and (not row.active or row.owner_verdict is not None):
+                return _as_dict(row)
             banned = {_norm(t) for t in (row.rejected if row is not None else [])}
-            lines = [line for line in lines if _norm(line["text"]) not in banned]
+            removed = removed_cites(row.previous_lines) if row is not None else set()
+            current = {line.get("id") for line in (row.lines if row is not None else []) if isinstance(line, dict)}
+            lines = [
+                line
+                for line in lines
+                if _norm(line["text"]) not in banned
+                and (line.get("id") in current or frozenset(_cites(line)) not in removed)
+            ]
             tokens = profile_tokens(display_name or key, kind, lines) if lines else 0
             now = datetime.now(UTC)
             if row is None:
@@ -666,7 +788,9 @@ class EntityProfileStore:
                 )
                 s.add(row)
             else:
-                row.previous_lines = list(row.lines)
+                kept = {line.get("id") for line in lines}
+                gone = [line for line in row.lines if not (isinstance(line, dict) and line.get("id") in kept)]
+                row.previous_lines = _bounded_previous(list(row.previous_lines) + gone)
             row.status = status
             row.display_name = display_name
             row.kind = kind
@@ -685,16 +809,20 @@ class EntityProfileStore:
 
     async def count_call(
         self, key: str, *, fact_count: int, source_count: int, session: AsyncSession | None = None
-    ) -> dict:
+    ) -> dict | None:
         """A call about to be made: only ``written_at`` moves, so the call counts and the key is held for 24 hours.
 
         Everything else stays until a reply is written: the status, the lines, the digest, ``fact_count`` (a
         ``not_entity`` row's baseline) and ``updated_at`` (when the last reply was judged, which the rests are
         measured from). So a call that gets no reply changes nothing else. A key with no row, or an ``owner`` row (a
         key no longer named an owner key), becomes an ``asked`` row with an empty digest: a call made, no reply judged.
+        None, and nothing moves, for a row the owner removed or called not an entity since the run read it: no call is
+        made.
         """
         async with _session_scope(self._db, session) as s:
             row = await self._row(s, key, lock=True)
+            if row is not None and (not row.active or row.owner_verdict is not None):
+                return None
             now = datetime.now(UTC)
             if row is None:
                 row = EntityProfile(
@@ -728,6 +856,82 @@ class EntityProfileStore:
                 row.updated_at = datetime.now(UTC)
                 await s.flush()
 
+    # The owner's corrections. Each is recorded in the row itself, as the profile card's delete_entry records a deleted
+    # line, and none moves written_at (the day's call count) or updated_at (the rests of not_entity and failed rows).
+
+    async def remove_line(self, key: str, line_id: str, by: str | None, session: AsyncSession | None = None) -> bool:
+        """The owner removes one line of an active profile now. It moves to ``previous_lines`` with ``removed_by`` and
+        ``removed_at``, and its text joins ``rejected`` (the newest ``REJECTED_CAP``): a later write drops a line with
+        that text or citing exactly the same facts. False when the active row has no such line."""
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            lines = row.lines if row is not None and row.active else []
+            hit = next((line for line in lines if isinstance(line, dict) and line.get("id") == line_id), None)
+            if row is None or hit is None:
+                return False
+            row.lines = [line for line in row.lines if not (isinstance(line, dict) and line.get("id") == line_id)]
+            gone = {**hit, "removed_by": by, "removed_at": datetime.now(UTC).isoformat()}
+            row.previous_lines = _bounded_previous(list(row.previous_lines) + [gone])
+            row.rejected = (list(row.rejected) + [str(hit.get("text", ""))])[-REJECTED_CAP:]
+            row.tokens = profile_tokens(row.display_name or key, row.kind, row.lines) if row.lines else 0
+            await s.flush()
+            return True
+
+    async def restore_line(self, key: str, line_id: str, session: AsyncSession | None = None) -> str:
+        """Put a line the owner removed back at the end of the profile, and take its text out of ``rejected``.
+
+        ``restored``; ``not_found`` when the active row has no such removed line; ``no_profile`` when the row is not a
+        profile now (the model's verdict since); ``not_live`` when a fact the line cites is no longer active and
+        unsuperseded (it could never be shown). Like a removal, a restore works under the owner's "not an entity".
+        """
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            previous = row.previous_lines if row is not None and row.active else []
+            hit = next((line for line in previous if _owner_removed(line) and line.get("id") == line_id), None)
+            if row is None or hit is None:
+                return "not_found"
+            if row.status != "profile":
+                return "no_profile"
+            cited = _cites(hit)
+            if not cited or not cited <= await self.live_ids(cited, session=s):
+                return "not_live"
+            line = {k: v for k, v in hit.items() if k not in ("removed_by", "removed_at")}
+            row.previous_lines = [p for p in row.previous_lines if p is not hit]
+            row.lines = list(row.lines) + [line]
+            row.rejected = [t for t in row.rejected if not (isinstance(t, str) and _norm(t) == _norm(line["text"]))]
+            row.tokens = profile_tokens(row.display_name or key, row.kind, row.lines)
+            await s.flush()
+            return "restored"
+
+    async def set_active(self, key: str, active: bool, session: AsyncSession | None = None) -> bool:
+        """The owner removes a whole profile (``active`` false: never listed as current, written or asked about) or
+        restores it. Its lines and verdict stay as they were. False when there is no row for the key."""
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            if row is None:
+                return False
+            row.active = active
+            await s.flush()
+            return True
+
+    async def set_owner_verdict(
+        self, key: str, not_entity: bool, by: str | None, session: AsyncSession | None = None
+    ) -> bool:
+        """The owner says the key is not an entity (``owner_verdict`` holds who and when), or takes that back (null).
+        While it is set the writer neither asks about the key nor writes its row, whatever its facts do; the writer's
+        own status and lines stay as they were, so taking it back returns the row to them. False when the active row
+        does not exist."""
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            if row is None or not row.active:
+                return False
+            if not not_entity:
+                row.owner_verdict = None
+            elif row.owner_verdict is None:
+                row.owner_verdict = {"verdict": "not_entity", "by": by, "at": datetime.now(UTC).isoformat()}
+            await s.flush()
+            return True
+
 
 def _new_stats() -> dict[str, Any]:
     return {
@@ -747,6 +951,7 @@ def _new_stats() -> dict[str, Any]:
         "skipped_cap": 0,
         "stale_dropped": 0,
         "inactive": 0,
+        "owner_not_entity": 0,
         "errors": 0,
         "dropped": 0,
         "rejected_dropped": 0,
@@ -929,6 +1134,10 @@ class EntityProfileWriter:
                     if row is not None and not row["active"]:
                         stats["inactive"] += 1
                         continue
+                    if row is not None and row["owner_verdict"] is not None:
+                        # The owner called it not an entity: never asked again until the owner takes that back.
+                        stats["owner_not_entity"] += 1
+                        continue
                     written = datetime.fromisoformat(row["written_at"]) if row is not None else None
                     # When the last reply was judged: a call that got no reply does not move it.
                     judged = datetime.fromisoformat(row["updated_at"]) if row is not None else None
@@ -997,7 +1206,8 @@ class EntityProfileWriter:
         """The owner's run for one key: asks the model even when the key's facts are unchanged, within the daily limit
         (``at_limit``: no call). An entity written in the last 24 hours may be asked again: its row already counts, so
         this call is the one the count does not see. An owner key whose row was written with a call in the last 24
-        hours stays as it is until they have passed (``held``). The result carries the row as written (``profile``).
+        hours stays as it is until they have passed (``held``). A removed row (``inactive``) and a key the owner called
+        not an entity (``owner_not_entity``) make no call. The result carries the row as written (``profile``).
         """
         async with self._lock, _clearing_profiled_vocabulary(self.agent_id):
             stats = _new_stats()
@@ -1018,6 +1228,8 @@ class EntityProfileWriter:
             )
             if row is not None and not row["active"]:
                 stats["outcome"] = "inactive"
+            elif row is not None and row["owner_verdict"] is not None:
+                stats["outcome"] = "owner_not_entity"
             elif norm in owner_keys(self._settings) and held:
                 # The row stands for a call made in the last 24 hours: it becomes an owner row once they have
                 # passed, so the call never leaves the day's count early.
@@ -1060,7 +1272,12 @@ class EntityProfileWriter:
         """
         sources = len(facts)
         async with _session_scope(self._db, session) as s:
-            await self.store.count_call(key, fact_count=fact_count, source_count=sources, session=s)
+            reserved = await self.store.count_call(key, fact_count=fact_count, source_count=sources, session=s)
+        if reserved is None:
+            # The owner removed the row or called it not an entity after the run read it: no call.
+            now = await self.store.get(key, session=session)
+            stats["owner_not_entity" if now is not None and now["active"] else "inactive"] += 1
+            return "skipped"
         stats["asked"] += 1
         client = _ReplySeen(self._llm)
         reply = _storable(
@@ -1097,7 +1314,13 @@ class EntityProfileWriter:
                 if reply.get("kind") in KINDS:
                     kind = reply["kind"]
                 lines, counts = settle_lines(
-                    reply.get("lines"), facts, row["rejected"] if row is not None else [], name, kind, self._settings
+                    reply.get("lines"),
+                    facts,
+                    row["rejected"] if row is not None else [],
+                    name,
+                    kind,
+                    self._settings,
+                    removed=removed_cites(row["previous_lines"]) if row is not None else None,
                 )
                 for k, v in counts.items():
                     stats[k] = stats.get(k, 0) + v
