@@ -417,7 +417,9 @@ describe('Limits and tools: the tools', () => {
     render(Limits);
     const nav = screen.getByRole('navigation', { name: 'Limits and tools views' });
     const links = within(nav).getAllByRole('link');
-    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([['Limits', '#/limits'], ['Tools', '#/limits/tools']]);
+    expect(links.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Limits', '#/limits'], ['Tools', '#/limits/tools'], ['Tool loading', '#/limits/loading'],
+    ]);
     expect(links[1].getAttribute('aria-current')).toBe('page');
   });
 });

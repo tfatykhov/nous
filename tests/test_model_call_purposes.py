@@ -385,6 +385,11 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "passes on the request of call_background_llm_structured(purpose='entity_profile') with the call_context it "
         "was given, and only notes that a reply came back (F119: a call with no reply is retried after a day)",
     ),
+    ("nous/api/tool_loading_routes.py", "_parse", "request.stream"): (
+        1,
+        "not a model call: the body of an incoming request to the tool-loading route (F120), read from Starlette's "
+        "stream and refused past 16384 bytes",
+    ),
 }
 
 _Site = tuple[str, str, str]

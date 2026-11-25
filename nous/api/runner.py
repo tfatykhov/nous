@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid4
 
-from nous.api import attachment_store, tool_policy
+from nous.api import attachment_store, tool_loading, tool_policy
 from nous.api.anthropic_client import (
     AnthropicClient,
     StreamEvent,
@@ -112,9 +112,13 @@ from nous.observability.tool_calls import (
     split_reason,
     work_kind_for,
 )
+from nous.runtime_config import RuntimeConfig
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
+
+# F120: a fault in the tool-loading record is logged once per process; the call goes on as it is.
+_tool_loading_fault_logged = False
 
 # F113 Phase A (shadow): the regex check of a validated subtask report (``log_report_claim_check``). The task
 # scorer does not read this type; ``f026_claim_verification`` is the per-turn check it counts.
@@ -2999,12 +3003,53 @@ class AgentRunner:
                     cache_break_components=list(cache_break.components_changed),
                     cache_break_tokens_lost=cache_break.estimated_tokens_lost,
                 )
+            record = self._tool_loading_record(call_context, tools)
+            if record is not None:
+                stats = dataclasses.replace(stats, tool_loading=record)
             call_context = dataclasses.replace(call_context, stats=stats, call_id=call_id)
         elif isinstance(call_context, CallContext) and call_context.call_id is not None:
             # No id minted (no estimate, or nothing records): one the input carried names another call's row.
             call_context = dataclasses.replace(call_context, call_id=None)
 
         return payload, call_context
+
+    def _tool_loading_record(self, call_context: CallContext, tools: list[dict[str, Any]] | None) -> dict | None:
+        """F120 watch only: what this call would leave out, for its ``model_call_log`` row, or None. Read at each call:
+        the owner's setting (``RuntimeConfig``) as it is now. Only a tool loop's own calls carry a kind
+        (``tool_loading_kind``). Reads ``tools`` and never changes it or the payload; a fault gives None and is logged
+        once."""
+        global _tool_loading_fault_logged
+        if not tools or getattr(self._settings, "tool_loading_enabled", False) is not True:
+            return None
+        try:
+            kind = getattr(call_context, "tool_loading_kind", None)
+            if kind is None:
+                return None
+            config = RuntimeConfig.get().get_tool_loading(self._settings.agent_id)
+            return tool_loading.call_record(config, kind, tools)
+        except Exception as exc:  # noqa: BLE001 -- watching must never change a call
+            if not _tool_loading_fault_logged:
+                _tool_loading_fault_logged = True
+                logger.warning("F120: tool-loading record not made (%s); calls go on as before", type(exc).__name__)
+            return None
+
+    def _tool_loading_context(
+        self, call_context: CallContext, ctx: ExecutionContext, frame_id: str | None, tool_filter: list[str] | None
+    ) -> CallContext:
+        """F120: the context a tool loop passes to its own model calls: ``call_context`` with the turn's kind of call
+        when tool loading is on and the turn may be watched, else ``call_context`` itself. The compaction, gate and
+        closing calls keep ``call_context``. A fault gives ``call_context`` and is logged once."""
+        global _tool_loading_fault_logged
+        if getattr(self._settings, "tool_loading_enabled", False) is not True:
+            return call_context
+        try:
+            kind = tool_loading.kind_of_turn(ctx, frame_id, tool_filter)
+            return call_context if kind is None else dataclasses.replace(call_context, tool_loading_kind=kind)
+        except Exception as exc:  # noqa: BLE001 -- watching must never change a turn
+            if not _tool_loading_fault_logged:
+                _tool_loading_fault_logged = True
+                logger.warning("F120: tool-loading kind not set (%s); calls go on as before", type(exc).__name__)
+            return call_context
 
     async def _call_api(
         self,
@@ -3257,6 +3302,10 @@ class AgentRunner:
                 frame_id=turn_context.frame.frame_id if turn_context.frame else None,
                 trace_id=_trace_id_of(turn_context),
             )
+            # F120: the loop's own model calls carry the turn's kind of call (tool loading, watch only).
+            _stream_loop_context = self._tool_loading_context(
+                _stream_call_context, _ctx, turn_context.frame.frame_id if turn_context.frame else None, None
+            )
 
             corrections = self._pending_corrections.pop(session_id, None)
             system_prompt = self._build_system_prompt(
@@ -3398,7 +3447,7 @@ class AgentRunner:
                         system_prompt=system_prompt,
                         messages=messages,
                         tools=tools if tools else None,
-                        call_context=_stream_call_context,
+                        call_context=_stream_loop_context,
                     ):
                         if event.type == "error":
                             error = event.text
@@ -4547,6 +4596,8 @@ class AgentRunner:
             frame_id=frame_id,
             trace_id=trace_id,
         )
+        # F120: the loop's own model calls carry the turn's kind of call (tool loading, watch only).
+        loop_call_context = self._tool_loading_context(call_context, ctx, frame_id, tool_filter)
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -4678,7 +4729,7 @@ class AgentRunner:
                 sent_notes.append((len(messages) - 1, note))
             if sent_notes:
                 _call_kwargs["tail_notes"] = list(sent_notes)
-            api_response = await self._call_api(**_call_kwargs, call_context=call_context)
+            api_response = await self._call_api(**_call_kwargs, call_context=loop_call_context)
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:

@@ -2599,6 +2599,10 @@ class Settings(BaseSettings):
     # (nous_system.model_call_attempt), and one row per minute of embedding or rerank calls.
     model_call_log_enabled: bool = False
     model_call_retention_days: int = 30
+    # F120 tool loading, watch only: the owner's card on the Limits and tools screen (mode, kinds of call, core set,
+    # stored in nous_system.config) and, in Watch only, a record on each model_call_log row of a switched-on kind of
+    # what the call would have left out. Changes no request. Off: the routes answer that it is off, nothing is recorded.
+    tool_loading_enabled: bool = False
     # F108, the model-call text: each call's system blocks, messages, tool list and response, redacted, stored once per
     # agent by hash (nous_system.model_text_block) and listed per call (nous_system.model_call_block_ref). Needs the
     # numbers on (the text hangs off the model_call_log row). A block is cut at the cap. A call's refs are kept the

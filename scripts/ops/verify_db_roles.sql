@@ -69,7 +69,7 @@ DECLARE
     -- A check on a table that a migration after 106 creates waits for that migration (CI runs this script once with
     -- the migrations up to 106 and again after the later ones): until the migration is recorded the check is skipped
     -- and counted apart. Once it is, the check runs and its table must exist.
-    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122", "reader cannot read the entity profiles": "123"}';
+    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122", "reader cannot read the entity profiles": "123", "reader reads the tool-loading record": "124"}';
     waiting int := 0;
     upsert text := 'INSERT INTO scoring.task_scores (agent_id, task_kind, task_id, finished_at, scorer_version, outcome) '
                    || 'VALUES (''verify'', ''subtask'', ''verify-1'', now(), 0, ''done_self'') '
@@ -152,6 +152,7 @@ BEGIN
         ('reader cannot read the critic record', 'nous_reader', 'SELECT critic FROM nous_system.agent_turn_log', 'error', NULL),
         ('reader reads the model-call records', 'nous_reader', 'SELECT count(*) FROM nous_system.model_call_log', 'ok', NULL),
         ('reader reads the model-call attempts', 'nous_reader', 'SELECT count(*) FROM nous_system.model_call_attempt', 'ok', NULL),
+        ('reader reads the tool-loading record', 'nous_reader', 'SELECT tool_loading FROM nous_system.model_call_log LIMIT 1', 'ok', NULL),
         ('reader cannot read an embedding', 'nous_reader', 'SELECT embedding FROM heart.facts', 'error', NULL),
         ('reader cannot read a push token', 'nous_reader', 'SELECT fcm_token FROM nous_system.a2ui_push_installations', 'error', NULL),
         ('reader cannot read a device digest', 'nous_reader', 'SELECT token_sha256 FROM nous_system.a2ui_devices', 'error', NULL),

@@ -70,6 +70,7 @@ from nous.api.judge_second_routes import build_judge_second_routes
 from nous.api.models import Attachment
 from nous.api.owner_guard import CARD_DECISION, OwnerGuard, device_caller_key
 from nous.api.runner import AgentRunner
+from nous.api.tool_loading_routes import build_tool_loading_routes
 from nous.brain import Brain, continuation, intentions
 from nous.brain.intentions import IntentionSpec
 from nous.cognitive import CognitiveLayer
@@ -4465,6 +4466,11 @@ def create_app(
     # F118 PR 3: the second judge's settings, for the Autonomy screen's card. Always mounted: with
     # NOUS_OUTSIDE_JUDGE_SETTINGS_ENABLED off there is no manager, and the routes give their fixed "off" answers.
     routes.extend(build_judge_second_routes(settings=settings, manager=judge_second, guard=owner_guard))
+    # F120: tool loading, watch only, for the Limits and tools screen's card. Always mounted: with
+    # NOUS_TOOL_LOADING_ENABLED off the routes give their fixed "off" answers.
+    routes.extend(
+        build_tool_loading_routes(database=database, settings=settings, dispatcher=dispatcher, guard=owner_guard)
+    )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
     # Companion devices: pairing, the owner's list and revoke, and a device's unpair (nous/api/companion_devices.py).

@@ -165,6 +165,9 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("PUT", "/dashboard/outside-judge/second/key"): OWNER,
     ("DELETE", "/dashboard/outside-judge/second/key"): OWNER,
     ("POST", "/dashboard/outside-judge/second/check"): OWNER,
+    # F120: tool loading, watch only (the read included)
+    ("GET", "/dashboard/tool-loading"): OWNER,
+    ("PUT", "/dashboard/tool-loading"): OWNER,
     # MCP client (mcp_client_enabled)
     ("GET", "/integrations/mcp/servers"): PROXY_SECRET,
     ("POST", "/integrations/mcp/servers"): PROXY_SECRET,

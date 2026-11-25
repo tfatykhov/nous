@@ -117,6 +117,10 @@ services:
       - NOUS_TOOL_GUARD_ENABLED=${NOUS_TOOL_GUARD_ENABLED:-false}
       - NOUS_AUTONOMY_CEILINGS=${NOUS_AUTONOMY_CEILINGS:-}
       - NOUS_AUTONOMY_LOCKED_TOOLS=${NOUS_AUTONOMY_LOCKED_TOOLS:-}
+      # F120 tool loading, watch only: the card on the Limits and tools screen, and a record on each model call of a
+      # kind the owner switched on of what it would have left out. Changes no request. Lands dark. It records only
+      # while NOUS_MODEL_CALL_LOG_ENABLED is on.
+      - NOUS_TOOL_LOADING_ENABLED=${NOUS_TOOL_LOADING_ENABLED:-false}
       # F115 per-goal tools: the owner allows one goal's background sessions to use an outward tool without asking.
       # Lands dark. Needs NOUS_GOALS_ENABLED, NOUS_AUTONOMY_SETTINGS_ENABLED and NOUS_TOOL_GUARD_ENABLED.
       - NOUS_GOAL_TOOL_GRANTS_ENABLED=${NOUS_GOAL_TOOL_GRANTS_ENABLED:-false}

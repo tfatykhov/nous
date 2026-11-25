@@ -413,6 +413,7 @@ READER_VERIFY_LABELS = (
     "reader cannot read the critic record",
     "reader reads the model-call records",
     "reader reads the model-call attempts",
+    "reader reads the tool-loading record",
     "reader cannot read an embedding",
     "reader cannot read a push token",
     "reader cannot read a device digest",
@@ -516,6 +517,7 @@ def test_a_check_waits_only_for_a_migration_after_106_that_exists():
         "reader cannot read the judge verdicts": "121",
         "reader cannot read the second judge settings": "122",
         "reader cannot read the entity profiles": "123",
+        "reader reads the tool-loading record": "124",
     }
     body = VERIFY.split("FOR c IN", 1)[1].split("AS t(label, run_as", 1)[0]
     migrations = {path.name.split("_", 1)[0] for path in (OPS.parents[1] / "sql" / "migrations").glob("*.sql")}

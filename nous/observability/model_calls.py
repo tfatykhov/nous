@@ -289,6 +289,8 @@ class ContextStats:
     cache_break: bool = False
     cache_break_components: list[str] = field(default_factory=list)
     cache_break_tokens_lost: int = 0
+    # F120 watch only: what this call would have left out (nous.api.tool_loading.call_record); the runner's to set.
+    tool_loading: dict[str, Any] | None = None
 
 
 def _system_text(system_blocks: str | list[dict[str, Any]] | None) -> str:
@@ -418,6 +420,9 @@ class CallContext:
     group_id: UUID | None = None
     is_fallback: bool = False
     call_id: UUID | None = None  # the row's id, when the caller names it (the runner: its ring entry has the same id)
+    # F120: the kind of call a tool loop's own model calls are (nous.api.tool_loading.KINDS), set by the loop on the
+    # context it passes to those calls only; None: not watched. Not a column.
+    tool_loading_kind: str | None = None
 
 
 def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:
@@ -547,6 +552,7 @@ _CALL_COLUMNS: tuple[str, ...] = (
     "cache_break",
     "cache_break_components",
     "cache_break_tokens_lost",
+    "tool_loading",
 )
 _CTX_COLUMNS = (
     "session_id",
@@ -579,7 +585,7 @@ _STATS_COLUMNS = (
     "cache_break_components",
     "cache_break_tokens_lost",
 )
-_JSON_COLUMNS = frozenset({"section_tokens_est", "message_roles"})
+_JSON_COLUMNS = frozenset({"section_tokens_est", "message_roles", "tool_loading"})
 _ARRAY_COLUMNS = frozenset({"sections_present", "tool_names", "cache_break_components"})
 
 
@@ -629,6 +635,23 @@ def _shallow_message(message: Any) -> Any:
 def _json_param(value: Any) -> str | None:
     """A JSONB parameter: SQL NULL for None, else the JSON text."""
     return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _tool_loading_value(stats: ContextStats, usage: dict[str, int]) -> dict[str, Any] | None:
+    """F120: the call's tool-loading record with its cache state: ``read`` when the call's ``cache_read`` covers the
+    estimated tokens of the tools it sent (they lead the cached prefix), ``written`` when it does not, None when the
+    call reported no usage. A fault keeps the record without the state; the row is written either way."""
+    record = stats.tool_loading
+    if record is None:
+        return None
+    try:
+        cache_read = usage.get("cache_read_input_tokens")
+        tools_tokens = stats.section_tokens_est.get("tools_definition", 0)
+        cache = None if cache_read is None else ("read" if cache_read >= tools_tokens else "written")
+        return {**record, "cache": cache}
+    except Exception as exc:
+        logger.warning("F120: the cache state of a tool-loading record was not set (%s)", type(exc).__name__)
+        return dict(record)
 
 
 class ModelCallScope:
@@ -823,6 +846,7 @@ class ModelCallScope:
         stats = ctx.stats
         for column in _STATS_COLUMNS:
             params[column] = None if stats is None else getattr(stats, column)
+        params["tool_loading"] = None if stats is None else _tool_loading_value(stats, self._usage)
         params["cache_break"] = bool(params["cache_break"])
         for column in _JSON_COLUMNS:
             params[column] = _json_param(params[column])

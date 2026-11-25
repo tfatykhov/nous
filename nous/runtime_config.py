@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from nous.api.tool_loading import ToolLoadingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,9 @@ class RuntimeConfig:
 
     def __init__(self) -> None:
         self._overrides: dict[str, Any] = {}
+        # F120: each agent's tool-loading setting, and why a stored one could not be read (it is Off then).
+        self._tool_loading: dict[str, ToolLoadingConfig] = {}
+        self._tool_loading_problem: dict[str, str] = {}
 
     @classmethod
     def get(cls) -> RuntimeConfig:
@@ -118,10 +124,53 @@ class RuntimeConfig:
         """Remove runtime override, falling back to settings."""
         self._overrides.pop(_KEY_CROSS_ENCODER_ENABLED, None)
 
+    # -- Tool loading (F120) --------------------------------------------------
+
+    def get_tool_loading(self, agent_id: str) -> ToolLoadingConfig:
+        """The owner's tool-loading setting of ``agent_id``: Off until one is stored or set. A dict lookup, read at
+        each model call."""
+        from nous.api.tool_loading import OFF
+
+        return self._tool_loading.get(agent_id, OFF)
+
+    def tool_loading_problem(self, agent_id: str) -> str | None:
+        """Why the stored setting of ``agent_id`` could not be read at start (it is Off), or None."""
+        return self._tool_loading_problem.get(agent_id)
+
+    def set_tool_loading(self, agent_id: str, config: ToolLoadingConfig) -> None:
+        """Set ``agent_id``'s setting for the next model call (store it with ``persist_to_db`` first)."""
+        self._tool_loading[agent_id] = config
+        self._tool_loading_problem.pop(agent_id, None)
+
+    async def _load_tool_loading(self, session: AsyncSession, agent_id: str) -> None:
+        """Read ``agent_id``'s stored setting, and only that row. A row that cannot be read leaves it Off with one
+        warning; nothing here raises."""
+        from nous.api.tool_loading import config_key, parse_tool_loading
+
+        try:
+            row = (
+                await session.execute(
+                    text("SELECT value FROM nous_system.config WHERE key = :key"), {"key": config_key(agent_id)}
+                )
+            ).first()
+        except Exception as exc:
+            logger.warning("F120: the tool-loading setting could not be read (%s); it is off", type(exc).__name__)
+            return
+        if row is None:
+            return
+        config, problem = parse_tool_loading(row[0])
+        self._tool_loading[agent_id] = config
+        if problem is not None:
+            self._tool_loading_problem[agent_id] = problem
+            logger.warning("F120: the tool-loading setting is off: %s", problem)
+        else:
+            logger.info("Loaded runtime override: tool loading, mode %s", config.mode)
+
     # -- DB persistence -------------------------------------------------------
 
-    async def load_from_db(self, session: AsyncSession) -> None:
-        """Load all persisted overrides from nous_system.config."""
+    async def load_from_db(self, session: AsyncSession, agent_id: str | None = None) -> None:
+        """Load all persisted overrides from nous_system.config, and ``agent_id``'s tool-loading setting with a query
+        of its own (F120), so a bad row of either never hides the other."""
         try:
             result = await session.execute(
                 text("SELECT key, value FROM nous_system.config")
@@ -152,6 +201,8 @@ class RuntimeConfig:
                         )
         except Exception:
             logger.debug("nous_system.config table not available yet (normal on first run)")
+        if agent_id is not None:
+            await self._load_tool_loading(session, agent_id)
 
     async def persist_to_db(self, session: AsyncSession, key: str, value: Any) -> None:
         """Upsert a config value to nous_system.config."""

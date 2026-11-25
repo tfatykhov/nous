@@ -903,7 +903,7 @@ async def create_components(settings: Settings) -> dict:
 
     runtime_cfg = RuntimeConfig.get()
     async with database.session() as cfg_session:
-        await runtime_cfg.load_from_db(cfg_session)
+        await runtime_cfg.load_from_db(cfg_session, settings.agent_id)
     # F115: the owner's limits are applied here, before any component reads one.
     autonomy = await _load_autonomy(settings, database)
 
