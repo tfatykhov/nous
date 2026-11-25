@@ -808,7 +808,9 @@ class EntityProfileWriter:
                 stats["outcome"] = "at_limit"
             else:
                 stats["outcome"] = await self._ask(norm, count, facts, entity_source_hash(facts), row, stats, session)
-            stats["profile"] = await self.store.get(norm, session=session)
+            written = await self.store.get(norm, session=session)
+            # As the GET routes do: only the lines whose cited facts are all live now.
+            stats["profile"] = (await self.store.with_live_lines([written], session=session))[0] if written else None
             return stats
 
     async def _ask(

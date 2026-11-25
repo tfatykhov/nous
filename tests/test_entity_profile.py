@@ -891,6 +891,20 @@ async def test_a_rebuild_asks_for_one_key_even_when_unchanged_within_the_daily_l
 
 
 @pytest.mark.postgres_only
+async def test_a_rebuild_answers_with_live_lines_only(db, session):
+    agent = _agent()
+    f1, f2, _f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2))})
+    writer = _writer(db, agent, llm, entity_profile_max_calls_per_day=1)
+    await writer.run_sleep(session=session)
+
+    await session.execute(update(Fact).where(Fact.id == f1.id).values(active=False))
+    result = await writer.rebuild("zephyrine", session=session)
+    assert result["outcome"] == "at_limit" and len(llm.prompts) == 1
+    assert [ln["text"] for ln in result["profile"]["lines"]] == ["Zephyrine sails."]
+
+
+@pytest.mark.postgres_only
 async def test_a_rebuild_of_an_owner_key_or_a_key_without_facts_makes_no_call(db, session):
     agent = _agent()
     await _keyed(session, agent, "user", {})

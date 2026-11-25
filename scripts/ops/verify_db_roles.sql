@@ -69,7 +69,7 @@ DECLARE
     -- A check on a table that a migration after 106 creates waits for that migration (CI runs this script once with
     -- the migrations up to 106 and again after the later ones): until the migration is recorded the check is skipped
     -- and counted apart. Once it is, the check runs and its table must exist.
-    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122"}';
+    waits jsonb := '{"reader cannot read a device digest": "115", "reader cannot read the autonomy settings": "116", "reader cannot read the autonomy record": "116", "reader cannot read the tool guard": "116", "reader cannot read the goal tool grants": "117", "reader cannot read the pending resolutions": "119", "reader cannot read the judge verdicts": "121", "reader cannot read the second judge settings": "122", "reader cannot read the entity profiles": "123"}';
     waiting int := 0;
     upsert text := 'INSERT INTO scoring.task_scores (agent_id, task_kind, task_id, finished_at, scorer_version, outcome) '
                    || 'VALUES (''verify'', ''subtask'', ''verify-1'', now(), 0, ''done_self'') '
