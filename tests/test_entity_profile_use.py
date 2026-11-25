@@ -775,7 +775,8 @@ async def test_a_row_written_by_another_process_is_seen_after_the_cache_ages(
     try:
         (f,) = await _facts(db, s.agent_id, "oslo has a fjord")
         clock = [1000.0]
-        monkeypatch.setattr(ep.time, "monotonic", lambda: clock[0])
+        # this module's clock only: the event loop keeps the real one
+        monkeypatch.setattr(ep, "time", SimpleNamespace(monotonic=lambda: clock[0]))
         assert (await _build(engine, s, "oslo")).entity_profiles["matched"] == []
         await _profile(db, s.agent_id, "oslo", _line("Oslo has a fjord.", f), kind="place")  # no invalidation
         clock[0] += ep.VOCAB_TTL_SECONDS - 1
