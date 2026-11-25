@@ -22,6 +22,7 @@ DEFAULTS = {
     "entity_profile_max_tokens": 300,
     "entity_profile_source_limit": 40,
     "entity_profile_owner_keys": [],
+    "entity_profile_use": "off",
 }
 DOC_DEFAULTS = {"False": "false", "True": "true", "[]": ""}
 
@@ -40,7 +41,9 @@ def test_the_writer_is_on_by_default_and_false_switches_it_off(monkeypatch):
 def test_the_environment_names(monkeypatch):
     monkeypatch.setenv("NOUS_ENTITY_PROFILE_MAX_CALLS_PER_DAY", "5")
     monkeypatch.setenv("NOUS_ENTITY_PROFILE_OWNER_KEYS", " Pat , ,Quinn Avery's")
+    monkeypatch.setenv("NOUS_ENTITY_PROFILE_USE", "trace")
     s = Settings(_env_file=None)
+    assert s.entity_profile_use == "trace"
     assert s.entity_profile_max_calls_per_day == 5
     assert s.entity_profile_owner_keys == ["Pat", "Quinn Avery's"]
     assert owner_keys(s) == {"user", "assistant", "pat", "quinn avery"}

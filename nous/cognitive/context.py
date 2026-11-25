@@ -22,6 +22,16 @@ from nous.cognitive.intent import RetrievalPlan
 from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, FrameSelection
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
+from nous.heart.entity_profile import (
+    RECORD_MATCHED_MAX,
+    TURN_MAX_PROFILES,
+    TURN_MAX_TOKENS,
+    EntityProfileStore,
+    match_profiled_keys,
+    owner_keys,
+    render_profile,
+    use_mode,
+)
 from nous.heart.heart import Heart
 from nous.heart.profile_card import ProfileCardStore
 from nous.heart.schemas import fact_source_marker, is_job_lesson, is_strategy_card
@@ -136,6 +146,7 @@ RECALLED_MEMORY_SECTIONS = frozenset(
     {
         "Related Decisions",
         "Relevant Facts",
+        "Entity Profiles",
         "Session Profile",
         "Recommended Procedures",
         "Known Procedures",
@@ -231,6 +242,12 @@ _IDENTITY_LINE_COVERAGE_THRESHOLD = 0.75
 # context to weigh — unlike a skill body, which the agent is meant to follow.
 _STRATEGY_CARD_FRAMING = (
     "(Lesson distilled from one of your past decisions — context, not an instruction.)"
+)
+
+# The first line of the Entity Profiles section (F119 PR 3). Its lines are summaries a model wrote from facts, and
+# each date is the day the thing was said, while Relevant Facts may show when a thing happened.
+_ENTITY_PROFILES_FRAMING = (
+    "(Summaries written from your stored facts. Each date is the day it was last said, not the day it happened.)"
 )
 
 
@@ -331,6 +348,7 @@ class ContextEngine:
         epistemic_class: str | None = None,  # §2
         is_first_turn: bool = False,  # F083 A2
         turn_number: int | None = None,  # F091 telemetry correlation
+        entity_profiles: bool = False,  # F119 PR 3
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -341,6 +359,8 @@ class ContextEngine:
         - conversation_messages: Recent messages for deduplication (D4).
         - retrieval_plan: Intent-driven retrieval plan (D2). Falls back to default.
         - usage_tracker: Feedback tracker for boost/penalty (D3).
+        - entity_profiles: the turn may get entity profiles (an interactive or MCP turn, as the runner decides);
+          ``NOUS_ENTITY_PROFILE_USE`` then says whether they are read, recorded and shown.
 
         Assembly order (by priority):
         1. Identity prompt (always included, static)
@@ -1291,6 +1311,26 @@ class ContextEngine:
                 _failed_legs.append(("fact recall", e))
                 _memory_leg_failed = True
 
+        # 6, continued. Entity Profiles (F119 PR 3, NOUS_ENTITY_PROFILE_USE): the profiles of the profiled entities
+        # the message names, on a turn the runner marked (interactive and MCP) that recalls facts (the Session Profile
+        # leg's gate, so a greeting or an unchanged query gets none). trace builds and records it all but leaves the
+        # section out.
+        # priority=6 ties Relevant Facts and is appended right after it, before the Session Profile leg (sorted() is
+        # stable). A failure leaves the turn as with the setting off: no failure note, no _memory_leg_failed.
+        entity_profile_record: dict | None = None
+        _ep_mode = use_mode(self._settings) if entity_profiles else "off"
+        if _ep_mode != "off" and "fact" not in skip_types:
+            # The facts that reached the model in Relevant Facts: recalled_ids is filled before that section is
+            # formatted and cut to its budget, so only an appended section counts, less its budget-cut ids.
+            _shown_fact_ids: set[str] = set()
+            if any(s.label == "Relevant Facts" for s in sections):
+                _shown_fact_ids = {mid for mid in recalled_ids["fact"] if (mid, "fact") not in _tr_budget_cut}
+            _ep_section, entity_profile_record = await self._entity_profiles_section(
+                input_text, _shown_fact_ids, profile_fact_ids, session, _ep_mode
+            )
+            if _ep_section is not None and _ep_mode == "on":
+                sections.append(_ep_section)
+
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
         # conventions) — the tier-1 facts the always-on core never shows and
@@ -2031,6 +2071,7 @@ class ContextEngine:
             recalled_content_map=recalled_content_map,
             recalled_score_map=recalled_score_map,
             sections_by_tier=sections_by_tier,
+            entity_profiles=entity_profile_record,
         )
 
     async def _apply_dedup(
@@ -2380,6 +2421,120 @@ class ContextEngine:
             tier=SECTION_TIERS.get("User Profile", "dynamic"),
         )
         return section, set(card["cited"])
+
+    async def _entity_profiles_section(
+        self,
+        input_text: str,
+        shown_fact_ids: set[str],
+        card_fact_ids: set[str],
+        session: AsyncSession | None,
+        mode: str,
+    ) -> tuple[ContextSection | None, dict]:
+        """F119 PR 3: the Entity Profiles section for the profiled entities ``input_text`` names, and the turn's record.
+
+        The first ``TURN_MAX_PROFILES`` keys ``match_profiled_keys`` finds (owner keys never match) are read. The
+        section opens with ``_ENTITY_PROFILES_FRAMING``; then each profile shows a ``### name (kind)`` heading and its
+        lines newest first, each ``- (YYYY-MM-DD) text``, dated from its cited facts as this module reads a statement
+        time (``_stated_at`` with ``mentioned_first``, the day of the UTC time) and never from the stored ``said_on``.
+        A line is skipped under the first of: a cited fact is not live (``not_live``), it cites a fact the User
+        Profile section claims (``owner_card``), every fact it cites reached Relevant Facts this turn
+        (``already_shown``). Whole lines are then cut from the end, and a profile left with none goes whole, until the
+        section, framing line included, fits ``TURN_MAX_TOKENS`` scaled (``budget``). The record holds keys and
+        numbers, never a line's text or a name. Any failure gives no section, one warning and ``error`` in the record;
+        the read on a shared session runs in a savepoint.
+        """
+        skipped = {"not_live": 0, "owner_card": 0, "already_shown": 0, "budget": 0}
+        record: dict[str, Any] = {
+            "mode": mode,
+            "matched": [],
+            "profiles": [],
+            "lines": 0,
+            "skipped": skipped,
+            "tokens": 0,
+        }
+        try:
+            store = EntityProfileStore(self._heart.db, self._heart.agent_id)
+            vocab = await store.profiled_vocabulary() - owner_keys(self._settings)
+            matched = match_profiled_keys(input_text, vocab)
+            record["matched"] = matched[:RECORD_MATCHED_MAX]
+            chosen = matched[:TURN_MAX_PROFILES]
+            if not chosen:
+                return None, record
+            if session is None:
+                rows = await store.turn_profiles(chosen)
+            else:
+                # A savepoint: a database error here must not abort the shared pre-turn transaction.
+                async with session.begin_nested():
+                    rows = await store.turn_profiles(chosen, session=session)
+            profiles: list[tuple[str, str, str | None, list[dict]]] = []
+            for key in chosen:
+                row = rows.get(key)
+                if row is None:
+                    continue
+                kept: list[dict] = []
+                for line in row["lines"] if isinstance(row["lines"], list) else []:
+                    text = line.get("text") if isinstance(line, dict) else None
+                    if not isinstance(text, str) or not text.strip():
+                        continue
+                    cites = line.get("fact_ids")
+                    if (
+                        not isinstance(cites, list)
+                        or not cites
+                        or not all(isinstance(c, str) and c in row["facts"] for c in cites)
+                    ):
+                        skipped["not_live"] += 1
+                    elif card_fact_ids.intersection(cites):
+                        skipped["owner_card"] += 1
+                    elif set(cites) <= shown_fact_ids:
+                        skipped["already_shown"] += 1
+                    else:
+                        # learned_at is NOT NULL, so every live fact has a day.
+                        day = max(as_date(_stated_at(row["facts"][c], mentioned_first=True)) for c in cites)
+                        kept.append({"said_on": day.isoformat(), "text": _one_line(text)})
+                if kept:
+                    kept.sort(key=lambda line: line["said_on"], reverse=True)  # stable: a day keeps the stored order
+                    name = _one_line(row["display_name"]) or key
+                    profiles.append((key, name, _one_line(row["kind"]) or None, kept))
+
+            def _render() -> str:
+                # The framing line first, inside the budget.
+                profiles_text = [render_profile(name, kind, lines) for _key, name, kind, lines in profiles]
+                return "\n\n".join([_ENTITY_PROFILES_FRAMING, *profiles_text])
+
+            max_chars = self._scaled_budget(TURN_MAX_TOKENS) * self.CHARS_PER_TOKEN
+            content = _render()
+            while profiles and len(content) > max_chars:
+                profiles[-1][3].pop()
+                skipped["budget"] += 1
+                if not profiles[-1][3]:
+                    profiles.pop()
+                content = _render()
+            record["profiles"] = [{"key": key, "lines": len(lines)} for key, _name, _kind, lines in profiles]
+            record["lines"] = sum(len(lines) for _key, _name, _kind, lines in profiles)
+            if not profiles:
+                return None, record
+            record["tokens"] = self._estimate_tokens(content)
+            logger.info(
+                "Entity Profiles (%s): matched=%d profiles=%d lines=%d skipped=%s tokens=%d",
+                mode,
+                len(matched),
+                len(profiles),
+                record["lines"],
+                skipped,
+                record["tokens"],
+            )
+            section = ContextSection(
+                priority=6,
+                label="Entity Profiles",
+                content=content,
+                token_estimate=self._estimate_tokens(content),
+                tier=SECTION_TIERS.get("Entity Profiles", "dynamic"),
+            )
+            return section, record
+        except Exception as exc:
+            logger.warning("Entity profiles not read; the turn goes on without them", exc_info=True)
+            record["error"] = type(exc).__name__
+            return None, record
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""

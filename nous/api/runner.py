@@ -45,7 +45,7 @@ from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
 from nous.api.compensation import release_write_path_lock_after, write_path_lock, write_path_lock_is
-from nous.api.execution_context import ExecutionContext, is_background_session, resolve_context
+from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext, is_background_session, resolve_context
 from nous.api.idempotency import idempotency_key
 from nous.api.model_caps import is_legacy_haiku
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
@@ -90,6 +90,7 @@ from nous.cognitive.ledger_store import (
 from nous.cognitive.promise_gate import PromiseGate
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
+from nous.heart.entity_profile import use_mode as entity_profile_use_mode
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
@@ -811,6 +812,12 @@ class AgentRunner:
                         "fact": turn_context.recalled_fact_ids,
                         "procedure": turn_context.recalled_procedure_ids,
                         "episode": turn_context.recalled_episode_ids,
+                        # F119 PR 3: what the Entity Profiles leg matched and showed (trace: would have shown).
+                        **(
+                            {"entity_profiles": turn_context.entity_profiles}
+                            if turn_context.entity_profiles is not None
+                            else {}
+                        ),
                     },
                     critic=turn_context.critic_verdict,
                     claim_check=claim_check,
@@ -2259,6 +2266,7 @@ class AgentRunner:
                 # F099 (2c): only a continuation turn names its kind, so pre_turn skips the generic inbox
                 # injection and the Plan deliberation (the arrival's own decision is its record).
                 **({"context_kind": _ctx.kind} if _ctx.kind == "continuation" else {}),
+                **self._entity_profile_kwargs(_ctx, session_id),  # F119 PR 3
                 # F091: same conversation-derived number context_log records,
                 # computed here BEFORE the user message is appended below —
                 # matching how _current_turn_number is derived after the
@@ -3187,6 +3195,7 @@ class AgentRunner:
                 turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
                 **({"channel": _ctx.channel} if _ctx.channel else {}),  # F098
                 **_referent,  # F110, see run_turn
+                **self._entity_profile_kwargs(_ctx, session_id),  # F119 PR 3, see run_turn
             )
             if turn_context.decision_id:
                 # F099 Phase 0a: the Plan decision reaches dispatch(), so a spawn
@@ -5457,6 +5466,22 @@ Rules:
             return {}
         text, age = found
         return {"last_assistant_text": text, "last_assistant_age_s": age}
+
+    def _entity_profile_kwargs(self, ctx: ExecutionContext, session_id: str) -> dict[str, bool]:
+        """F119 PR 3: the ``pre_turn`` keyword that lets the turn's context read entity profiles, or none.
+
+        Only a turn someone waits on in a conversation asks: an interactive turn with the owner or an MCP call from
+        another agent (``FOREGROUND_KINDS``), not in a background path's session, with ``NOUS_ENTITY_PROFILE_USE`` not
+        off. Subtasks, DAG nodes, scheduled runs, heartbeats, continuations (a goal's turns among them) and every
+        other kind never do. Empty otherwise, so pre_turn is called exactly as before.
+        """
+        if (
+            ctx.kind in FOREGROUND_KINDS
+            and not is_background_session(session_id)
+            and entity_profile_use_mode(self._settings) != "off"
+        ):
+            return {"entity_profiles": True}
+        return {}
 
     def _referent_channel(self, ctx: ExecutionContext) -> str | None:
         """F110: the channel whose last reply an interactive turn reads and writes; None with the flag off."""

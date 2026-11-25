@@ -22,6 +22,7 @@ from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
+from nous.heart.entity_profile import EntityProfileStore
 from nous.heart.schemas import ProcedureSummary
 from nous.observability import model_calls
 from nous.observability.context_logger import ContextLogEntry
@@ -498,13 +499,14 @@ async def _build_catalog_side():
 
 
 async def _build_memory_side():
-    """Catalog off with the awareness cue and passive procedures (Known Procedures), facts (Relevant Facts and the
-    Session Profile leg), decisions and past episodes."""
+    """Catalog off with the awareness cue and passive procedures (Known Procedures), facts (Relevant Facts, an entity
+    profile and the Session Profile leg), decisions and past episodes."""
     engine = _engine(
         proc_catalog_enabled=False,
         proc_awareness_cue=True,
         proc_passive_injection_enabled=True,
         profile_intent_leg_enabled=True,
+        entity_profile_use="on",
     )
     heart = engine._heart
 
@@ -536,12 +538,26 @@ async def _build_memory_side():
             created_at=None,
         )
     ]
-    return await engine.build(
-        agent_id="a",
-        session_id="s",
-        input_text="what did we decide about the dashboard?",
-        frame=_frame(),
-    )
+    # the dashboard's entity profile, one line citing a live fact Relevant Facts did not show
+    from datetime import UTC, datetime
+
+    profile = {
+        "display_name": "Dashboard",
+        "kind": "project",
+        "lines": [{"text": "The dashboard reads the turn table.", "fact_ids": ["p1"]}],
+        "facts": {"p1": SimpleNamespace(mentioned_at=None, learned_at=datetime(2026, 3, 2, tzinfo=UTC))},
+    }
+    with (
+        patch.object(EntityProfileStore, "profiled_vocabulary", AsyncMock(return_value=frozenset({"dashboard"}))),
+        patch.object(EntityProfileStore, "turn_profiles", AsyncMock(return_value={"dashboard": profile})),
+    ):
+        return await engine.build(
+            agent_id="a",
+            session_id="s",
+            input_text="what did we decide about the dashboard?",
+            frame=_frame(),
+            entity_profiles=True,
+        )
 
 
 def _section_labels_in_source() -> set[str]:

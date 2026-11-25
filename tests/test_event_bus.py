@@ -2016,7 +2016,7 @@ class TestReviewFixes:
         cognitive._context = MagicMock()
         cognitive._context.build = AsyncMock(return_value=MagicMock(
             system_prompt="prompt", sections=[], recalled_ids={}, recalled_content_map={},
-            recalled_score_map={}, sections_by_tier={},
+            recalled_score_map={}, sections_by_tier={}, entity_profiles=None,
         ))
         cognitive._context._identity_prompt = ""
         cognitive._deliberation = MagicMock()

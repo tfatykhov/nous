@@ -155,6 +155,8 @@ services:
       - NOUS_ENTITY_PROFILE_MAX_TOKENS=${NOUS_ENTITY_PROFILE_MAX_TOKENS:-300}
       - NOUS_ENTITY_PROFILE_SOURCE_LIMIT=${NOUS_ENTITY_PROFILE_SOURCE_LIMIT:-40}
       - NOUS_ENTITY_PROFILE_OWNER_KEYS=${NOUS_ENTITY_PROFILE_OWNER_KEYS:-}
+      # F119 PR 3: off | trace | on. A turn that names a profiled entity gets its profile (trace: recorded, not sent).
+      - NOUS_ENTITY_PROFILE_USE=${NOUS_ENTITY_PROFILE_USE:-off}
       # P4 memory write health: the hourly check and its daily rollup, dashboard-only findings. On by default; the kill switch.
       - NOUS_MEMORY_WRITE_HEALTH_ENABLED=${NOUS_MEMORY_WRITE_HEALTH_ENABLED:-true}
       # H-7: turn-aware chunks for new episodes' transcripts (needs NOUS_EPISODE_CHUNKS_ENABLED). Lands dark.

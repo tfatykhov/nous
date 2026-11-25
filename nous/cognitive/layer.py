@@ -606,6 +606,9 @@ class CognitiveLayer:
         last_assistant_text: str | None = None,
         # F110: seconds since that message; accepted now, read by the first-turn section (PR 4).
         last_assistant_age_s: float | None = None,
+        # F119 PR 3: the runner passes True only for an interactive or MCP turn with NOUS_ENTITY_PROFILE_USE not off;
+        # ContextEngine.build then reads the profiles of the entities the message names.
+        entity_profiles: bool = False,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -919,6 +922,7 @@ class CognitiveLayer:
         recalled_content_map: dict[str, str] = {}
         recalled_score_map: dict[str, float] = {}
         sections_by_tier: dict[str, str] = {}
+        entity_profile_record: dict | None = None  # F119 PR 3
         build_result = None
         context_token_estimate = 0
         # §2: epistemic routing class (Haiku, fail-open to None => softened prose).
@@ -966,6 +970,8 @@ class CognitiveLayer:
                         turn_number if turn_number is not None
                         else ((_meta_ft.turn_count + 1) if _meta_ft else 1)
                     ),
+                    # F119 PR 3: only passed when set, so every other turn calls build exactly as before.
+                    **({"entity_profiles": True} if entity_profiles else {}),
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)
@@ -977,6 +983,7 @@ class CognitiveLayer:
                 recalled_content_map = build_result.recalled_content_map
                 recalled_score_map = build_result.recalled_score_map
                 sections_by_tier = build_result.sections_by_tier
+                entity_profile_record = build_result.entity_profiles
         except Exception:
             logger.warning("Context build failed, using identity prompt only")
             system_prompt = self._context._identity_prompt or ""
@@ -1347,6 +1354,7 @@ class CognitiveLayer:
             sections_by_tier=sections_by_tier,
             critic_verdict=_critic_verdict,
             critic_frame=_critic_frame,
+            entity_profiles=entity_profile_record,  # F119 PR 3
             trace_id=new_event_id(),  # F108: the turn's trace (post_turn's turn_completed is its root)
         )
 
