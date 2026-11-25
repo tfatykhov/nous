@@ -199,8 +199,12 @@ class FactInput(BaseModel):
     # no valid_to. The validator below keeps these consistent for every producer.
     valid_from: date | None = None
     valid_to: date | None = None
-    # Statement time: when the fact was said, the source episode's start. Set by
-    # the producers; None means unknown, and readers fall back to learned_at.
+    # Statement time: when the fact was said. Set by the producers, never invented:
+    # a writer inside the turn passes the turn time, a writer after the episode
+    # the episode's start, and a derived fact the latest statement time of its
+    # sources (facts.latest_statement_time). None means unknown, and readers fall
+    # back to learned_at. Never an event time: it does not go into event_date,
+    # valid_from or valid_to.
     mentioned_at: datetime | None = None
 
     @field_validator("event_date", "valid_from", "valid_to", mode="before")

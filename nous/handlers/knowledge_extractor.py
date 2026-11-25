@@ -23,6 +23,7 @@ from nous.handlers import (
     log_outside_content_shadow,
     parse_llm_json,
 )
+from nous.handlers.fact_extractor import episode_ref_time
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
@@ -126,6 +127,8 @@ class KnowledgeExtractor:
             if not candidates:
                 return
 
+            # The compacted messages were said in the open episode: its start is their statement time.
+            mentioned_at = await episode_ref_time(self._heart, event.data.get("episode_id"))
             stored = 0
             for fact in candidates[:5]:
                 confidence = fact.get("confidence", 0.7)
@@ -183,6 +186,7 @@ class KnowledgeExtractor:
                     source="knowledge_extractor",
                     confidence=confidence,
                     category=fact.get("category"),
+                    mentioned_at=mentioned_at,
                 )
                 result = await self._heart.learn(fact_input, exclude_ids=exclude_ids or None)
                 # F023: Don't count rejected facts as stored

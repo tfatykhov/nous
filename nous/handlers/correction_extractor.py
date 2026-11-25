@@ -10,6 +10,7 @@ Inspired by Databricks' MemAlign paper — dual-memory correction learning.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from nous.config import Settings
@@ -76,6 +77,7 @@ class CorrectionExtractor:
         # Get episode data from DB
         transcript = ""
         summary: dict[str, Any] = {}
+        started_at: datetime | None = None  # the statement time of its facts; None if the read fails
         try:
             async with self._db.session() as session:
                 from uuid import UUID
@@ -96,6 +98,8 @@ class CorrectionExtractor:
                     summary = episode.structured_summary or {}
                     if not summary and episode.summary:
                         summary = {"summary": episode.summary}
+                    if isinstance(episode.started_at, datetime):
+                        started_at = episode.started_at
         except Exception:
             logger.warning("F039: Failed to fetch episode %s", episode_id)
 
@@ -122,6 +126,7 @@ class CorrectionExtractor:
                     confidence=max(0.0, min(1.0, float(extraction.get("confidence", 0.7)))),
                     source="correction_extraction",
                     tags=["correction", "auto:f039"],
+                    mentioned_at=started_at,
                 )
                 await self._heart.learn(fact_input)
                 logger.info("F039: Stored correction fact: %s", principle[:80])

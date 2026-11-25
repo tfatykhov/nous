@@ -600,7 +600,7 @@ async def test_learn_persists_the_fields_and_every_reader_returns_them(heart, se
     assert legacy["valid_from"] == legacy["valid_to"] == "2024-04-10"
     assert legacy["mentioned_at"] == EPISODE_START.isoformat()
 
-    # learn_fact and every caller that sets no statement time: NULL, readers fall back to learned_at.
+    # A caller that sets no statement time: NULL, readers fall back to learned_at.
     plain = await heart.learn(FactInput(content="Ledger rows are archived after ninety days."), session=session)
     row = await _row(session, plain.id)
     assert (row.valid_from, row.valid_to, row.mentioned_at) == (None, None, None)

@@ -85,6 +85,33 @@ Skip transient, trivial, or already-known information.
 Max 5 facts."""
 
 
+async def episode_ref_time(heart: Heart, episode_id: str | None) -> datetime | None:
+    """097: the reference time of an episode's facts, its ``started_at``.
+
+    Every fact the episode yields is stored with it as ``mentioned_at``, and
+    the enumerative extractor resolves relative dates against it. None when
+    there is no episode or it cannot be read: the facts are still stored,
+    and readers fall back to ``learned_at``. Shared by the writers that run
+    after the episode: FactExtractor (with its exemplar leg) and KnowledgeExtractor.
+    """
+    uid = _parse_episode_uuid(episode_id)
+    if uid is None:
+        return None
+    try:
+        started_at = (await heart.get_episode(uid)).started_at
+    except ValueError:  # Heart.get_episode: the episode does not exist
+        logger.debug("No reference time: episode %s not found", episode_id)
+        return None
+    except Exception:
+        logger.warning(
+            "No reference time for episode %s: reading it failed; its facts get no mentioned_at",
+            episode_id,
+            exc_info=True,
+        )
+        return None
+    return started_at if isinstance(started_at, datetime) else None
+
+
 class FactExtractor:
     """Extracts and stores facts from episode summaries.
 
@@ -222,29 +249,8 @@ class FactExtractor:
         return None, distinct_ids
 
     async def _episode_ref_time(self, episode_id: str | None) -> datetime | None:
-        """097: the reference time of an episode's facts, its ``started_at``.
-
-        Every fact the episode yields is stored with it as ``mentioned_at``, and
-        the enumerative extractor resolves relative dates against it. None when
-        there is no episode or it cannot be read: the facts are still stored,
-        and readers fall back to ``learned_at``.
-        """
-        uid = _parse_episode_uuid(episode_id)
-        if uid is None:
-            return None
-        try:
-            started_at = (await self._heart.get_episode(uid)).started_at
-        except ValueError:  # Heart.get_episode: the episode does not exist
-            logger.debug("No reference time: episode %s not found", episode_id)
-            return None
-        except Exception:
-            logger.warning(
-                "No reference time for episode %s: reading it failed; its facts get no mentioned_at",
-                episode_id,
-                exc_info=True,
-            )
-            return None
-        return started_at if isinstance(started_at, datetime) else None
+        """097: the reference time of an episode's facts (``episode_ref_time``)."""
+        return await episode_ref_time(self._heart, episode_id)
 
     def _intervals_on(self) -> bool:
         """097 flag W. `is True`, so a duck-typed settings object never enables it."""
@@ -292,6 +298,8 @@ class FactExtractor:
         if not summary:
             return []
 
+        ref_time = await self._episode_ref_time(episode_id)
+
         # F086: exemplar streams route modal, checked BEFORE R1 (R1's density
         # heuristic does not fire on label-streams; this one does, and is
         # parse-only — zero LLM).
@@ -304,6 +312,7 @@ class FactExtractor:
                 n = await ingest_exemplars(
                     self._heart, self._settings, transcript,
                     _parse_episode_uuid(episode_id), self._heart.agent_id, logger,
+                    ref_time=ref_time,
                 )
                 if n > 0:
                     return []  # arch-review I2: extract_and_store -> list[UUID]; ids not tracked here
@@ -315,8 +324,6 @@ class FactExtractor:
                 # ensures the episode's facts are never silently dropped.
             except Exception:
                 logger.warning("F086 exemplar leg failed; falling through to legacy", exc_info=True)
-
-        ref_time = await self._episode_ref_time(episode_id)
 
         # 064 R1.1 modal routing: with the flag on, an ENUMERABLE transcript
         # routes fact storage through the enumerative leg INSTEAD of the

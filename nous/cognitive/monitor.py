@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -388,6 +389,7 @@ class MonitorEngine:
                 source="inline_correction",
                 tags=["correction", "auto:f039"],
                 source_episode_id=ep_uuid,
+                mentioned_at=datetime.now(UTC),
             )
             await self._heart.learn(fact_input, session=session)
 

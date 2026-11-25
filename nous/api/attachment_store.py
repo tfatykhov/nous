@@ -13,6 +13,7 @@ import base64
 import logging
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -92,6 +93,7 @@ async def record_attachment_fact(heart: "Heart", att: "Attachment", *,
                 source_text=(summary or None),
                 source_episode_id=UUID(source_episode_id) if source_episode_id else None,
                 tags=["attachment", att.content_type],
+                mentioned_at=datetime.now(UTC),
             ),
             session=session,
         )

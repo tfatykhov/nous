@@ -2074,6 +2074,8 @@ class CognitiveLayer:
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:
             data: dict[str, Any] = {"message_snapshot": message_snapshot}
+            if episode_id:  # the knowledge extractor stamps its facts with this episode's start
+                data["episode_id"] = episode_id
             if self._outside_tagging_on():
                 # The whole session's list, on purpose: what the model read earlier is still in
                 # its context (and in the summary) when a later stretch is compacted.
@@ -2111,6 +2113,7 @@ class CognitiveLayer:
         # F025 P3-C: Compute transcript before end_episode so it can be persisted
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
 
+        episode_started_at: datetime | None = None  # the statement time of the reflection's facts
         if episode_id:
             episode_min_content_length = self._settings.episode_min_content_length
             episode_lessons_max_chars = self._settings.episode_lessons_max_chars
@@ -2131,13 +2134,15 @@ class CognitiveLayer:
                     lessons = None
                     if reflection:
                         lessons = [reflection[:episode_lessons_max_chars]]
-                    await self._heart.end_episode(
+                    ended = await self._heart.end_episode(
                         UUID(episode_id),
                         outcome="success",
                         lessons_learned=lessons,
                         transcript=transcript_text or None,  # F025 P3-C
                         session=session,
                     )
+                    started_at = getattr(ended, "started_at", None)
+                    episode_started_at = started_at if isinstance(started_at, datetime) else None
             except Exception:
                 logger.warning("Failed to end episode %s", episode_id)
 
@@ -2181,6 +2186,7 @@ class CognitiveLayer:
                         subject="lesson_learned",
                         confidence=0.7,
                         source_episode_id=ep_uuid,
+                        mentioned_at=episode_started_at,
                     )
                     await self._heart.learn(fact_input, session=session)
                     facts_extracted += 1

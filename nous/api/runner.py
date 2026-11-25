@@ -4002,6 +4002,7 @@ class AgentRunner:
                                             category="technical",
                                             confidence=0.3,
                                             source="pre_prune_extraction",
+                                            mentioned_at=datetime.now(UTC),
                                         )
                                     )
                                 except Exception:
@@ -5146,6 +5147,7 @@ class AgentRunner:
                                     category="technical",
                                     confidence=0.3,
                                     source="pre_prune_extraction",
+                                    mentioned_at=datetime.now(UTC),
                                 )
                             )
                         except Exception:
