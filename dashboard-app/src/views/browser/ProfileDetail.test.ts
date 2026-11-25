@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import Browser from '../Browser.svelte';
 import { FORBIDDEN_TEXT } from '../../lib/autonomy_settings';
 import { EMPTY_TEXT, WRITER_OFF_TEXT, type ProfileDetail, type ProfileList, type ProfileRow } from '../../lib/entity_profiles';
+import { fmtUtc } from '../../lib/harness';
 
 // F119 PR 2: Browse's Profiles tab over the /entity-profiles routes. The answers have the shapes list_row and
 // detail_body (nous/heart/entity_profile.py) give; every name, line and fact below is made up.
@@ -12,7 +13,7 @@ import { EMPTY_TEXT, WRITER_OFF_TEXT, type ProfileDetail, type ProfileList, type
 type Answer = [number, unknown];
 type Call = { url: string; method: string; body: unknown; type: string | null };
 let calls: Call[] = [];
-let handlers: Record<string, (body: unknown) => Answer> = {};
+let handlers: Record<string, (body: unknown) => Answer | Promise<Answer>> = {};
 
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
@@ -21,13 +22,15 @@ function install() {
     const headers = (init.headers ?? {}) as Record<string, string>;
     calls.push({ url, method, body, type: headers['Content-Type'] ?? null });
     const handler = handlers[`${method} ${url}`];
-    const [status, payload] = handler ? handler(body) : [500, { error: `unexpected ${method} ${url}` }];
+    const [status, payload] = handler ? await handler(body) : [500, { error: `unexpected ${method} ${url}` }];
     return new Response(JSON.stringify(payload), { status });
   }));
 }
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const T = '2026-11-24T10:00:00+00:00';
+// Long before any day the tests run: "Write it again now" is open.
+const OLD = '2026-11-02T10:00:00+00:00';
 const F1 = '11111111-1111-4111-8111-111111111111';
 const F2 = '22222222-2222-4222-8222-222222222222';
 
@@ -52,7 +55,7 @@ const detail = (over: Partial<ProfileDetail> = {}): ProfileDetail => ({
     { id: 'l2', text: HOSTILE, fact_ids: [F1, F2], said_on: '2026-10-30', date_from: 'learned_at' },
   ],
   rejected: ['Quillon Marsh sails.'],
-  fact_count: 12, source_count: 12, tokens: 40, written_at: T, owner_verdict: null,
+  fact_count: 12, source_count: 12, tokens: 40, written_at: OLD, owner_verdict: null,
   removed_lines: [{ id: 'r1', text: 'Quillon Marsh sails.', fact_ids: [F2], said_on: '2026-10-01', date_from: 'learned_at',
     removed_by: 'proxy', removed_at: T }],
   unkeyed_mentions: 0,
@@ -96,6 +99,8 @@ async function openRow(table: HTMLElement, name: string) {
   });
 }
 const sent = (method: string) => calls.filter((c) => c.method === method);
+/** The last correction's sentence, held above the table. */
+const noteText = () => document.getElementById('profiles-note')?.textContent ?? null;
 const gets = () => calls.filter((c) => c.method === 'GET').map((c) => c.url);
 
 describe('Browse, Profiles', () => {
@@ -140,7 +145,7 @@ describe('Browse, Profiles', () => {
     expect(within(panel).getByText('2026-11-02')).toBeTruthy();
     expect(panel.textContent).toContain(HOSTILE);
     expect(panel.querySelector('img')).toBeNull();
-    expect(within(panel).getByText('Written Nov 24 10:00 UTC from its 12 facts.')).toBeTruthy();
+    expect(within(panel).getByText('Written Nov 2 10:00 UTC from its 12 facts.')).toBeTruthy();
     const removed = within(panel).getByText(/^Removed from the dashboard, Nov 24 10:00 UTC\./);
     expect(removed.closest('li')?.textContent).toContain('Quillon Marsh sails.');
     // No fact is read until asked for.
@@ -174,7 +179,7 @@ describe('Browse, Profiles', () => {
     for (const [label, method, url, said] of cases) {
       const before = calls.length;
       await fireEvent.click(within(panel).getAllByRole('button', { name: label })[0]);
-      await waitFor(() => expect(within(panel).getByText(said)).toBeTruthy());
+      await waitFor(() => expect(noteText()).toBe(`Quillon Marsh: ${said}`));
       const made = calls.slice(before);
       const change = made.filter((c) => c.method !== 'GET');
       expect(change.map((c) => [c.method, c.url, c.type]), label).toEqual([[method, url, 'application/json']]);
@@ -213,9 +218,108 @@ describe('Browse, Profiles', () => {
     const panel = await openRow(table, 'Quillon Marsh');
     await waitFor(() => expect(within(panel).getByText('Quillon Marsh keeps bees.')).toBeTruthy());
     await fireEvent.click(within(panel).getAllByRole('button', { name: 'Remove this line' })[0]);
-    await waitFor(() => expect(within(panel).getByRole('alert').textContent).toBe(FORBIDDEN_TEXT));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(`Quillon Marsh: ${FORBIDDEN_TEXT}`));
     await fireEvent.click(within(panel).getByRole('button', { name: 'Put it back' }));
-    await waitFor(() => expect(within(panel).getByRole('alert').textContent).toBe('a fact this line cites is no longer live.'));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Quillon Marsh: a fact this line cites is no longer live.'));
+  });
+
+  // Review F4: the four corrections that take the row out of the list it is in. The list's answer after the change no
+  // longer has the row; the sentence stays above the table.
+  const LEAVES: [string, string, string, string, string, string, string][] = [
+    // [filter button, list url, row, button, method, change url, sentence]
+    ['', FIRST, 'Quillon Marsh', 'Remove this profile', 'DELETE', '/entity-profiles/quillon',
+      'Quillon Marsh: Profile removed. Find it under Removed to restore it.'],
+    ['Removed (1)', 'GET /entity-profiles?limit=20&offset=0&status=removed', 'Harborline', 'Restore this profile', 'POST',
+      '/entity-profiles/harborline/restore', 'Harborline: Profile restored.'],
+    ['Profile (1)', 'GET /entity-profiles?limit=20&offset=0&status=profile', 'Quillon Marsh', 'This is not an entity', 'POST',
+      '/entity-profiles/quillon/not-entity', 'Quillon Marsh: Marked as not an entity.'],
+    ['Not an entity (2)', 'GET /entity-profiles?limit=20&offset=0&status=not_entity', 'Ledgerwick',
+      'It is an entity after all', 'DELETE', '/entity-profiles/ledgerwick/not-entity',
+      'Ledgerwick: Taken back. Nous writes this profile again when its facts change, or now with Write it again now.'],
+  ];
+  it.each(LEAVES)('%s: "%s" keeps its sentence when the row leaves the list', async (filter, listUrl, name, label, method, url, said) => {
+    let changed = false;
+    const shown = filter === '' ? LIST : filter.startsWith('Removed') ? REMOVED
+      : filter.startsWith('Profile') ? list([row({})]) : list([LIST.profiles[2]]);
+    handlers[listUrl] = () => [200, changed ? list(shown.profiles.filter((p) => (p.display_name ?? p.key) !== name)) : shown];
+    handlers[`${method} ${url}`] = () => { changed = true; return ok(); };
+    await openProfiles();
+    if (filter) await fireEvent.click(screen.getByRole('button', { name: filter }));
+    const table = await waitFor(() => {
+      const t = document.querySelector('.tab-body table') as HTMLTableElement;
+      expect(within(t).getByText(name)).toBeTruthy();
+      return t;
+    });
+    const panel = await openRow(table, name);
+    const button = await waitFor(() => within(panel).getByRole('button', { name: label }));
+    await fireEvent.click(button);
+    await waitFor(() => expect(noteText()).toBe(said));
+    await waitFor(() => expect(screen.queryByText(name, { selector: 'td *, td' })).toBeNull());
+    expect(document.getElementById('profiles-note')?.getAttribute('role')).toBe('status');
+    // A new filter or search: the sentence no longer speaks of what is shown.
+    await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(noteText()).toBeNull());
+  });
+
+  it('a profile written with a call in the last 24 hours says when it can be written again, and makes no request', async () => {
+    const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+    handlers['GET /entity-profiles/quillon'] = () => [200, detail({ written_at: hourAgo })];
+    const table = await openProfiles();
+    const panel = await openRow(table, 'Quillon Marsh');
+    const next = fmtUtc(new Date(new Date(hourAgo).getTime() + 86_400_000).toISOString());
+    const button = await waitFor(() => within(panel).getByRole('button', { name: `Write it again after ${next}` }));
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(button);
+    expect(sent('POST')).toEqual([]);
+  });
+
+  it('a rebuild held by the server says when it can be written again', async () => {
+    const at = '2026-11-25T09:00:00+00:00';
+    handlers['POST /entity-profiles/rebuild'] = () => [200, { outcome: 'held', key: 'quillon', next_at: at }];
+    const table = await openProfiles();
+    const panel = await openRow(table, 'Quillon Marsh');
+    await fireEvent.click(await waitFor(() => within(panel).getByRole('button', { name: 'Write it again now' })));
+    await waitFor(() => expect(noteText()).toBe(
+      "Quillon Marsh: Not written: it was written in the last 24 hours, and the day's limit has no exception. It can be written again after Nov 25 09:00 UTC.",
+    ));
+  });
+
+  it('a putting back past the bound says so in words', async () => {
+    const full = 'putting it back would make the profile longer than its bound of 8 lines and 300 tokens; remove another line first';
+    handlers['POST /entity-profiles/quillon/lines/r1/restore'] = () => [409, { error: full }];
+    const table = await openProfiles();
+    const panel = await openRow(table, 'Quillon Marsh');
+    await fireEvent.click(await waitFor(() => within(panel).getByRole('button', { name: 'Put it back' })));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(`Quillon Marsh: ${full}.`));
+  });
+
+  it('a second click while a correction is on its way sends nothing', async () => {
+    let release!: () => void;
+    handlers['DELETE /entity-profiles/quillon/lines/l1'] = () => new Promise<Answer>((resolve) => { release = () => resolve(ok()); });
+    const table = await openProfiles();
+    const panel = await openRow(table, 'Quillon Marsh');
+    const button = await waitFor(() => within(panel).getAllByRole('button', { name: 'Remove this line' })[0]);
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() => expect(sent('DELETE')).toHaveLength(1));
+    release();
+    await waitFor(() => expect(noteText()).toBe('Quillon Marsh: Line removed.'));
+    expect(sent('DELETE')).toHaveLength(1);
+  });
+
+  it('an older answer to the list never replaces a newer one', async () => {
+    await openProfiles();
+    let release!: () => void;
+    handlers['GET /entity-profiles?limit=20&offset=0&status=removed'] = () =>
+      new Promise<Answer>((resolve) => { release = () => resolve([200, REMOVED]); });
+    await fireEvent.click(screen.getByRole('button', { name: 'Removed (1)' }));
+    await waitFor(() => expect(gets()).toContain('/entity-profiles?limit=20&offset=0&status=removed'));
+    await fireEvent.click(screen.getByRole('button', { name: /^Removed/ }));  // back to All
+    await waitFor(() => expect(screen.getByText('Quillon Marsh')).toBeTruthy());
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText('Harborline')).toBeNull();
+    expect(screen.getByText('Quillon Marsh')).toBeTruthy();
   });
 
   it('source contract: no raw HTML, no colour literal', () => {

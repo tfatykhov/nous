@@ -893,11 +893,17 @@ def create_app(
 
     async def list_entity_profiles(request: Request) -> JSONResponse:
         """GET /entity-profiles?limit=&offset=&q=&status= — the profiles with their status and size, the keys with the
-        most facts first (``limit`` default 200, at most 1000, from ``offset``). ``q`` keeps the keys and names that
-        contain it; ``status`` is one of ``LIST_STATUSES`` (``removed``: the profiles the owner removed; with none,
-        every profile not removed). ``total`` counts the rows that match both, ``counts`` the rows per status that
-        match ``q``. ``lines`` counts the lines whose cited facts are all live now."""
-        from nous.heart.entity_profile import LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX, LIST_STATUSES, list_row
+        most facts first (``limit`` default 200, at most 1000, from ``offset``, at most 10,000,000). ``q`` keeps the
+        keys and names that contain it; ``status`` is one of ``LIST_STATUSES`` (``removed``: the profiles the owner
+        removed; with none, every profile not removed). ``total`` counts the rows that match both, ``counts`` the rows
+        per status that match ``q``. ``lines`` counts the lines whose cited facts are all live now."""
+        from nous.heart.entity_profile import (
+            LIST_LIMIT_DEFAULT,
+            LIST_LIMIT_MAX,
+            LIST_OFFSET_MAX,
+            LIST_STATUSES,
+            list_row,
+        )
 
         try:
             limit = int(request.query_params.get("limit", str(LIST_LIMIT_DEFAULT)))
@@ -905,7 +911,7 @@ def create_app(
         except ValueError:
             return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
         limit = max(1, min(limit, LIST_LIMIT_MAX))
-        offset = max(0, offset)
+        offset = max(0, min(offset, LIST_OFFSET_MAX))
         q = request.query_params.get("q", "").strip() or None
         status = request.query_params.get("status") or None
         if status is not None and status not in LIST_STATUSES:
@@ -982,15 +988,23 @@ def create_app(
 
     async def restore_entity_profile_line(request: Request) -> JSONResponse:
         """POST /entity-profiles/{key}/lines/{line_id}/restore — put a removed line back; 409 when the key has no
-        profile now or a fact the line cites is no longer live."""
+        profile now, a fact the line cites is no longer live, or the profile would be over its line or size bound."""
         key = _profile_key(request)
+        bounds = {"max_lines": settings.entity_profile_max_lines, "max_tokens": settings.entity_profile_max_tokens}
         try:
-            outcome = await _entity_profile_store().restore_line(key, request.path_params["line_id"]) if key else None
+            store = _entity_profile_store()
+            outcome = await store.restore_line(key, request.path_params["line_id"], **bounds) if key else None
         except Exception as e:
             logger.error("restore_entity_profile_line failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
         if outcome == "no_profile":
             return JSONResponse({"error": "this key has no profile now"}, status_code=409)
+        if outcome == "too_big":
+            too_big = (
+                f"putting it back would make the profile longer than its bound of {bounds['max_lines']} lines and "
+                f"{bounds['max_tokens']} tokens; remove another line first"
+            )
+            return JSONResponse({"error": too_big}, status_code=409)
         if outcome == "not_live":
             return JSONResponse({"error": "a fact this line cites is no longer live"}, status_code=409)
         if outcome != "restored":
@@ -1023,7 +1037,8 @@ def create_app(
     async def rebuild_entity_profile(request: Request) -> JSONResponse:
         """POST /entity-profiles/rebuild — write one entity's profile now (body ``{"key": ...}``); 409 when the writer
         is off, asleep or running, 400 without a key, 404 when no active fact carries the key, 429 when the day's
-        model calls are used. An owner key written with a call in the last 24 hours answers ``held`` (200)."""
+        model calls are used. A key written with a call in the last 24 hours answers ``held`` (200, no call) with
+        ``next_at``, when it can be written again."""
         from nous.heart.keys import normalize_key
 
         # The body is read first: nothing is awaited between the check below and the writer, so two requests whose

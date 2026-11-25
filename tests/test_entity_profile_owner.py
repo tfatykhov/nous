@@ -13,6 +13,7 @@ import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select, update
@@ -20,6 +21,7 @@ from test_entity_profile import (
     FakeLLM,
     _a_day_later,
     _agent,
+    _ago,
     _app,
     _call,
     _commit_keyed,
@@ -29,13 +31,16 @@ from test_entity_profile import (
     _line,
     _purge,
     _row,
+    _settings,
     _stored_line,
     _writer,
 )
 
 from nous.heart.entity_profile import (
+    LIST_OFFSET_MAX,
     PREVIOUS_CAP,
     EntityProfileStore,
+    EntityProfileWriter,
     _bounded_previous,
     detail_body,
     list_row,
@@ -109,9 +114,12 @@ async def test_a_removed_line_is_not_written_again_by_its_text_or_by_its_exact_c
         _line("Zephyrine tends hives and a garden.", f1, f3),  # its cited facts changed
         _line("Zephyrine sails.", f2),
     )
-    result = await writer.rebuild("zephyrine", session=session)
+    # The next sleep after a change to its facts, once its 24 hours have passed.
+    await _keyed(session, agent, "zephyrine", {"content": "a change"})
+    await _a_day_later(session, agent)
+    result = await writer.run_sleep(session=session)
 
-    assert (result["outcome"], result["rejected_dropped"]) == ("written", 2)
+    assert (result["written"], result["rejected_dropped"]) == (1, 2)
     assert [ln["text"] for ln in await _lines(session, agent)] == [
         "Zephyrine tends hives and a garden.",
         "Zephyrine sails.",
@@ -136,6 +144,7 @@ async def test_a_line_removed_while_the_model_writes_is_not_written(db, session)
     llm.replies["zephyrine"] = _entity(
         _line("Zephyrine keeps bees.", f1), _line("Zephyrine tends hives.", f1), _line("Zephyrine sails.", f2)
     )
+    await _a_day_later(session, agent)
     assert (await writer.rebuild("zephyrine", session=session))["outcome"] == "written"
     assert [ln["text"] for ln in await _lines(session, agent)] == ["Zephyrine sails."]
 
@@ -192,8 +201,6 @@ def test_bounded_previous_drops_the_oldest_replaced_line_first():
 
 
 def test_settle_lines_drops_a_line_citing_exactly_the_facts_of_a_removed_line():
-    from test_entity_profile import _settings
-
     facts = [Fact(id=uuid.uuid4(), agent_id="a", content=f"fact {i}", learned_at=datetime.now(UTC)) for i in range(2)]
     a, b = (str(f.id) for f in facts)
     raw = [{"text": "One.", "fact_ids": [a[:8]]}, {"text": "Both.", "fact_ids": [a[:8], b[:8]]}]
@@ -216,10 +223,12 @@ async def test_restoring_a_line_puts_it_back_and_lifts_both_skips(db, session):
     assert row.rejected == [] and not any(ln.get("removed_at") for ln in row.previous_lines)
     assert await store.restore_line("zephyrine", first["id"], session=session) == "not_found"
 
-    # A rewrite may write it again.
+    # A rewrite may write it again, with another id.
     llm.replies["zephyrine"] = _entity(_line(first["text"], f1), _line("Zephyrine point 1.", f2))
-    await writer.rebuild("zephyrine", session=session)
-    assert first["text"] in [ln["text"] for ln in await _lines(session, agent)]
+    await _a_day_later(session, agent)
+    assert (await writer.rebuild("zephyrine", session=session))["outcome"] == "written"
+    rewritten = await _lines(session, agent)
+    assert first["text"] in [ln["text"] for ln in rewritten] and first["id"] not in [ln["id"] for ln in rewritten]
 
 
 @pytest.mark.postgres_only
@@ -262,7 +271,7 @@ async def test_a_removed_profile_is_not_asked_about_or_written_and_comes_back_as
     calls = len(llm.prompts)
 
     stats = await writer.run_sleep(session=session)
-    assert (stats["inactive"], len(llm.prompts)) == (1, calls)
+    assert (stats["candidates"], len(llm.prompts)) == (0, calls)  # not a candidate: no place, no call
     assert (await writer.rebuild("zephyrine", session=session))["outcome"] == "inactive"
     assert "zephyrine" not in await writer.store.profiled_keys(session=session)
 
@@ -585,6 +594,218 @@ async def test_a_rebuild_of_a_key_the_owner_called_not_an_entity_makes_no_call(d
     await writer.store.set_owner_verdict("zephyrine", True, "owner", session=session)
     result = await writer.rebuild("zephyrine", session=session)
     assert (result["outcome"], len(llm.prompts)) == ("owner_not_entity", 1)
+
+
+# ---------------------------------------------------------------------------
+# The daily limit, kept lines, an all-removed reply, the bounds, and corrections made while the model writes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_ten_rebuilds_of_a_profile_written_an_hour_ago_make_no_call_and_the_count_does_not_move(db, session):
+    agent = _agent()
+    _facts, writer, llm = await _profile(db, session, agent)
+    await _ago(session, agent, timedelta(hours=1))
+    written_at = (await _row(session, agent, "zephyrine")).written_at
+    assert await writer.store.written_last_day(session=session) == 1
+
+    for _click in range(10):
+        result = await writer.rebuild("zephyrine", session=session)
+        assert result["outcome"] == "held"
+        assert datetime.fromisoformat(result["next_at"]) == written_at + timedelta(hours=24)
+    assert (len(llm.prompts), await writer.store.written_last_day(session=session)) == (1, 1)
+
+    await _a_day_later(session, agent)
+    assert await writer.store.written_last_day(session=session) == 0
+    assert (await writer.rebuild("zephyrine", session=session))["outcome"] == "written"
+    assert (len(llm.prompts), await writer.store.written_last_day(session=session)) == (2, 1)
+
+
+@pytest.mark.postgres_only
+async def test_the_rebuild_route_answers_held_with_when_it_can_be_written_again(db):
+    agent = _agent()
+    try:
+        await _commit_profile(db, agent)
+        llm = FakeLLM()
+        writer = EntityProfileWriter(db, _settings(agent), llm)
+        app = _app(db, agent, MagicMock(is_sleeping=False, _entity_profile_writer=writer))
+        answer = await _call(app, "POST", "/entity-profiles/rebuild", json={"key": "zephyrine"})
+        assert (answer.status_code, answer.json()["outcome"]) == (200, "held")
+        assert datetime.fromisoformat(answer.json()["next_at"]) > datetime.now(UTC) + timedelta(hours=23)
+        assert llm.prompts == []
+    finally:
+        await _purge(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_line_the_owner_kept_survives_a_rewrite_on_the_fact_of_a_removed_line(db, session):
+    agent = _agent()
+    (f1,) = await _keyed(session, agent, "zephyrine", {})
+    llm = FakeLLM(
+        {"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sells honey at the market.", f1))}
+    )
+    writer = _writer(db, agent, llm)
+    await writer.rebuild("zephyrine", session=session)
+    bees = next(ln for ln in await _lines(session, agent) if ln["text"] == "Zephyrine keeps bees.")
+    await writer.store.remove_line("zephyrine", bees["id"], "owner", session=session)
+
+    # A new fact arrives and the profile is rewritten: the line the owner kept comes back on the same fact; a new
+    # wording on that fact alone does not.
+    (f2,) = await _keyed(session, agent, "zephyrine", {"content": "a new fact"})
+    llm.replies["zephyrine"] = _entity(
+        _line("Zephyrine sells honey at the market.", f1),
+        _line("Zephyrine tends hives.", f1),
+        _line("Zephyrine opened a stall.", f2),
+    )
+    await _a_day_later(session, agent)
+    stats = await writer.run_sleep(session=session)
+
+    assert (stats["written"], stats["rejected_dropped"]) == (1, 1)
+    assert [ln["text"] for ln in await _lines(session, agent)] == [
+        "Zephyrine sells honey at the market.",
+        "Zephyrine opened a stall.",
+    ]
+
+
+@pytest.mark.postgres_only
+async def test_a_reply_made_only_of_removed_lines_empties_the_profile_once_and_is_not_asked_again(db, session):
+    agent = _agent()
+    facts, writer, llm = await _profile(db, session, agent)
+    for line in await _lines(session, agent):
+        await writer.store.remove_line("zephyrine", line["id"], "owner", session=session)
+    # A change to the facts the model is shown (a tag), and the 24 hours: the model writes the same three lines.
+    await session.execute(update(Fact).where(Fact.id == facts[0].id).values(tags=["changed"]))
+    await _a_day_later(session, agent)
+
+    first = await writer.run_sleep(session=session)
+    assert (first["all_rejected"], first["failed_closed"], first["rejected_dropped"]) == (1, 0, 3)
+    row = await _row(session, agent, "zephyrine")
+    assert (row.status, list(row.lines)) == ("profile", [])
+    for _cycle in range(2):
+        await _a_day_later(session, agent)
+        stats = await writer.run_sleep(session=session)
+        assert (stats["unchanged"], stats["asked"]) == (1, 0)
+    assert len(llm.prompts) == 2
+
+
+@pytest.mark.postgres_only
+async def test_a_line_is_not_put_back_past_the_profiles_bounds(db, session):
+    agent = _agent()
+    _facts, writer, _llm = await _profile(db, session, agent)
+    store = writer.store
+    first = (await _lines(session, agent))[0]
+    await store.remove_line("zephyrine", first["id"], "owner", session=session)
+
+    assert await store.restore_line("zephyrine", first["id"], session=session, max_lines=2) == "too_big"
+    assert await store.restore_line("zephyrine", first["id"], session=session, max_lines=3, max_tokens=5) == "too_big"
+    row = await _row(session, agent, "zephyrine")
+    assert (len(row.lines), row.rejected) == (2, [first["text"]])
+    restored = await store.restore_line("zephyrine", first["id"], session=session, max_lines=3, max_tokens=300)
+    assert restored == "restored"
+
+
+@pytest.mark.postgres_only
+async def test_putting_a_line_back_past_the_bound_is_409_in_words(db):
+    agent = _agent()
+    try:
+        await _commit_profile(db, agent)
+        app = _app(db, agent, entity_profile_max_lines=1)
+        await _call(app, "DELETE", "/entity-profiles/zephyrine/lines/l1")
+        answer = await _call(app, "POST", "/entity-profiles/zephyrine/lines/l1/restore")
+        assert answer.status_code == 409
+        assert answer.json()["error"].startswith("putting it back would make the profile longer than its bound")
+    finally:
+        await _purge(db, agent)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("change", ["verdict", "removed"])
+async def test_a_correction_made_while_the_model_writes_is_reported_and_nothing_is_written(db, session, change):
+    agent = _agent()
+    facts, writer, llm = await _profile(db, session, agent)
+    before = list((await _row(session, agent, "zephyrine")).lines)
+
+    async def owner_acts(_prompt):
+        if change == "verdict":
+            await writer.store.set_owner_verdict("zephyrine", True, "owner", session=session)
+        else:
+            await writer.store.set_active("zephyrine", False, session=session)
+
+    llm.on_call = owner_acts
+    llm.replies["zephyrine"] = _entity(_line("Zephyrine was rewritten.", facts[0]))
+    await _a_day_later(session, agent)
+    result = await writer.rebuild("zephyrine", session=session)
+
+    assert (result["outcome"], result["written"]) == ("skipped", 0)
+    assert result["owner_not_entity" if change == "verdict" else "inactive"] == 1
+    assert list((await _row(session, agent, "zephyrine")).lines) == before
+
+
+@pytest.mark.postgres_only
+async def test_an_unusable_reply_leaves_a_row_the_owner_called_not_an_entity_meanwhile_as_it_was(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "quillon", {}, {})
+    seen: dict = {}
+
+    async def owner_acts(_prompt):
+        await writer.store.set_owner_verdict("quillon", True, "owner", session=session)
+        row = await _row(session, agent, "quillon")
+        seen["status"], seen["updated_at"] = row.status, row.updated_at
+
+    writer = _writer(db, agent, FakeLLM({"quillon": None}, on_call=owner_acts))  # no tool call: unusable
+    assert (await writer.rebuild("quillon", session=session))["outcome"] == "failed_closed"
+    # count_call left it asked; the unusable reply neither makes it failed nor moves its clock under the verdict.
+    await writer.store.set_owner_verdict("quillon", False, None, session=session)
+    row = await _row(session, agent, "quillon")
+    assert (row.status, row.updated_at, row.owner_verdict) == ("asked", seen["updated_at"], None)
+    assert seen["status"] == "asked"
+
+
+@pytest.mark.postgres_only
+async def test_a_removed_profile_takes_no_place_among_the_candidates(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {}, {}, {})
+    await _keyed(session, agent, "quillon", {}, {})
+    store = EntityProfileStore(db, agent)
+    await store.write("spreadsheet", "not_entity", "", fact_count=4, source_count=4, lines=[], session=session)
+    await store.set_active("spreadsheet", False, session=session)
+    await _days_later(session, agent, 31)
+    llm = FakeLLM({"quillon": {"verdict": "not_entity"}})
+
+    stats = await _writer(db, agent, llm, entity_profile_max_profiles=1).run_sleep(session=session)
+    assert (stats["candidates"], llm.keys) == (1, ["quillon"])
+
+
+@pytest.mark.postgres_only
+async def test_a_line_put_back_during_a_sleep_survives_a_prune_later_in_it(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "alder", {}, {}, {})
+    b1, b2, b3 = await _keyed(session, agent, "birchwood", {}, {}, {})
+    store = EntityProfileStore(db, agent)
+    lines = [_stored_line(f"l{i}", f"Birchwood {i}.", str(f.id)) for i, f in enumerate((b1, b2, b3), start=1)]
+    await store.write("birchwood", "profile", "h", fact_count=3, source_count=3, lines=lines, session=session)
+    await store.remove_line("birchwood", "l1", "owner", session=session)
+    # birchwood was written now (held for 24 hours) and a fact it cites died: the sleep prunes it without a call.
+    await session.execute(update(Fact).where(Fact.id == b2.id).values(active=False))
+
+    async def owner_acts(prompt):
+        if '"alder"' in prompt:
+            assert await store.restore_line("birchwood", "l1", session=session) == "restored"
+
+    llm = FakeLLM({"alder": {"verdict": "not_entity"}}, on_call=owner_acts)
+    stats = await _writer(db, agent, llm).run_sleep(session=session)
+
+    assert (llm.keys, stats["held"], stats["stale_dropped"]) == (["alder"], 1, 1)
+    assert [ln["id"] for ln in await _lines(session, agent, "birchwood")] == ["l3", "l1"]
+
+
+@pytest.mark.postgres_only
+async def test_an_offset_past_any_table_is_clamped(db):
+    agent = _agent()
+    app = _app(db, agent)
+    answer = await _call(app, "GET", "/entity-profiles?offset=99999999999999999999")
+    assert answer.status_code == 200
+    assert (answer.json()["profiles"], answer.json()["offset"]) == ([], LIST_OFFSET_MAX)
 
 
 # ---------------------------------------------------------------------------

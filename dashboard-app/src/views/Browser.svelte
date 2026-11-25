@@ -1,6 +1,6 @@
 <script lang="ts">
   import { fmtUtc } from '../lib/harness';
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
@@ -135,7 +135,8 @@
   }
 
   // F119 PR 2: entity profiles (lib/entity_profiles.ts), searched by name and filtered by status. A row opens to
-  // ProfileDetail, which reads the profile and makes the owner's corrections; after each, the list is read again
+  // ProfileDetail, which reads the profile and makes the owner's corrections; after each, its sentence is held here,
+  // above the table (it stays when the change takes the row out of the list), and the list is read again
   // (without "Reading…", so the open row stays open).
   let searchProfiles  = $state('');
   let statusProfiles  = $state('');
@@ -143,15 +144,34 @@
   let dataProfiles    = $state<ProfileList | null>(null);
   let loadingProfiles = $state(false);
   let errorProfiles   = $state<string | null>(null);
+  let noteProfiles    = $state<{ text: string; ok: boolean } | null>(null);
+  // Only the newest read's answer is shown: a quiet read after a correction and a page click can answer out of order.
+  let readProfilesSeq = 0;
 
   async function loadProfiles(quiet = false) {
+    const seq = ++readProfilesSeq;
     if (!quiet) loadingProfiles = true;
     errorProfiles = null;
     try {
-      dataProfiles = await readList({ q: searchProfiles.trim(), status: statusProfiles as ListStatus | '', offset: offsetProfiles });
+      const answer = await readList({ q: searchProfiles.trim(), status: statusProfiles as ListStatus | '', offset: offsetProfiles });
+      if (seq === readProfilesSeq) dataProfiles = answer;
     }
-    catch (e) { errorProfiles = e instanceof Error ? e.message : 'Failed to load'; }
-    finally { loadingProfiles = false; }
+    catch (e) { if (seq === readProfilesSeq) errorProfiles = e instanceof Error ? e.message : 'Failed to load'; }
+    finally { if (seq === readProfilesSeq) loadingProfiles = false; }
+  }
+
+  /** A new search or filter: the last correction's sentence no longer speaks of what is shown. */
+  function searchProfilesAgain() {
+    offsetProfiles = 0;
+    noteProfiles = null;
+    void loadProfiles();
+  }
+
+  async function profileChanged(note: { text: string; ok: boolean }) {
+    noteProfiles = note;
+    await loadProfiles(true);
+    await tick();
+    document.getElementById('profiles-note')?.focus();
   }
 
   // A new status filter reads the list again from its first page (the filter is bound, so it has no event).
@@ -160,7 +180,7 @@
     const status = statusProfiles;
     if (status === lastStatusProfiles) return;
     lastStatusProfiles = status;
-    untrack(() => { offsetProfiles = 0; void loadProfiles(); });
+    untrack(() => searchProfilesAgain());
   });
 
   function switchTab(tab: TabId) {
@@ -741,13 +761,17 @@
         placeholder={SEARCH_PLACEHOLDER}
         aria-label={SEARCH_PLACEHOLDER}
         bind:value={searchProfiles}
-        onkeydown={(e) => e.key === 'Enter' && (offsetProfiles = 0, loadProfiles())}
+        onkeydown={(e) => e.key === 'Enter' && searchProfilesAgain()}
       />
-      <button class="btn" onclick={() => { offsetProfiles = 0; loadProfiles(); }}>Search</button>
+      <button class="btn" onclick={searchProfilesAgain}>Search</button>
     </div>
     <div class="controls-bar">
       <FilterBar options={filterOptions(dataProfiles?.counts ?? null)} bind:value={statusProfiles} label="Status" />
     </div>
+    {#if noteProfiles}
+      <p class="profiles-note" class:save-err={!noteProfiles.ok} id="profiles-note" tabindex="-1"
+        role={noteProfiles.ok ? 'status' : 'alert'}>{noteProfiles.text}</p>
+    {/if}
 
     {#if loadingProfiles}
       <p class="status-msg">Loading…</p>
@@ -780,7 +804,7 @@
           rowLabel={(r: ProfileRow) => nameText(r)}
         >
           {#snippet detail(row: ProfileRow)}
-            <ProfileDetail {row} onchanged={() => loadProfiles(true)} />
+            <ProfileDetail {row} onchanged={profileChanged} />
           {/snippet}
         </DataTable>
         </div>
@@ -973,6 +997,24 @@
 
   .tab-intro.writer-off {
     color: var(--warn-text);
+  }
+
+  /* The last correction's sentence, above the table. */
+  .profiles-note {
+    font-size: 0.8125rem;
+    color: var(--save-ok);
+    margin: 0 0 0.75rem;
+    overflow-wrap: anywhere;
+  }
+
+  .profiles-note.save-err {
+    color: var(--save-err);
+  }
+
+  .profiles-note:focus {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
   }
 
   /* ── Detail grid (inside expanded rows) ── */

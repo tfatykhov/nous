@@ -77,8 +77,8 @@ export interface ProfileDetail {
   unkeyed_mentions: number;
 }
 
-/** POST /entity-profiles/rebuild: what the one run did (more counts come with it). */
-export interface RebuildAnswer { outcome: string; key: string | null }
+/** POST /entity-profiles/rebuild: what the one run did (more counts come with it); `next_at` with `held`. */
+export interface RebuildAnswer { outcome: string; key: string | null; next_at?: string }
 
 // ── Requests ────────────────────────────────────────────────────────────────
 
@@ -157,10 +157,20 @@ export const nameText = (row: Pick<ProfileRow, 'key' | 'display_name'>) => row.d
 /** "Written Nov 24 10:00 UTC from the newest 40 of its 320 facts." */
 export function writtenText(p: Pick<ProfileDetail, 'written_at' | 'source_count' | 'fact_count' | 'status'>): string {
   const when = fmtUtc(p.written_at);
+  if (p.status === 'owner') return `Stored ${when}.`;
   if (p.status !== 'profile' || p.source_count === 0) return `Last asked ${when}.`;
   if (p.source_count >= p.fact_count) return `Written ${when} from its ${n(p.fact_count)} facts.`;
   return `Written ${when} from the newest ${n(p.source_count)} of its ${n(p.fact_count)} facts.`;
 }
+
+/** A profile written with a model call in the last 24 hours stands for that call in the day's limit, which has no
+ * exception: it can be written again only once they have passed. That time, or null when it can be written now. */
+export function nextWriteAt(p: Pick<ProfileDetail, 'written_at' | 'status'>, now: number = Date.now()): string | null {
+  if (p.status === 'owner' || !p.written_at) return null;
+  const next = new Date(p.written_at).getTime() + DAY_MS;
+  return Number.isNaN(next) || next <= now ? null : new Date(next).toISOString();
+}
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Why a row has no lines, in words, by the writer's status. */
 export const STATUS_HELP: Record<WriterStatus, string> = {
@@ -204,6 +214,7 @@ export const LABELS = {
   removeLine: 'Remove this line',
   restoreLine: 'Put it back',
   rebuild: 'Write it again now',
+  rebuildAfter: (iso: string) => `Write it again after ${fmtUtc(iso)}`,
   notEntity: 'This is not an entity',
   undoNotEntity: 'It is an entity after all',
   removeProfile: 'Remove this profile',
@@ -219,19 +230,22 @@ export const DONE_TEXT = {
   undoNotEntity: 'Taken back. Nous writes this profile again when its facts change, or now with Write it again now.',
 } as const;
 
-/** What one "Write it again now" did, in words. */
-export function rebuildText(outcome: string): string {
+/** What one "Write it again now" did, in words (`nextAt` comes with `held`). */
+export function rebuildText(outcome: string, nextAt?: string | null): string {
   const words: Record<string, string> = {
     written: 'Written again now.',
     not_entity: 'Nous decided this key is not an entity.',
     failed_closed: 'The reply could not be used. The profile was kept as it was.',
     no_reply: 'No reply came back. It can be asked again after 24 hours.',
-    held: 'This was written in the last 24 hours. It stays as it is until they have passed.',
+    held: nextAt
+      ? `Not written: it was written in the last 24 hours, and the day's limit has no exception. It can be written again after ${fmtUtc(nextAt)}.`
+      : "Not written: it was written in the last 24 hours, and the day's limit has no exception.",
     owner: 'This key names you or Nous, so it has no profile.',
     inactive: 'This profile is removed. Restore it first.',
     owner_not_entity: 'You said this is not an entity. Take that back first.',
     no_llm: 'No model is set up to write profiles on this server.',
-    skipped: 'Nothing was written: the profile was changed while it was being written.',
+    skipped: 'Nothing was written: the profile was removed, or called not an entity, while it was being written.',
+    all_rejected: 'Every line Nous wrote is one you removed, so the profile is empty now. It is written again when its facts change.',
   };
   return words[outcome] ?? `Done (${outcome}).`;
 }

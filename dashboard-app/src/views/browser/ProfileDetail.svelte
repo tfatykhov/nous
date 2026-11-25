@@ -1,32 +1,32 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { Button } from '../../lib/ui/button';
   import { problemText } from '../../lib/autonomy_settings';
   import {
     DONE_TEXT, FACT_UNREADABLE_TEXT, FACTS_TITLE, LABELS, LINES_TITLE, LOADING_TEXT, NO_LINES_TEXT, REMOVED_PROFILE_TEXT,
     REMOVED_TITLE, STATUS_HELP, UNKEYED_TEXT, WORKING_TEXT, WRITING_TEXT,
-    markNotEntity, readFact, readProfile, rebuild, rebuildText, removeLine, removeProfile, removedText, restoreLine,
-    restoreProfile, unmarkNotEntity, verdictText, writtenText,
-    type ProfileDetail, type ProfileRow,
+    markNotEntity, nameText, nextWriteAt, readFact, readProfile, rebuild, rebuildText, removeLine, removeProfile,
+    removedText, restoreLine, restoreProfile, unmarkNotEntity, verdictText, writtenText,
+    type ProfileDetail, type ProfileRow, type RebuildAnswer,
   } from '../../lib/entity_profiles';
 
   // F119 PR 2: one profile, opened from its row on Browse's Profiles tab (GET /entity-profiles/{key}): its live lines,
   // each with its date and, on demand, the text of the facts it cites (the graph's node route); the lines the owner
-  // removed, each with who and when; and the owner's corrections. Each correction is one request, then the profile and
-  // the list are read again (onchanged). A removed profile is not read (the route answers 404): it shows its Restore.
-  // Everything the server sends is a text node.
-
-  let { row, onchanged }: { row: ProfileRow; onchanged: () => void } = $props();
+  // removed, each with who and when; and the owner's corrections. Each correction is one request, then the profile is
+  // read again and its sentence goes up to Browse (onchanged), which shows it above the table and reads the list again:
+  // the sentence stays when the change takes the row out of the list. A removed profile is not read (the route answers
+  // 404): it shows its Restore. "Write it again now" says when it can be used: a profile written with a call in the
+  // last 24 hours stands for that call in the day's limit. Everything the server sends is a text node.
 
   type Note = { text: string; ok: boolean };
+  let { row, onchanged }: { row: ProfileRow; onchanged: (note: Note) => void } = $props();
+
   let profile = $state<ProfileDetail | null>(null);
   let readError = $state<string | null>(null);
   let busy = $state<string | null>(null);
-  let note = $state<Note | null>(null);
   /** Fact id → its text, '' while it is read, null when it could not be read. */
   let facts = $state<Record<string, string | null>>({});
   let open = $state<Record<string, boolean>>({});
-  const noteId = `profile-note-${Math.random().toString(36).slice(2, 8)}`;
 
   async function load() {
     readError = null;
@@ -59,7 +59,6 @@
   async function act(name: string, request: () => Promise<unknown>, done: (answer: unknown) => string) {
     if (busy) return;
     busy = name;
-    note = null;
     let said: Note;
     try {
       said = { text: done(await request()), ok: true };
@@ -69,13 +68,11 @@
     // A removed profile cannot be read (404); the list, read again below, shows where it went.
     if (row.active && !(name === 'removeProfile' && said.ok)) await load();
     busy = null;
-    note = said;
-    onchanged();
-    await tick();
-    document.getElementById(noteId)?.focus();
+    onchanged({ text: `${nameText(row)}: ${said.text}`, ok: said.ok });
   }
 
   const key = $derived(row.key);
+  const nextAt = $derived(profile ? nextWriteAt(profile) : null);
 </script>
 
 <div class="profile">
@@ -149,8 +146,8 @@
 
     <div class="actions profile-actions">
       {#if !profile.owner_verdict}
-        <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
-          onclick={() => void act('rebuild', () => rebuild(key), (a) => rebuildText((a as { outcome: string }).outcome))}>{LABELS.rebuild}</Button>
+        <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null || nextAt !== null}
+          onclick={() => { if (nextAt === null) void act('rebuild', () => rebuild(key), (a) => rebuildText((a as RebuildAnswer).outcome, (a as RebuildAnswer).next_at)); }}>{nextAt ? LABELS.rebuildAfter(nextAt) : LABELS.rebuild}</Button>
         <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
           onclick={() => void act('notEntity', () => markNotEntity(key), () => DONE_TEXT.notEntity)}>{LABELS.notEntity}</Button>
       {:else}
@@ -162,9 +159,6 @@
     </div>
   {/if}
   {#if busy}<p class="help" role="status">{busy === 'rebuild' ? WRITING_TEXT : WORKING_TEXT}</p>{/if}
-  {#if note}
-    <p class="note" class:note-err={!note.ok} id={noteId} tabindex="-1" role={note.ok ? 'status' : 'alert'}>{note.text}</p>
-  {/if}
 </div>
 
 <style>
@@ -183,7 +177,4 @@
   .fact { display: flex; flex-direction: column; gap: 0.125rem; margin: 0.25rem 0; overflow-wrap: anywhere; min-width: 0; }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.375rem; }
   .profile-actions { margin-top: 0.75rem; }
-  .note { margin: 0.25rem 0 0; color: var(--save-ok); overflow-wrap: anywhere; }
-  .note-err { color: var(--save-err); }
-  .note:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
 </style>

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  EMPTY_TEXT, STATUS_WORDS, WRITER_OFF_TEXT, factPath, filterOptions, linePath, listPath, nameText, notEntityPath,
-  profilePath, rebuildText, removedText, restoreLinePath, restorePath, statusText, verdictText, writtenText,
+  EMPTY_TEXT, LABELS, STATUS_WORDS, WRITER_OFF_TEXT, factPath, filterOptions, linePath, listPath, nameText,
+  nextWriteAt, notEntityPath, profilePath, rebuildText, removedText, restoreLinePath, restorePath, statusText,
+  verdictText, writtenText,
   type ListStatus,
 } from './entity_profiles';
 
@@ -72,6 +73,8 @@ describe('words', () => {
     expect(writtenText({ written_at: T, source_count: 12, fact_count: 12, status: 'not_entity' })).toBe(
       'Last asked Nov 24 10:00 UTC.',
     );
+    // An owner row is stored with no model call.
+    expect(writtenText({ written_at: T, source_count: 0, fact_count: 12, status: 'owner' })).toBe('Stored Nov 24 10:00 UTC.');
   });
 
   it('who and when, for a verdict and a removed line', () => {
@@ -89,6 +92,21 @@ describe('words', () => {
     expect(rebuildText('owner_not_entity')).toBe('You said this is not an entity. Take that back first.');
     expect(rebuildText('inactive')).toBe('This profile is removed. Restore it first.');
     expect(rebuildText('something_new')).toBe('Done (something_new).');
+    expect(rebuildText('held', '2026-11-25T09:00:00+00:00')).toBe(
+      "Not written: it was written in the last 24 hours, and the day's limit has no exception. It can be written again after Nov 25 09:00 UTC.",
+    );
+    expect(rebuildText('skipped')).toBe('Nothing was written: the profile was removed, or called not an entity, while it was being written.');
+    expect(rebuildText('all_rejected')).toMatch(/^Every line Nous wrote is one you removed/);
+  });
+
+  it('a profile written with a call in the last 24 hours can be written again only once they have passed', () => {
+    const now = Date.parse('2026-11-24T12:00:00Z');
+    expect(nextWriteAt({ written_at: '2026-11-24T10:00:00+00:00', status: 'profile' }, now)).toBe('2026-11-25T10:00:00.000Z');
+    expect(nextWriteAt({ written_at: '2026-11-23T11:59:00+00:00', status: 'not_entity' }, now)).toBeNull();
+    // An owner row stands for no call.
+    expect(nextWriteAt({ written_at: '2026-11-24T10:00:00+00:00', status: 'owner' }, now)).toBeNull();
+    expect(nextWriteAt({ written_at: null, status: 'asked' }, now)).toBeNull();
+    expect(LABELS.rebuildAfter('2026-11-25T10:00:00.000Z')).toBe('Write it again after Nov 25 10:00 UTC');
   });
 
   it('the two sentences the brief asks for: writer off, and no profiles yet', () => {
