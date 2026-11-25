@@ -18,7 +18,8 @@ const kind = (over: Partial<KindNumbers> = {}): KindNumbers => ({
   turns_used_left_out: 1, calls_used_left_out: 2, on_mode: null, ...over,
 });
 const inOn = (over: Partial<OnNumbers> = {}): OnNumbers => ({
-  calls: 20, applied: 18, full_avg: 14, deferred_avg: 96.5, read_calls: 15, written_calls: 4, saved_per_call: 7000,
+  calls: 20, applied: 18, full_avg: 14, deferred_avg: 96.5, loaded_avg: 0, loaded_tokens_avg: 0, read_calls: 15,
+  written_calls: 4, saved_per_call: 7000,
   turns: 5, loads_per_turn: 1.4, refusals_per_turn: 0.2, fallbacks: 1,
   not_applied: [{ why: 'model', calls: 1 }], ...over,
 });
@@ -94,6 +95,11 @@ describe('tool loading: the words', () => {
       '20 calls sent with every tool in full: the model client in use cannot leave tools out.',
     ]);
     expect(onLines(inOn({ loads_per_turn: null, refusals_per_turn: null }))).toHaveLength(5); // tool calls not recorded
+    // tools loaded earlier in a turn are carried in the messages, not left out and not counted as saved
+    expect(onLines(inOn({ loaded_avg: 1.5, loaded_tokens_avg: 620 }))[2]).toBe(
+      'They also carried 1.5 tools loaded earlier in their turn on average, about 620 tokens in the messages, not counted as saved.',
+    );
+    expect(onLines(inOn({ loaded_avg: 1.5, loaded_tokens_avg: 620 }))).toHaveLength(7);
     expect(onLines(inOn({ not_applied: [{ why: 'new', calls: 2 }] })).at(-1))
       .toBe('2 calls sent with every tool in full: for a reason this page does not know.');
     // both modes in one window: Watch only first; only On: its lines alone

@@ -158,8 +158,9 @@ LOADER_SCHEMA: Mapping[str, Any] = MappingProxyType(
     }
 )
 
-# On. The model ids a request may send deferred tools to: each passed scripts/ops/tool_loading_smoke.py through the
-# SDK client (deferred definitions, the loader's references, adaptive thinking, streaming and the aggregated stream).
+# On. The model ids a request may send deferred tools to. Each passed scripts/ops/tool_loading_smoke.py in production
+# through the SDK client (deferred definitions, the loader's references, adaptive thinking, streaming and the
+# aggregated stream): claude-sonnet-5-5 and claude-opus-5-5 the checks it holds, claude-fable-5-2 the whole script.
 # An id is added here only after the smoke script passes on it.
 DEFERRING_MODELS: frozenset[str] = frozenset({"claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5"})
 # The loader's calls and not-loaded answers of a turn that are not counted as tool calls; each later one is.
@@ -404,27 +405,34 @@ def on_record(
     tools: Sequence[Mapping[str, Any]],
     *,
     why: str | None = None,
-    loaded: int = 0,
+    loaded: Sequence[str] = (),
     fallback: str | None = None,
 ) -> dict[str, Any]:
     """The record of one model call in On that sends ``tools``: whether it sent tools deferred (``applied``), why not
     (``why``, outside a window) or after which fault (``fallback``), how many tools it sent in full (the loader not
-    counted) and deferred, the deferred definitions' estimated tokens, the loader's (its list of names), and how many
-    tools the turn had loaded when the call was made."""
-    deferred = [tool for tool in tools if _is_deferred(tool)]
+    counted), how many it left out and their definitions' estimated tokens, the loader's (its list of names), and how
+    many tools the turn had loaded when the call was made (``loaded``, the names) with the estimated tokens of the
+    loaded definitions the call carried in its messages. A deferred tool already loaded is not left out: its definition
+    reaches the model through the messages, so it is counted there and not in the saving (``deferred_tokens_est`` less
+    ``index_tokens_est``)."""
+    names = set(loaded)
+    flagged = [tool for tool in tools if _is_deferred(tool)]
+    deferred = [tool for tool in flagged if tool.get("name") not in names]
+    carried = [tool for tool in flagged if tool.get("name") in names]
     loader = [tool for tool in tools if tool.get("name") == LOADER_NAME and not _is_deferred(tool)]
     return {
         "mode": MODE_ON,
         "kind": kind,
         "sent": len(tools),
-        "applied": bool(deferred),
+        "applied": bool(flagged),
         "why": why,
         "fallback": fallback,
-        "full": len(tools) - len(deferred) - len(loader),
+        "full": len(tools) - len(flagged) - len(loader),
         "deferred": len(deferred),
         "deferred_tokens_est": sum(tokens_est(_definition(tool)) for tool in deferred),
         "index_tokens_est": sum(tokens_est(tool) for tool in loader),
-        "loaded": loaded,
+        "loaded": len(loaded),
+        "loaded_tokens_est": sum(tokens_est(_definition(tool)) for tool in carried),
     }
 
 
@@ -632,7 +640,8 @@ class ToolWindow:
     def record(self, tools: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         """The record of a request of this turn that sends ``tools``."""
         applied = any(_is_deferred(tool) for tool in tools)
-        return on_record(self.kind, tools, loaded=self.loaded_at_request, fallback=None if applied else self.fault)
+        loaded = self.loaded[: self.loaded_at_request]
+        return on_record(self.kind, tools, loaded=loaded, fallback=None if applied else self.fault)
 
     def _counted(self, found: LoaderAnswer) -> LoaderAnswer:
         self.loads += 1

@@ -535,7 +535,8 @@ async def test_the_calls_in_on_per_kind_apart_from_watch_only(db):
         async with db.engine.begin() as conn:
             # turn 1 deferred: read, then written, after a load
             await _call(conn, agent, t1, _on_record("chat", "read", **applied), names, now)
-            await _call(conn, agent, t1, _on_record("chat", "written", **applied, loaded=1), names, now)
+            loaded = {**applied, "deferred": 1, "deferred_tokens_est": 600, "loaded": 1, "loaded_tokens_est": 400}
+            await _call(conn, agent, t1, _on_record("chat", "written", **loaded), names, now)
             # turn 2 fell back after a refused request: every tool in full, the loader still sent
             await _call(
                 conn, agent, t2, _on_record("chat", "read", fallback="refused", index_tokens_est=200), names, now
@@ -555,11 +556,14 @@ async def test_the_calls_in_on_per_kind_apart_from_watch_only(db):
             "calls": 4,
             "applied": 2,
             "full_avg": 3.0,
-            "deferred_avg": 2.0,
+            "deferred_avg": 1.5,
+            "loaded_avg": 0.5,
+            "loaded_tokens_avg": 200,
             "read_calls": 2,
             "written_calls": 1,
-            # read: 800 deferred less the list, and the fallback's list alone; written: 800
-            "saved_per_call": round((((1000 - 200) + (0 - 200)) * 0.1 + (1000 - 200) * 1.25) / 3),
+            # read: 800 deferred less the list, and the fallback's list alone; written after a load: 400 (the loaded
+            # definition, 400, is carried in the messages and not saved)
+            "saved_per_call": round((((1000 - 200) + (0 - 200)) * 0.1 + (600 - 200) * 1.25) / 3),
             "turns": 2,
             "loads_per_turn": 1.0,
             "refusals_per_turn": 0.5,

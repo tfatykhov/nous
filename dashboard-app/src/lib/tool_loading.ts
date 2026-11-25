@@ -47,6 +47,9 @@ export interface OnNumbers {
   /** Per call sent with tools left out: the tools sent in full (the loader not counted) and left out. */
   full_avg: number;
   deferred_avg: number;
+  /** Per such call: the tools loaded earlier in the turn and their definitions' tokens, carried in the messages. */
+  loaded_avg: number;
+  loaded_tokens_avg: number;
   read_calls: number;
   written_calls: number;
   /** Per weighed call, in uncached input tokens' worth; null when no call reported its cache state. */
@@ -240,6 +243,11 @@ export function onLines(o: OnNumbers): string[] {
   const lines = [`On: ${calls(o.calls)} recorded, ${n(o.applied)} sent with tools left out.`];
   if (o.applied > 0) {
     lines.push(`Each of those sent ${n(o.full_avg)} tools in full and left out ${n(o.deferred_avg)} on average.`);
+    if (o.loaded_avg > 0) {
+      lines.push(
+        `They also carried ${n(o.loaded_avg)} tools loaded earlier in their turn on average, about ${n(o.loaded_tokens_avg)} tokens in the messages, not counted as saved.`,
+      );
+    }
   }
   if (o.saved_per_call === null) {
     lines.push('No call reported its cache state, so the saving is not weighed.');

@@ -331,7 +331,7 @@ def test_the_record_of_a_call_that_deferred_and_of_one_after_a_fallback():
     window = _window()
     window.answer(LOADER_NAME, {"names": ["send_email"]})
     sent = window.request_tools()
-    deferred = [t for t in TOOLS if t["name"] in DEFERRED]
+    left_out = [t for t in TOOLS if t["name"] in DEFERRED and t["name"] != "send_email"]
     assert window.record(sent) == {
         "mode": "on",
         "kind": "chat",
@@ -340,20 +340,38 @@ def test_the_record_of_a_call_that_deferred_and_of_one_after_a_fallback():
         "why": None,
         "fallback": None,
         "full": 2,
-        "deferred": 3,
-        "deferred_tokens_est": sum(tokens_est(t) for t in deferred),
+        "deferred": 2,  # send_email was loaded: it is not left out
+        "deferred_tokens_est": sum(tokens_est(t) for t in left_out),
         "index_tokens_est": tokens_est(window.tools[-1]),
         "loaded": 1,
+        "loaded_tokens_est": tokens_est(TOOLS[1]),
     }
     window.refused(400)
     after = window.record(window.request_tools())
     assert (after["applied"], after["fallback"], after["deferred"], after["full"]) == (False, "refused", 0, 5)
     assert after["index_tokens_est"] == tokens_est(window.tools[-1])  # the loader is still sent
+    assert (after["loaded"], after["loaded_tokens_est"]) == (1, 0)  # in full now, and no reference is sent
+
+
+def test_a_loaded_tools_definition_is_no_longer_counted_as_saved():
+    """The call before a load and the one after it differ in their saving by exactly the loaded definition, which the
+    later call records as carried in its messages."""
+    window = _window()
+    before = window.record(window.request_tools())
+    window.answer(LOADER_NAME, {"names": ["send_email"]})
+    after = window.record(window.request_tools())
+    send_email = tokens_est(TOOLS[1])
+    assert before["deferred_tokens_est"] - after["deferred_tokens_est"] == send_email
+    assert (before["loaded"], before["loaded_tokens_est"]) == (0, 0)
+    assert (after["loaded"], after["loaded_tokens_est"]) == (1, send_email)
+    assert (before["deferred"], after["deferred"]) == (3, 2)
+    assert before["index_tokens_est"] == after["index_tokens_est"]  # the same list on every call of the turn
 
 
 def test_a_call_in_on_outside_a_window_records_why_it_was_sent_in_full():
     record = call_record(ON_ALL, "chat", TOOLS, "model")
     assert record["mode"] == "on" and record["applied"] is False and record["why"] == "model"
+    assert (record["loaded"], record["loaded_tokens_est"]) == (0, 0)
     assert (record["full"], record["deferred"], record["deferred_tokens_est"], record["index_tokens_est"]) == (
         5,
         0,

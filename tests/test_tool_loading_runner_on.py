@@ -1004,3 +1004,16 @@ async def test_the_work_views_session_list_leaves_loads_and_not_loaded_answers_o
         assert [t["tool"] for t in row["tools"]] == ["send_email"]
     finally:
         await delete_agent_rows(db, agent)
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_after_a_load_a_call_no_longer_counts_the_loaded_definition_as_saved(path):
+    _on()
+    turn = await _turn(path, [[(LOADER_NAME, {"names": ["send_email"]})], [("send_email", {"to": "a"})]])
+    before, after = turn.watches[0], turn.watches[1]
+    send_email = next(t for t in turn.sent[0]["tools"] if t["name"] == "send_email")
+    definition = tool_loading.tokens_est({k: v for k, v in send_email.items() if k != "defer_loading"})
+    assert before["deferred_tokens_est"] - after["deferred_tokens_est"] == definition
+    assert (before["loaded"], before["loaded_tokens_est"]) == (0, 0)
+    assert (after["loaded"], after["loaded_tokens_est"]) == (1, definition)
+    assert before["index_tokens_est"] == after["index_tokens_est"]

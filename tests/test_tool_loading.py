@@ -475,7 +475,7 @@ def test_a_numbers_row_has_exactly_the_fields_the_card_reads():
     assert set(numbers_row("chat", "Chat", True, None, (0, 0))) == _card_fields(switch, numbers)
     sums = dict.fromkeys(
         ("calls", "applied", "engaged_turns", "read_calls", "written_calls", "read_net", "written_net"), 0
-    ) | {"full_sent": 0, "deferred": 0, "fallbacks": 0}
+    ) | {"full_sent": 0, "deferred": 0, "fallbacks": 0, "loaded": 0, "loaded_tokens": 0}
     row = numbers_row("chat", "Chat", True, None, (0, 0), sums, (0, 0), [("model", 2)])
     assert set(row["on_mode"]) == _card_fields(on_mode)
     assert set(row["on_mode"]["not_applied"][0]) == _card_fields(not_applied)

@@ -41,7 +41,8 @@ const numbers = (over: Partial<KindNumbers> = {}): KindNumbers[] =>
     ...(key === 'chat' ? over : {}),
   }));
 const inOn: OnNumbers = {
-  calls: 6, applied: 5, full_avg: 12, deferred_avg: 40, read_calls: 4, written_calls: 1, saved_per_call: 900,
+  calls: 6, applied: 5, full_avg: 12, deferred_avg: 40, loaded_avg: 0.4, loaded_tokens_avg: 150, read_calls: 4,
+  written_calls: 1, saved_per_call: 900,
   turns: 2, loads_per_turn: 1.5, refusals_per_turn: 0, fallbacks: 0, not_applied: [{ why: 'turn', calls: 1 }],
 };
 const tool = (over: Partial<ToolRow>): ToolRow => ({
@@ -154,6 +155,7 @@ describe('Limits and tools: tool loading', () => {
     expect((within(mode).getByRole('radio', { name: 'On' }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/^In a kind switched on below, the tools outside the core set are left out/)).toBeTruthy();
     expect(screen.getByText('On: 6 calls recorded, 5 sent with tools left out.')).toBeTruthy();
+    expect(screen.getByText(/^They also carried 0\.4 tools loaded earlier in their turn on average, about 150 tokens/)).toBeTruthy();
     expect(screen.getByText('1 call sent with every tool in full: their turn began before On was chosen.')).toBeTruthy();
     expect(screen.queryByText(/^On does nothing on this server/)).toBeNull(); // this server's client can
   });

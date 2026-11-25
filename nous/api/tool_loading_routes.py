@@ -103,6 +103,8 @@ _CALLS = text(
            count(DISTINCT w.turn_id) AS turns,
            count(*) FILTER (WHERE {_APPLIED}) AS applied,
            coalesce(sum(CAST(w.record->>'full' AS integer)) FILTER (WHERE {_APPLIED}), 0) AS full_sent,
+           coalesce(sum(CAST(w.record->>'loaded' AS integer)) FILTER (WHERE {_APPLIED}), 0) AS loaded,
+           coalesce(sum(CAST(w.record->>'loaded_tokens_est' AS bigint)) FILTER (WHERE {_APPLIED}), 0) AS loaded_tokens,
            count(*) FILTER (WHERE w.record->>'fallback' IS NOT NULL) AS fallbacks,
            count(DISTINCT w.turn_id) FILTER (WHERE {_ENGAGED}) AS engaged_turns
     {_WATCHED}
@@ -321,7 +323,10 @@ def on_numbers(row: dict[str, Any], loads: tuple[int, int] | None, why: list[tup
     of ``_CALLS`` for mode On; ``loads``, the loader's calls and the calls of a tool not loaded yet in the turns that
     deferred (``_LOADS``, None when tool calls are not recorded); ``why``, each reason calls were sent in full, with
     their count (``_WHY``). The saving is weighed by each call's cache state as in Watch only, over every call in On (a
-    call sent in full saved nothing; one sent in full after a fault also carried the loader)."""
+    call sent in full saved nothing; one sent in full after a fault also carried the loader). A tool loaded earlier in
+    the turn is not left out: per call sent deferred, ``deferred_avg`` counts the tools left out, and ``loaded_avg``
+    and ``loaded_tokens_avg`` the loaded ones and their definitions, carried in the messages and not counted as
+    saved."""
     applied, turns = int(row["applied"]), int(row["engaged_turns"])
     weighed = int(row["read_calls"]) + int(row["written_calls"])
     saved = float(row["read_net"]) * READ_RATIO + float(row["written_net"]) * WRITE_RATIO
@@ -334,6 +339,8 @@ def on_numbers(row: dict[str, Any], loads: tuple[int, int] | None, why: list[tup
         "applied": applied,
         "full_avg": round(int(row["full_sent"]) / applied, 1) if applied else 0,
         "deferred_avg": round(int(row["deferred"]) / applied, 1) if applied else 0,
+        "loaded_avg": round(int(row["loaded"]) / applied, 1) if applied else 0,
+        "loaded_tokens_avg": round(int(row["loaded_tokens"]) / applied) if applied else 0,
         "read_calls": int(row["read_calls"]),
         "written_calls": int(row["written_calls"]),
         "saved_per_call": round(saved / weighed) if weighed else None,

@@ -2,9 +2,10 @@
 
 On sends tools outside the core set with ``defer_loading`` and answers Nous's own loader with ``tool_reference``
 blocks (nous/api/tool_loading.py). A model id goes into ``tool_loading.DEFERRING_MODELS`` only after this script passes
-on it; the checks are those the first ids passed on. It drives ``SdkAnthropicClient`` (``call``, ``stream`` and
-``call_streaming_aggregated``) with the settings of the process it runs in, so run it inside the agent's container,
-where the credentials and the installed SDK are production's, with the model id as its one argument:
+on it: claude-sonnet-5-5 and claude-opus-5-5 passed its checks, claude-fable-5-2 the whole script, in production.
+It drives ``SdkAnthropicClient`` (``call``, ``stream`` and ``call_streaming_aggregated``) with the settings of the
+process it runs in, so run it inside the agent's container, where the credentials and the installed SDK are
+production's, with the model id as its one argument:
 
     docker exec -i nous-agent python - claude-sonnet-5-5 < scripts/ops/tool_loading_smoke.py
 
