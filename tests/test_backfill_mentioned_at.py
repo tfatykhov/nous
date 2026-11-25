@@ -421,6 +421,52 @@ async def test_a_stop_after_the_manifest_write_keeps_the_committed_batches_and_s
         assert _without(after[fid], "updated_at") == _without(rows[fid], "updated_at")
 
 
+async def _hold(db, fid: UUID, mode: str):
+    """Another transaction holding a row lock on ``fid`` until it is rolled back."""
+    conn = await db.engine.connect()
+    trans = await conn.begin()
+    await conn.execute(text(f"SELECT id FROM heart.facts WHERE id = :i FOR {mode}"), {"i": fid})
+    return conn, trans
+
+
+async def test_the_batch_lock_does_not_wait_on_a_foreign_key_check(db, agents, manifest, monkeypatch):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    monkeypatch.setattr(bf, "LOCK_TIMEOUT", "200ms")
+    first = (await bf.run(db, agent, apply=False)).plan.fills[0][0]
+    conn, trans = await _hold(db, first, "KEY SHARE")  # what an insert that points at the fact takes
+    try:
+        report = await _apply_both(db, agent, manifest)
+    finally:
+        await trans.rollback()
+        await conn.close()
+
+    assert report.error is None and report.written == len(report.plan.fills)
+
+
+async def test_a_lock_wait_stops_the_run_with_a_summary_of_what_was_committed(db, agents, manifest, monkeypatch):
+    agent = agents()
+    await _scenario(db, agent, agents("other"))
+    monkeypatch.setattr(bf, "LOCK_TIMEOUT", "200ms")
+    plan = (await bf.run(db, agent, apply=False)).plan
+    path = manifest()
+    conn, trans = await _hold(db, plan.fills[3][0], "NO KEY UPDATE")  # a row of batch 2, held by another writer
+    try:
+        report = await bf.run(db, agent, apply=True, manifest=path, reordering=True, batch_size=3)
+    finally:
+        await trans.rollback()
+        await conn.close()
+
+    assert (report.batches, report.written) == (1, 3)
+    assert report.error.startswith("batch 2 (rows 4-6 of ") and "lock timeout" in report.error
+    assert "\n" not in report.error
+    said = await _said(db, agent)
+    assert [said[fid] is not None for fid, _v, _r in plan.fills[:6]] == [True] * 3 + [False] * 3
+    assert len(_manifest_lines(path)) == 3  # batch 2 stopped before its manifest lines
+    out = "\n".join(bf.format_report(report))
+    assert f"Committed before it: 1 batches, 3 of {len(plan.fills)} rows (both tiers)" in out and path in out
+
+
 async def test_undo_restores_skips_changed_rows_and_never_touches_another_agent(db, agents, manifest):
     agent, other = agents(), agents("other")
     await _scenario(db, agent, other)

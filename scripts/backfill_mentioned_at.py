@@ -50,7 +50,8 @@ Side effects of --apply, in either tier:
 
 Record and undo. --apply needs --manifest PATH, a new file: before each batch commits, one JSON line per row it writes
 (agent_id, id, rule, mentioned_at, learned_at) is written and flushed to disk. A run that stops prints what it
-committed and where the manifest is; the lines of the batch that failed are there too, and their rows are still NULL.
+committed and where the manifest is; a batch that failed after its lines were written leaves them there, with its rows
+still NULL.
 --undo-from PATH sets mentioned_at back to NULL for the agent's rows the manifest lists, only where the stored value
 still equals the manifest's, dry run unless --apply, and counts the rows it skips. It cannot undo: the updated_at move
 (it moves again), the profiles made due (due again), a time that a merge written in between inherited from a filled
@@ -483,7 +484,7 @@ async def _batches(
                 before,
                 after,
                 f"batch {batches + 1} (rows {start + 1}-{start + len(batch)} of {len(pairs)}) rolled back: "
-                f"{type(exc).__name__}: {exc}",
+                f"{type(exc).__name__}: {(str(exc).splitlines() or [''])[0]}",  # a database error's first line
             )
         batches += 1
         written += len(changed)
@@ -715,8 +716,9 @@ def format_report(report: Report, limit: int | None = None, calls_per_day: int |
         out += [
             f"STOPPED: {report.error}",
             f"Committed before it: {report.batches} batches, {report.written} of {report.planned} rows ({tier}), "
-            f"listed in the manifest {report.manifest}. The failed batch's lines are in it too; its rows are still "
-            "NULL, and --undo-from skips them. Run the dry run again, then --apply with a new --manifest path.",
+            f"listed in the manifest {report.manifest}. If the failed batch got as far as its manifest lines, they "
+            "are there too; its rows are still NULL, and --undo-from skips them. Run the dry run again, then --apply "
+            "with a new --manifest path.",
         ]
         return out
     if not plan.fills:
