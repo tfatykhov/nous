@@ -258,7 +258,7 @@ async def test_the_numbers_per_kind_weigh_each_call_by_its_cache_state(db):
             await _tool_call(conn, other, t2, "send_email", now, "interactive", "s2")
         RuntimeConfig.get().set_tool_loading(agent, ToolLoadingConfig(mode="watch", kinds=frozenset({"chat"})))
         body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
-        numbers = {row["kind"]: row for row in body["numbers"]}
+        numbers = {row["key"]: row for row in body["numbers"]}
         chat = numbers["chat"]
         assert (chat["on"], chat["calls"], chat["read_calls"], chat["written_calls"]) == (True, 4, 2, 1)
         assert (chat["deferred_avg"], chat["deferred_tokens_avg"], chat["index_tokens_avg"]) == (2.0, 1000, 200)
@@ -271,7 +271,7 @@ async def test_the_numbers_per_kind_weigh_each_call_by_its_cache_state(db):
         assert numbers["subtask"]["calls"] == 0 and numbers["subtask"]["saved_per_call"] is None
         # a 30-day window takes the older call in
         wide = (await _send(_app(db, _settings(agent)), "GET", f"{PATH}?days=30", headers=OWNER)).json()
-        assert {row["kind"]: row["calls"] for row in wide["numbers"]}["chat"] == 5
+        assert {row["key"]: row["calls"] for row in wide["numbers"]}["chat"] == 5
         # the tool table: calls and sessions in 30 days over every kind of call, this agent's only
         rows = {row["name"]: row for row in body["tools"]}
         assert (rows["bash"]["calls_30d"], rows["bash"]["sessions_30d"]) == (2, 2)
@@ -291,7 +291,7 @@ async def test_without_the_tool_call_log_the_usage_numbers_are_null(db):
                 conn, agent, uuid.uuid4(), _record("chat", 2, 1000, 200, "read", ["bash"]), ["bash"], datetime.now(UTC)
             )
         body = (await _send(_app(db, _settings(agent, tool_call_log_enabled=False)), "GET", PATH, headers=OWNER)).json()
-        chat = next(row for row in body["numbers"] if row["kind"] == "chat")
+        chat = next(row for row in body["numbers"] if row["key"] == "chat")
         assert chat["calls"] == 1 and chat["turns_used_left_out"] is None and chat["calls_used_left_out"] is None
         assert body["recorded"] == {"model_calls": True, "tool_calls": False}
         assert all(row["calls_30d"] is None for row in body["tools"])
@@ -314,7 +314,7 @@ async def test_many_watched_calls_and_tool_calls_in_one_turn_are_each_counted_on
             for name in ("send_email", "send_email", "dag_create", "bash", "bash"):
                 await _tool_call(conn, agent, turn, name, now, "interactive", "s1")
         body = (await _send(_app(db, _settings(agent)), "GET", PATH, headers=OWNER)).json()
-        chat = next(row for row in body["numbers"] if row["kind"] == "chat")
+        chat = next(row for row in body["numbers"] if row["key"] == "chat")
         assert (chat["calls"], chat["turns"], chat["turns_used_left_out"], chat["calls_used_left_out"]) == (6, 1, 1, 3)
     finally:
         await _cleanup(db, agent)

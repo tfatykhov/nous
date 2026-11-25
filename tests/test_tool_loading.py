@@ -447,3 +447,16 @@ def test_a_value_whose_reading_raises_is_off_with_its_class():
 
     config, problem = parse_tool_loading(Explodes(version=1))
     assert config == OFF and "RuntimeError" in problem and "boom" not in problem
+
+
+def test_a_numbers_row_has_exactly_the_fields_the_card_reads():
+    """Both sides of the contract: the server's row and the card's ``KindNumbers`` (with ``KindSwitch``) name the same
+    fields, so a keyed list on the card never meets a missing key."""
+    from nous.api.tool_loading_routes import numbers_row
+
+    source = (Path(__file__).resolve().parents[1] / "dashboard-app/src/lib/tool_loading.ts").read_text(encoding="utf-8")
+    switch = re.search(r"export interface KindSwitch \{([^}]*)\}", source).group(1)
+    numbers = re.search(r"export interface KindNumbers extends KindSwitch \{(.*?)\n\}", source, re.S).group(1)
+    card = set(re.findall(r"(\w+)\??:", re.sub(r"/\*.*?\*/", "", switch + ";" + numbers, flags=re.S)))
+
+    assert card and set(numbers_row("chat", "Chat", True, None, (0, 0))) == card

@@ -227,6 +227,12 @@ _NO_CALLS = {
 }
 
 
+def numbers_row(key: str, words: str, on: bool, row: Any, used: tuple[int, int] | None) -> dict[str, Any]:
+    """One row of the card's numbers, with the fields the card's ``KindNumbers`` reads (dashboard-app
+    ``lib/tool_loading.ts``): the kind's ``key``, its words, whether it is watched, and ``kind_numbers``."""
+    return {"key": key, "words": words, "on": on, **kind_numbers(row or _NO_CALLS, used)}
+
+
 def kind_numbers(row: dict[str, Any], used: tuple[int, int] | None) -> dict[str, Any]:
     """One kind of call's numbers over the window (``row``, the sums of ``_CALLS``; ``used``, the turns and calls of
     ``_USED``, None when tool calls are not recorded): the calls recorded, what each would have left out on average,
@@ -284,12 +290,7 @@ def build_tool_loading_routes(*, database: Any, settings: Any, dispatcher: Any, 
                 result = await session.execute(_USED, {"agent": agent_id, "since": since})
                 used = {row["kind"]: (int(row["turns"]), int(row["calls"])) for row in result.mappings()}
         return [
-            {
-                "kind": key,
-                "words": words,
-                "on": key in config.kinds,
-                **kind_numbers(rows.get(key, _NO_CALLS), None if used is None else used.get(key, (0, 0))),
-            }
+            numbers_row(key, words, key in config.kinds, rows.get(key), None if used is None else used.get(key, (0, 0)))
             for key, words in KINDS.items()
         ]
 

@@ -237,7 +237,7 @@ async def _one_startup_pass(settings: SimpleNamespace, database: _Database) -> N
 
 
 _TOOL_TABLES = [("tool_call_log", 30), ("agent_turn_log", 30)]
-# The model-call sweep deletes the calls and, in the same transaction, their F120 watch rows of the same age.
+# The model-call sweep deletes the calls and then, in a transaction of their own, their F120 watch rows of the same age.
 _MODEL_TABLES = [("model_call_log", 7), ("tool_loading_watch", 7)]
 
 
