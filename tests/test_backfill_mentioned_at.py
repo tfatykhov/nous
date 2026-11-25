@@ -389,8 +389,15 @@ async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents
     three_merged = await merge("contradiction_resolution", _at(3, day=1))
     for minute in (4, 5, 6):
         await _fact(db, agent, "user_direct", _at(9, minute), superseded_by=three_merged, reason="merged")
+    # Sources learned after the fact they point at: pointed at an older fact they duplicated, not merged into it.
+    older_cluster = await merge("cluster_consolidation", _at(3, day=1))
+    later = await _fact(db, agent, "user_direct", _at(5, day=1), superseded_by=older_cluster, reason="merged")
+    await _cluster_event(db, agent, older_cluster, [later])
+    older_contra = await merge("contradiction_resolution", _at(3, day=1))
+    await _fact(db, agent, "user_direct", _at(9, 7), superseded_by=older_contra, reason="merged")
+    await _fact(db, agent, "user_direct", _at(6, day=1), superseded_by=older_contra, reason="merged")
     # A cycle: each merge lists the other, so neither ever has a time.
-    c1, c2 = await merge("cluster_consolidation", _at(3, day=1)), await merge("cluster_consolidation", _at(4, day=1))
+    c1, c2 = await merge("cluster_consolidation", _at(3, day=1)), await merge("cluster_consolidation", _at(3, day=1))
     await _cluster_event(db, agent, c1, [c2])
     await _cluster_event(db, agent, c2, [c1])
     # A merge whose source is a merge that stays NULL reads that source as its learned_at, like any untimed source.
@@ -401,16 +408,19 @@ async def test_a_merge_whose_sources_cannot_be_established_stays_null(db, agents
 
     said = await _said(db, agent)
     reason = dict(report.plan.kept)
-    assert [reason[m] for m in (no_event, two_events, unknown_id, one_merged, three_merged, c1, c2)] == [
+    kept = (no_event, two_events, unknown_id, one_merged, three_merged, older_cluster, older_contra, c1, c2)
+    assert [reason[m] for m in kept] == [
         bf.KEPT_NO_EVENT,
         bf.KEPT_EVENTS,
         bf.KEPT_BAD_LIST,
         bf.KEPT_NOT_TWO,
         bf.KEPT_NOT_TWO,
+        bf.KEPT_SOURCE_LATER,
+        bf.KEPT_SOURCE_LATER,
         bf.KEPT_WAITING,
         bf.KEPT_WAITING,
     ]
-    assert all(said[m] is None for m in (no_event, two_events, unknown_id, one_merged, three_merged, c1, c2))
+    assert all(said[m] is None for m in kept)
     assert said[over_kept] == _at(3, day=1)
 
 

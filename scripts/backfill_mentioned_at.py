@@ -19,7 +19,7 @@ truthful source stays NULL. Each rule stores what the writer of that source stor
      that names it as merged_fact_id; a contradiction merge (contradiction_resolution) only when exactly two facts
      stamped 'merged' point at it. A merge waits while one of its sources is a merge this run can still fill, and the
      rule repeats until a pass fills nothing (a merge of a merge). A merge whose sources cannot be established stays
-     NULL.
+     NULL, and so does one with a source learned after it (sources pointed at an older fact they duplicated).
   Stays NULL, counted under its reason: sleep_reflection (the episodes it reflected on are not recorded on the row),
   supersede (a REST edit or a sleep UPDATES replacement), an MCP teach call (mcp, mcp:...), the review rule
   (a2ui_review), the rubric proposal (f024_phase3b), exemplar_extractor (the live leg stores the time of its write,
@@ -38,7 +38,9 @@ rolls the batch back and stops if any hash differs. No trigger is disabled and n
 set_updated_at trigger moves updated_at of every written row to the time of the write, as for any UPDATE: the
 heartbeat's stale-facts count (active facts with updated_at older than 30 days) leaves those rows out for 30 days, and
 anything that selects facts by updated_at (the rollback query of scripts/backfill_supersession.py) sees them as
-changed now. Every other column, search_tsv and the embedding included, is unchanged. A second --apply finds nothing.
+changed now. Every other column, search_tsv and the embedding included, is unchanged. A run that stops (a lock wait
+over 5 s, a hash difference) keeps the batches it committed; the next run plans again from what is stored. A second
+--apply finds nothing.
 
 Usage, from the repository root (or with the nous package importable)::
 
@@ -91,6 +93,7 @@ KEPT_NO_EVENT = "cluster merge: no merge event names it"
 KEPT_EVENTS = "cluster merge: more than one merge event names it"
 KEPT_BAD_LIST = "cluster merge: a listed source is not a fact of this agent"
 KEPT_NOT_TWO = "contradiction merge: not exactly two merged sources point at it"
+KEPT_SOURCE_LATER = "merge: a source was learned after it, so it was not written from them"
 KEPT_WAITING = "merge: a source merge got no time"
 
 SAMPLE = 5
@@ -176,19 +179,25 @@ def _merge_sources(
 ) -> tuple[list[UUID] | None, str | None]:
     """The source list the merge recorded, or (None, reason) when it cannot be established."""
     if m.source == CONTRADICTION_MERGE:
-        pointers = merged_into.get(m.id, [])
-        return (pointers, None) if len(pointers) == 2 else (None, KEPT_NOT_TWO)
-    lists = cluster_lists.get(m.id, [])
-    if not lists:
-        return None, KEPT_NO_EVENT
-    if len(lists) > 1:
-        return None, KEPT_EVENTS
-    try:
-        ids = [UUID(s) for s in lists[0]]
-    except (TypeError, ValueError):
-        return None, KEPT_BAD_LIST
-    if not ids or any(i not in facts for i in ids):
-        return None, KEPT_BAD_LIST
+        ids = merged_into.get(m.id, [])
+        if len(ids) != 2:
+            return None, KEPT_NOT_TWO
+    else:
+        lists = cluster_lists.get(m.id, [])
+        if not lists:
+            return None, KEPT_NO_EVENT
+        if len(lists) > 1:
+            return None, KEPT_EVENTS
+        try:
+            ids = [UUID(s) for s in lists[0]]
+        except (TypeError, ValueError):
+            return None, KEPT_BAD_LIST
+        if not ids or any(i not in facts for i in ids):
+            return None, KEPT_BAD_LIST
+    # A merge writes its fact after its sources. A source learned later means the sources were pointed at an older
+    # fact whose content they duplicated: that fact was not written from them.
+    if any(facts[i].learned_at > m.learned_at for i in ids):
+        return None, KEPT_SOURCE_LATER
     return ids, None
 
 
@@ -347,7 +356,7 @@ def _digest(hashes: dict[UUID, str]) -> str:
     return hashlib.md5("".join(hashes[i] for i in sorted(hashes, key=str)).encode()).hexdigest()
 
 
-async def run(db: Database, agent_id: str, *, apply: bool, limit: int | None = None, batch_size: int = 500) -> Report:
+async def run(db: Database, agent_id: str, *, apply: bool, limit: int | None = None, batch_size: int = 100) -> Report:
     """Plan from one read-only snapshot; with ``apply``, write the plan (its first ``limit`` rows) in batches."""
     async with db.session() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
@@ -495,7 +504,7 @@ def main() -> None:
     parser.add_argument("--agent-id", "--agent", dest="agent_id", required=True, help="Agent whose facts to fill.")
     parser.add_argument("--apply", action="store_true", help="Write (default: dry run, nothing written).")
     parser.add_argument("--limit", type=int, default=None, help="With --apply, write only the first N planned rows.")
-    parser.add_argument("--batch-size", type=int, default=500, help="Rows per transaction (default 500).")
+    parser.add_argument("--batch-size", type=int, default=100, help="Rows per transaction (default 100).")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
