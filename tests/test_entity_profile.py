@@ -121,10 +121,18 @@ async def _row(session, agent: str, key: str) -> EntityProfile | None:
 
 async def _a_day_later(session, agent: str, *keys: str) -> None:
     """Move the agent's rows (or those of ``keys``) 25 hours into the past: their 24 hours have passed."""
+    await _ago(session, agent, timedelta(hours=25), *keys)
+
+
+async def _days_later(session, agent: str, days: int, *keys: str) -> None:
+    await _ago(session, agent, timedelta(days=days), *keys)
+
+
+async def _ago(session, agent: str, age: timedelta, *keys: str) -> None:
     stmt = update(EntityProfile).where(EntityProfile.agent_id == agent)
     if keys:
         stmt = stmt.where(EntityProfile.entity_key.in_(keys))
-    await session.execute(stmt.values(written_at=datetime.now(UTC) - timedelta(hours=25)))
+    await session.execute(stmt.values(written_at=datetime.now(UTC) - age))
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +246,9 @@ async def test_a_not_entity_verdict_is_stored_and_asked_again_only_when_the_fact
     held = await writer.run_sleep(session=session)
     assert held["held"] == 1 and len(llm.prompts) == 1  # the verdict's call is less than 24 hours old
     await _a_day_later(session, agent)
+    resting = await writer.run_sleep(session=session)
+    assert resting["not_entity_resting"] == 1 and len(llm.prompts) == 1  # 3 facts, not yet twice the verdict's 2
+    await _keyed(session, agent, "spreadsheet", {"content": "the spreadsheet has a chart"})
     third = await writer.run_sleep(session=session)
     assert third["not_entity"] == 1 and len(llm.prompts) == 2
 
@@ -387,6 +398,8 @@ async def test_a_first_reply_that_cannot_be_used_leaves_a_failed_row_that_counts
     assert await writer.store.written_last_day(session=session) == 1
     assert (await writer.run_sleep(session=session))["held"] == 1 and llm.keys == ["zephyrine"]
     await _a_day_later(session, agent)
+    assert (await writer.run_sleep(session=session))["failed_resting"] == 1 and llm.keys == ["zephyrine"]
+    await _days_later(session, agent, 8)
     await writer.run_sleep(session=session)
     assert llm.keys == ["zephyrine", "zephyrine"]
 
@@ -596,10 +609,210 @@ async def test_new_keys_are_asked_before_a_not_entity_verdict_is_asked_again(db,
     await writer.run_sleep(session=session)
     await _a_day_later(session, agent)
 
-    await _keyed(session, agent, "spreadsheet", {"content": "one more"})
+    # The verdict's key doubles its facts, so it is due again; the new key still goes first.
+    await _keyed(session, agent, "spreadsheet", *({"content": f"one more {i}"} for i in range(4)))
     await _keyed(session, agent, "zephyrine", {}, {})
     stats = await writer.run_sleep(session=session)
     assert llm.keys == ["spreadsheet", "zephyrine"] and stats["skipped_cap"] == 1
+
+
+@pytest.mark.postgres_only
+async def test_a_not_entity_verdict_is_asked_again_after_thirty_days(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {})
+    llm = FakeLLM({"spreadsheet": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    await _keyed(session, agent, "spreadsheet", {"content": "the spreadsheet has a new tab"})
+
+    await _days_later(session, agent, 29)
+    assert (await writer.run_sleep(session=session))["not_entity_resting"] == 1 and len(llm.prompts) == 1
+    await _days_later(session, agent, 31)
+    assert (await writer.run_sleep(session=session))["not_entity"] == 1 and len(llm.prompts) == 2
+
+
+@pytest.mark.postgres_only
+async def test_the_owners_rebuild_asks_about_a_resting_key(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {})
+    await _keyed(session, agent, "quillon", {}, {})
+    llm = FakeLLM({"spreadsheet": {"verdict": "not_entity"}, "quillon": None})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    await _keyed(session, agent, "spreadsheet", {"content": "a change"})
+    await _keyed(session, agent, "quillon", {"content": "a change"})
+    await _days_later(session, agent, 2)
+    stats = await writer.run_sleep(session=session)
+    assert (stats["not_entity_resting"], stats["failed_resting"], len(llm.prompts)) == (1, 1, 2)
+
+    assert (await writer.rebuild("spreadsheet", session=session))["outcome"] == "not_entity"
+    assert (await writer.rebuild("quillon", session=session))["outcome"] == "failed_closed"
+    assert len(llm.prompts) == 4
+
+
+@pytest.mark.postgres_only
+async def test_a_reply_with_characters_postgres_cannot_store_is_stored_without_them(db, session):
+    agent = _agent()
+    (f1, _f2) = await _keyed(session, agent, "zephyrine", {}, {})
+    reply = _entity(_line("Zephyrine\x00 keeps bees.\ud800", f1), name="Zephy\x00rine")
+    stats = await _writer(db, agent, FakeLLM({"zephyrine": reply})).run_sleep(session=session)
+
+    row = await _row(session, agent, "zephyrine")
+    assert stats["written"] == 1 and stats["errors"] == 0
+    assert (row.display_name, [ln["text"] for ln in row.lines]) == ("Zephyrine", ["Zephyrine keeps bees."])
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_count_makes_no_call(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm)
+    writer.store.count_call = AsyncMock(side_effect=RuntimeError("the database is gone"))
+    stats = await writer.run_sleep(session=session)
+    assert (stats["errors"], stats["asked"], llm.prompts) == (1, 0, [])
+
+
+@pytest.mark.postgres_only
+async def test_a_held_profile_loses_its_lines_on_dead_facts_without_a_call(db, session):
+    agent = _agent()
+    f1, f2, _f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2))})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    written_at = (await _row(session, agent, "zephyrine")).written_at
+    old_hash = (await _row(session, agent, "zephyrine")).source_hash
+
+    await session.execute(update(Fact).where(Fact.id == f1.id).values(active=False))
+    stats = await writer.run_sleep(session=session)
+    row = await _row(session, agent, "zephyrine")
+    assert (stats["held"], stats["stale_dropped"], len(llm.prompts)) == (1, 1, 1)
+    assert [ln["text"] for ln in row.lines] == ["Zephyrine sails."]
+    # No call: written_at stays, and the old digest keeps the profile due once its 24 hours pass.
+    assert (row.written_at, row.source_hash) == (written_at, old_hash)
+
+
+@pytest.mark.postgres_only
+async def test_a_profile_past_the_day_or_failing_closed_loses_its_lines_on_dead_facts(db, session):
+    agent = _agent()
+    f1, f2, _f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
+    llm = FakeLLM({"zephyrine": _entity(_line("Zephyrine keeps bees.", f1), _line("Zephyrine sails.", f2))})
+    writer = _writer(db, agent, llm, entity_profile_max_calls_per_day=1)
+    await writer.run_sleep(session=session)
+    await _a_day_later(session, agent)
+
+    # Past the day's calls: a new key takes the one call, and zephyrine's dead line goes without one.
+    await session.execute(update(Fact).where(Fact.id == f1.id).values(active=False))
+    await _keyed(session, agent, "quillon", {}, {})
+    llm.replies["quillon"] = {"verdict": "not_entity"}
+    stats = await writer.run_sleep(session=session)
+    assert (stats["skipped_cap"], stats["stale_dropped"]) == (1, 1)
+    assert [ln["text"] for ln in (await _row(session, agent, "zephyrine")).lines] == ["Zephyrine sails."]
+
+    # Failing closed: the reply is unusable, the old lines stay but not the one on a fact that died since.
+    await _a_day_later(session, agent)
+    await session.execute(update(Fact).where(Fact.id == f2.id).values(active=False))
+    llm.replies["zephyrine"] = None
+    stats = await writer.run_sleep(session=session)
+    assert (stats["failed_closed"], stats["stale_dropped"]) == (1, 1)
+    assert (await _row(session, agent, "zephyrine")).lines == []
+
+
+@pytest.mark.postgres_only
+async def test_an_owner_key_written_in_the_last_day_is_turned_into_an_owner_row_only_after_it(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "pat", {}, {})
+    llm = FakeLLM({"pat": {"verdict": "not_entity"}})
+    await _writer(db, agent, llm).run_sleep(session=session)
+
+    owner = _writer(db, agent, llm, entity_profile_owner_keys=["pat"])
+    assert (await owner.rebuild("pat", session=session))["outcome"] == "held"
+    assert (await owner.run_sleep(session=session))["held"] == 1
+    assert (await _row(session, agent, "pat")).status == "not_entity"
+    assert await owner.store.written_last_day(session=session) == 1
+    await _a_day_later(session, agent)
+    assert (await owner.rebuild("pat", session=session))["outcome"] == "owner"
+    assert len(llm.prompts) == 1
+
+
+def test_a_source_row_shows_a_bounded_subject_and_source():
+    from nous.heart.entity_profile import SOURCE_CHARS, SUBJECT_CHARS
+
+    fact = _mem_fact("keeps bees", subject="s" * 500, source="r" * 500)
+    (row,) = [ln for ln in build_prompt("zephyrine", [fact], None, _settings("a")).splitlines() if ln.startswith("[")]
+    assert "s" * SUBJECT_CHARS in row and "s" * (SUBJECT_CHARS + 1) not in row
+    assert "r" * SOURCE_CHARS in row and "r" * (SOURCE_CHARS + 1) not in row
+
+
+# ---------------------------------------------------------------------------
+# The production transaction path (session=None): each entity commits on its own
+# ---------------------------------------------------------------------------
+
+
+async def _commit_keyed(db, agent: str, key: str, n: int) -> None:
+    async with db.session() as s:
+        facts = [
+            Fact(id=uuid.uuid4(), agent_id=agent, content=f"{key} fact {i}", category="person", subject="someone")
+            for i in range(n)
+        ]
+        s.add_all(facts)
+        await s.flush()
+        s.add_all([FactEntityKey(fact_id=f.id, entity_key=key, agent_id=agent) for f in facts])
+        await s.commit()
+
+
+async def _purge(db, agent: str) -> None:
+    async with db.session() as s:
+        await s.execute(delete(EntityProfile).where(EntityProfile.agent_id == agent))
+        await s.execute(delete(FactEntityKey).where(FactEntityKey.agent_id == agent))
+        await s.execute(delete(Fact).where(Fact.agent_id == agent))
+        await s.commit()
+
+
+@pytest.mark.postgres_only
+async def test_a_call_whose_result_write_fails_is_counted_and_not_asked_again_for_a_day(db):
+    agent = _agent()
+    try:
+        await _commit_keyed(db, agent, "zephyrine", 2)
+        llm = FakeLLM({"zephyrine": {"verdict": "not_entity"}})
+        writer = _writer(db, agent, llm)
+        writer.store.write = AsyncMock(side_effect=RuntimeError("the result write failed"))
+        first = await writer.run_sleep()
+        second = await writer.run_sleep()
+
+        assert (first["errors"], second["held"], len(llm.prompts)) == (1, 1, 1)
+        store = EntityProfileStore(db, agent)
+        assert await store.written_last_day() == len(llm.prompts)
+        assert (await store.get("zephyrine"))["status"] == "failed"
+    finally:
+        await _purge(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_one_keys_failed_result_write_leaves_the_others_row_committed_and_its_own_call_counted(db):
+    agent = _agent()
+    try:
+        await _commit_keyed(db, agent, "alder", 3)
+        await _commit_keyed(db, agent, "birchwood", 2)
+        llm = FakeLLM({"alder": {"verdict": "not_entity"}, "birchwood": {"verdict": "not_entity"}})
+        writer = _writer(db, agent, llm)
+        real_write = writer.store.write
+
+        async def write(key, *args, **kwargs):
+            if key == "birchwood":
+                raise RuntimeError("the result write failed")
+            return await real_write(key, *args, **kwargs)
+
+        writer.store.write = write
+        stats = await writer.run_sleep()
+
+        assert (stats["not_entity"], stats["errors"], llm.keys) == (1, 1, ["alder", "birchwood"])
+        store = EntityProfileStore(db, agent)
+        rows = await store.rows(["alder", "birchwood"])
+        assert (rows["alder"]["status"], rows["birchwood"]["status"]) == ("not_entity", "failed")
+        assert await store.written_last_day() == 2
+    finally:
+        await _purge(db, agent)
 
 
 @pytest.mark.postgres_only
@@ -908,30 +1121,35 @@ async def _drop_rows(db, agent: str) -> None:
         await s.commit()
 
 
+def _stored_line(line_id: str, text: str, fact_id: str) -> dict:
+    return {"id": line_id, "text": text, "fact_ids": [fact_id], "said_on": "2026-04-02", "date_from": "learned_at"}
+
+
 @pytest.mark.postgres_only
-async def test_get_lists_the_profiles_and_one_profile_in_full(db):
+async def test_get_lists_the_profiles_and_one_profile_in_full_with_live_lines_only(db):
     agent = _agent()
     store = EntityProfileStore(db, agent)
-    fid = str(uuid.uuid4())
-    line = {
-        "id": "l1",
-        "text": "Zephyrine keeps bees.",
-        "fact_ids": [fid],
-        "said_on": "2026-04-02",
-        "date_from": "learned_at",
-    }
-    await store.write(
-        "zephyrine",
-        "profile",
-        "h",
-        fact_count=12,
-        source_count=12,
-        lines=[line],
-        display_name="Zephyrine",
-        kind="person",
-    )
-    await store.write("spreadsheet", "not_entity", "h2", fact_count=30, source_count=30, lines=[])
     try:
+        await _commit_keyed(db, agent, "zephyrine", 2)
+        async with db.session() as s:
+            live, dead = (await s.execute(select(Fact.id).where(Fact.agent_id == agent))).scalars().all()
+            await s.execute(update(Fact).where(Fact.id == dead).values(active=False))
+            # One fact that names the key in its text but carries no key row.
+            s.add(Fact(id=uuid.uuid4(), agent_id=agent, content="Zephyrine sold honey", category="person"))
+            await s.commit()
+        kept = _stored_line("l1", "Zephyrine keeps bees.", str(live))
+        stale = _stored_line("l2", "Zephyrine sails.", str(dead))
+        await store.write(
+            "zephyrine",
+            "profile",
+            "h",
+            fact_count=12,
+            source_count=12,
+            lines=[kept, stale],
+            display_name="Zephyrine",
+            kind="person",
+        )
+        await store.write("spreadsheet", "not_entity", "h2", fact_count=30, source_count=30, lines=[])
         app = _app(db, agent)
         listed = (await _call(app, "GET", "/entity-profiles")).json()
         assert listed["writer_enabled"] is True  # the default
@@ -939,16 +1157,35 @@ async def test_get_lists_the_profiles_and_one_profile_in_full(db):
         zephyrine = listed["profiles"][1]
         assert set(zephyrine) == {
             "key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at", "lines",
-            "unkeyed_mentions",
         }  # fmt: skip
-        assert (zephyrine["status"], zephyrine["lines"], zephyrine["unkeyed_mentions"]) == ("profile", 1, 0)
+        assert (zephyrine["status"], zephyrine["lines"]) == ("profile", 1)  # the line on a dead fact is not counted
 
         detail = await _call(app, "GET", "/entity-profiles/Zephyrine's")
         assert detail.status_code == 200
         body = detail.json()
-        assert body["lines"] == [line] and body["rejected"] == [] and body["kind"] == "person"
+        assert body["lines"] == [kept] and body["rejected"] == [] and body["kind"] == "person"
+        assert body["unkeyed_mentions"] == 1
         assert "source_hash" not in body and "previous_lines" not in body
         assert (await _call(app, "GET", "/entity-profiles/nobody")).status_code == 404
+    finally:
+        await _purge(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_the_list_takes_a_limit(db):
+    agent = _agent()
+    store = EntityProfileStore(db, agent)
+    for i, key in enumerate(("alder", "birchwood", "cedarfall")):
+        await store.write(key, "not_entity", "h", fact_count=10 + i, source_count=10, lines=[])
+    try:
+        app = _app(db, agent)
+        assert [p["key"] for p in (await _call(app, "GET", "/entity-profiles?limit=2")).json()["profiles"]] == [
+            "cedarfall",
+            "birchwood",
+        ]
+        assert len((await _call(app, "GET", "/entity-profiles?limit=0")).json()["profiles"]) == 1
+        assert len((await _call(app, "GET", "/entity-profiles")).json()["profiles"]) == 3
+        assert (await _call(app, "GET", "/entity-profiles?limit=many")).status_code == 400
     finally:
         await _drop_rows(db, agent)
 

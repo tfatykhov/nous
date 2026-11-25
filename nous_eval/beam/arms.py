@@ -147,6 +147,11 @@ ARM_SETTINGS = frozenset(
 # not recalled -> deactivated) would otherwise wipe the corpus.
 EVAL_OVERRIDES: dict[str, Any] = {"stale_scan_age_days": 36500}
 
+# Set by the harness for every arm that does not name the setting itself (an arm may: these are arm settings), and
+# recorded through SNAPSHOT_FIELDS. The entity profile writer (F119) is on in production, but nothing reads a profile
+# in a turn yet, so an eval run makes no profile calls unless its arm asks for them.
+EVAL_DEFAULTS: dict[str, Any] = {"entity_profile_writer_enabled": False}
+
 # What still runs on the wall clock, recorded with every run.
 CLOCK_NOTES = (
     "Episodes (started_at, ended_at, created_at) and facts (created_at, learned_at, and mentioned_at where the "
@@ -186,6 +191,7 @@ SNAPSHOT_FIELDS = (
     "transcript_message_max_chars",
     "sleep_reflection_hours",
     "stale_scan_age_days",
+    "entity_profile_writer_enabled",
 )
 
 # A database the harness may write: eval and test databases only, unless overridden.
@@ -261,7 +267,7 @@ def check_scratch_db(db_url: str, *, allow_any: bool = False) -> None:
 
 def build_settings(db_url: str, agent_id: str, overrides: dict[str, str]) -> Any:
     """Settings parsed with ``overrides`` in the environment, bound to ``db_url`` and
-    ``agent_id``, with EVAL_OVERRIDES applied."""
+    ``agent_id``, with EVAL_DEFAULTS the overrides do not name and EVAL_OVERRIDES applied."""
     from nous.config import Settings
 
     p = urlparse(db_url.replace("postgresql+asyncpg://", "postgresql://"))
@@ -272,6 +278,8 @@ def build_settings(db_url: str, agent_id: str, overrides: dict[str, str]) -> Any
     for name, value in EVAL_OVERRIDES.items():
         if getattr(base, name) != value:
             logger.info("eval override: %s=%r replaces the configured %r", name, value, getattr(base, name))
+    named = {env_name_to_field().get(name.upper()) for name in overrides}
+    defaults = {name: value for name, value in EVAL_DEFAULTS.items() if name not in named}
     return base.model_copy(
         update={
             "db_host": p.hostname,
@@ -280,6 +288,7 @@ def build_settings(db_url: str, agent_id: str, overrides: dict[str, str]) -> Any
             "db_password": p.password or "",
             "db_name": p.path.strip("/"),
             "agent_id": agent_id,
+            **defaults,
             **EVAL_OVERRIDES,
         }
     )

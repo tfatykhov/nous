@@ -373,6 +373,15 @@ def test_build_settings_applies_override_and_eval_overrides(monkeypatch: pytest.
     assert "NOUS_SLEEP_REFLECTION_HOURS" not in os.environ
 
 
+def test_eval_defaults_apply_unless_the_arm_names_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NOUS_ENTITY_PROFILE_WRITER_ENABLED", "true")  # an environment value is not an arm's
+    assert arms.EVAL_DEFAULTS == {"entity_profile_writer_enabled": False}
+    assert arms.build_settings(DB_URL, "a", {}).entity_profile_writer_enabled is False
+    named = arms.build_settings(DB_URL, "a", {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "true"})
+    assert named.entity_profile_writer_enabled is True
+    assert set(arms.EVAL_DEFAULTS) <= arms.ARM_SETTINGS and set(arms.EVAL_DEFAULTS) <= set(arms.SNAPSHOT_FIELDS)
+
+
 def test_build_settings_rejects_malformed_db_url() -> None:
     with pytest.raises(SystemExit):
         arms.build_settings("not-a-url", "a", {})
@@ -720,25 +729,28 @@ async def test_sleep_stack_wires_the_profile_card_writer_behind_its_flag(db, fla
 
 
 @pytest.mark.postgres_only
-@pytest.mark.parametrize(("flag", "wired"), [("true", True), ("false", False)])
-async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, flag: str, wired: bool) -> None:
-    """As main.py does: with sleep on, the entity profile writer is injected exactly when its flag is on."""
+@pytest.mark.parametrize(("flag", "wired"), [("true", True), ("false", False), (None, False)])
+async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, flag: str | None, wired: bool) -> None:
+    """As main.py does: with sleep on, the entity profile writer is injected exactly when its flag is on. An eval
+    arm that does not name the flag runs without it (arms.EVAL_DEFAULTS)."""
     from conftest import MockEmbeddingProvider
 
     from nous.heart.entity_profile import EntityProfileWriter
 
     db_url = db.engine.url.render_as_string(hide_password=False)
-    settings = arms.build_settings(db_url, "beam-entity-profile-check", {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": flag})
+    overrides = {} if flag is None else {"NOUS_ENTITY_PROFILE_WRITER_ENABLED": flag}
+    settings = arms.build_settings(db_url, "beam-entity-profile-check", overrides)
     async with harness.open_stack(settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), sleep=True) as stack:
         writer = stack.sleep_handler._entity_profile_writer
     assert isinstance(writer, EntityProfileWriter) is wired
 
 
 @pytest.mark.postgres_only
-@pytest.mark.parametrize(("overrides", "on"), [({"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "false"}, False), ({}, True)])
-async def test_a_sleep_asks_about_an_entity_by_default_and_never_with_the_flag_off(db, overrides, on) -> None:
-    """A full sleep cycle over a key with enough facts: by default the entity profile phase asks the model about it
-    (the fake model refuses, so a failed row is left); with the flag off no such call is made and no row is written."""
+@pytest.mark.parametrize(("overrides", "on"), [({}, False), ({"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "true"}, True)])
+async def test_a_sleep_asks_about_an_entity_only_when_the_arm_turns_the_writer_on(db, overrides, on) -> None:
+    """A full sleep cycle over a key with enough facts: an eval arm that does not name the writer makes no profile
+    call and writes no row; an arm that turns it on asks the model about the key (the fake model refuses, so a
+    failed row is left)."""
     from conftest import MockEmbeddingProvider
     from sqlalchemy import select
 

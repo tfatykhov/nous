@@ -21,7 +21,8 @@ Clock: each session runs at its BEAM date. Its episode is dated before summarizi
 (the summarizer resolves relative dates against ``started_at``), and every fact
 written while the session (or the sleep cycle after its batch) is processed gets
 that date as ``created_at``/``learned_at`` (and ``mentioned_at`` where the column
-exists). arms.EVAL_OVERRIDES turns the sleep stale scan off for every arm; what
+exists). arms.EVAL_OVERRIDES turns the sleep stale scan off for every arm, and
+arms.EVAL_DEFAULTS the entity profile writer for every arm that does not name it; what
 still reads the wall clock is listed in arms.CLOCK_NOTES and recorded with the run.
 With ``sleep=True`` a full sleep cycle runs after each batch (BEAM batches are days
 apart). Sleep reflection reads only episodes started within

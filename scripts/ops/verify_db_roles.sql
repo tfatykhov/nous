@@ -162,6 +162,7 @@ BEGIN
         ('reader cannot read the pending resolutions', 'nous_reader', 'SELECT evidence FROM heart.pending_resolutions', 'error', NULL),
         ('reader cannot read the judge verdicts', 'nous_reader', 'SELECT verdict FROM nous_system.judge_verdicts', 'error', NULL),
         ('reader cannot read the second judge settings', 'nous_reader', 'SELECT model FROM nous_system.judge_second_settings', 'error', NULL),
+        ('reader cannot read the entity profiles', 'nous_reader', 'SELECT lines FROM nous_system.entity_profile', 'error', NULL),
         ('reader cannot INSERT', 'nous_reader', 'INSERT INTO heart.subtasks DEFAULT VALUES', 'error', NULL),
         ('reader cannot read a server file', 'nous_reader', 'SELECT pg_read_file(''/etc/hostname'')', 'error', NULL),
         ('reader cannot run a program', 'nous_reader', 'COPY (SELECT 1) TO PROGRAM ''true''', 'error', NULL),

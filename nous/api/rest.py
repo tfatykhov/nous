@@ -891,30 +891,39 @@ def create_app(
         return EntityProfileStore(database, settings.agent_id)
 
     async def list_entity_profiles(request: Request) -> JSONResponse:
-        """GET /entity-profiles — every profile with its status and size, and per key the active facts that name it
-        in their text without carrying it as an entity key (``unkeyed_mentions``, approximate)."""
+        """GET /entity-profiles?limit= — the profiles with their status and size, the keys with the most facts first
+        (``limit`` default 200, at most 1000). ``lines`` counts the lines whose cited facts are all live now."""
+        from nous.heart.entity_profile import LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX
+
+        try:
+            limit = int(request.query_params.get("limit", str(LIST_LIMIT_DEFAULT)))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        limit = max(1, min(limit, LIST_LIMIT_MAX))
         try:
             store = _entity_profile_store()
-            rows = await store.list()
-            unkeyed = await store.unkeyed_mentions([row["key"] for row in rows])
+            rows = await store.with_live_lines(await store.list(limit=limit))
         except Exception as e:
             logger.error("list_entity_profiles failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
         fields = ("key", "display_name", "kind", "status", "fact_count", "source_count", "tokens", "written_at")
-        profiles = [
-            {**{k: row[k] for k in fields}, "lines": len(row["lines"]), "unkeyed_mentions": unkeyed.get(row["key"], 0)}
-            for row in rows
-        ]
+        profiles = [{**{k: row[k] for k in fields}, "lines": len(row["lines"])} for row in rows]
         return JSONResponse({"writer_enabled": settings.entity_profile_writer_enabled, "profiles": profiles})
 
     async def get_entity_profile(request: Request) -> JSONResponse:
-        """GET /entity-profiles/{key} — one profile: its dated lines with the fact ids each cites, and the rejected
-        lines."""
+        """GET /entity-profiles/{key} — one profile: its dated lines whose cited facts are all live now, with the fact
+        ids each cites, the rejected lines, and the active facts that name the key in their text without carrying it
+        as an entity key (``unkeyed_mentions``, approximate)."""
         from nous.heart.keys import normalize_key
 
         key = normalize_key(request.path_params["key"])
+        unkeyed: dict[str, int] = {}
         try:
-            row = await _entity_profile_store().get(key) if key else None
+            store = _entity_profile_store()
+            row = await store.get(key) if key else None
+            if row is not None and row["active"]:
+                (row,) = await store.with_live_lines([row])
+                unkeyed = await store.unkeyed_mentions([key])
         except Exception as e:
             logger.error("get_entity_profile failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -924,12 +933,12 @@ def create_app(
             "key", "display_name", "kind", "status", "lines", "rejected", "fact_count", "source_count", "tokens",
             "written_at",
         )  # fmt: skip
-        return JSONResponse({k: row[k] for k in fields})
+        return JSONResponse({**{k: row[k] for k in fields}, "unkeyed_mentions": unkeyed.get(key, 0)})
 
     async def rebuild_entity_profile(request: Request) -> JSONResponse:
         """POST /entity-profiles/rebuild — write one entity's profile now (body ``{"key": ...}``); 409 when the writer
         is off, asleep or running, 400 without a key, 404 when no active fact carries the key, 429 when the day's
-        model calls are used."""
+        model calls are used. An owner key written with a call in the last 24 hours answers ``held`` (200)."""
         from nous.heart.keys import normalize_key
 
         try:
