@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,12 +48,15 @@ def _settings(agent: str, **overrides) -> Settings:
 
 class FakeLLM:
     """Answers each call by the entity key named in its prompt: a ``store_entity_profile`` call with the reply set for
-    that key, or a text reply (no tool call) when the reply is None or no reply is set. ``on_call`` runs first."""
+    that key, or a text reply (no tool call) when the reply is None or no reply is set. A reply that is an exception
+    is raised instead, as the client raises when no reply came (``outage`` raises for every key). ``on_call`` runs
+    first."""
 
-    def __init__(self, replies: dict[str, dict | None] | None = None, on_call=None) -> None:
+    def __init__(self, replies: dict[str, Any] | None = None, on_call=None, outage: bool = False) -> None:
         self.replies = replies or {}
         self.prompts: list[str] = []
         self.on_call = on_call
+        self.outage = outage
         self.call = AsyncMock(side_effect=self._call)
 
     async def _call(self, payload, **_kwargs):
@@ -61,6 +65,10 @@ class FakeLLM:
         if self.on_call is not None:
             await self.on_call(prompt)
         reply = self.replies.get(_KEY_IN_PROMPT.match(prompt).group(1))
+        if self.outage:
+            raise RuntimeError("API request timed out: no reply")
+        if isinstance(reply, Exception):
+            raise reply
         response = MagicMock()
         response.stop_reason = "tool_use"
         response.content = (
@@ -132,7 +140,9 @@ async def _ago(session, agent: str, age: timedelta, *keys: str) -> None:
     stmt = update(EntityProfile).where(EntityProfile.agent_id == agent)
     if keys:
         stmt = stmt.where(EntityProfile.entity_key.in_(keys))
-    await session.execute(stmt.values(written_at=datetime.now(UTC) - age))
+    # Both clocks: written_at (the last call, for the 24-hour hold) and updated_at (the last judged reply, for the
+    # rests of not_entity and failed rows).
+    await session.execute(stmt.values(written_at=datetime.now(UTC) - age, updated_at=datetime.now(UTC) - age))
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +684,140 @@ async def test_a_failed_count_makes_no_call(db, session):
 
 
 @pytest.mark.postgres_only
+async def test_a_call_with_no_reply_is_asked_again_after_a_day_not_a_week(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": RuntimeError("API error (529): overloaded")})
+    writer = _writer(db, agent, llm)
+
+    stats = await writer.run_sleep(session=session)
+    row = await _row(session, agent, "zephyrine")
+    assert (stats["no_reply"], stats["failed_closed"], row.status, row.source_hash) == (1, 0, "asked", "")
+    assert await writer.store.written_last_day(session=session) == 1
+    assert (await writer.run_sleep(session=session))["held"] == 1 and len(llm.prompts) == 1
+
+    # A day later it is asked again in its normal order; this time the reply comes and is used.
+    await _a_day_later(session, agent)
+    llm.replies["zephyrine"] = {"verdict": "not_entity"}
+    stats = await writer.run_sleep(session=session)
+    assert (stats["not_entity"], stats["failed_resting"], len(llm.prompts)) == (1, 0, 2)
+
+
+@pytest.mark.postgres_only
+async def test_the_call_keeps_its_purpose_through_the_reply_check(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": {"verdict": "not_entity"}})
+    llm.supports_call_context = True
+    await _writer(db, agent, llm).run_sleep(session=session)
+    assert llm.call.await_args.kwargs["call_context"].purpose == "entity_profile"
+
+
+@pytest.mark.postgres_only
+async def test_an_outage_leaves_every_key_counted_and_held_then_eligible_after_a_day(db, session):
+    agent = _agent()
+    keys = ["alder", "birchwood", "cedarfall"]
+    for key in keys:
+        await _keyed(session, agent, key, {}, {})
+    llm = FakeLLM({key: {"verdict": "not_entity"} for key in keys}, outage=True)
+    writer = _writer(db, agent, llm)
+
+    stats = await writer.run_sleep(session=session)
+    assert (stats["asked"], stats["no_reply"], stats["errors"]) == (3, 3, 0)
+    assert {(await _row(session, agent, key)).status for key in keys} == {"asked"}
+    assert await writer.store.written_last_day(session=session) == 3
+    assert (await writer.run_sleep(session=session))["held"] == 3 and len(llm.prompts) == 3
+
+    await _a_day_later(session, agent)
+    llm.outage = False
+    stats = await writer.run_sleep(session=session)
+    assert (stats["not_entity"], stats["failed_resting"], len(llm.prompts)) == (3, 0, 6)
+
+
+@pytest.mark.postgres_only
+async def test_an_unusable_reply_still_rests_a_week(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "zephyrine", {}, {})
+    llm = FakeLLM({"zephyrine": None})  # a reply without the tool call
+    writer = _writer(db, agent, llm)
+    stats = await writer.run_sleep(session=session)
+    assert (stats["failed_closed"], stats["no_reply"]) == (1, 0)
+    assert (await _row(session, agent, "zephyrine")).status == "failed"
+
+    await _a_day_later(session, agent)
+    assert (await writer.run_sleep(session=session))["failed_resting"] == 1 and len(llm.prompts) == 1
+    await _days_later(session, agent, 8)
+    await writer.run_sleep(session=session)
+    assert len(llm.prompts) == 2
+
+
+@pytest.mark.postgres_only
+async def test_a_not_entity_re_ask_with_no_reply_keeps_its_verdict_and_baseline(db, session):
+    agent = _agent()
+    await _keyed(session, agent, "spreadsheet", {}, {})
+    llm = FakeLLM({"spreadsheet": {"verdict": "not_entity"}})
+    writer = _writer(db, agent, llm)
+    await writer.run_sleep(session=session)
+    await _a_day_later(session, agent)
+    verdict_at = (await _row(session, agent, "spreadsheet")).updated_at
+
+    # The facts double, so it is due; the call gets no reply.
+    await _keyed(session, agent, "spreadsheet", {"content": "a change"}, {"content": "another change"})
+    llm.replies["spreadsheet"] = RuntimeError("API request timed out")
+    stats = await writer.run_sleep(session=session)
+    row = await _row(session, agent, "spreadsheet")
+    assert (stats["no_reply"], row.status, row.fact_count, row.updated_at) == (1, "not_entity", 2, verdict_at)
+    assert await writer.store.written_last_day(session=session) == 1
+
+    # Held for its 24 hours, then still due (the baseline did not move), and asked again.
+    assert (await writer.run_sleep(session=session))["held"] == 1
+    await _ago(session, agent, timedelta(hours=25))
+    llm.replies["spreadsheet"] = {"verdict": "not_entity"}
+    stats = await writer.run_sleep(session=session)
+    assert (stats["not_entity"], stats["not_entity_resting"], len(llm.prompts)) == (1, 0, 3)
+    assert (await _row(session, agent, "spreadsheet")).fact_count == 4
+
+
+@pytest.mark.postgres_only
+async def test_the_live_line_check_stays_under_the_drivers_parameter_limit(db, session):
+    """GET /entity-profiles at its largest limit with a raised line limit: 1,000 profiles of 12 lines citing 3 facts
+    each are 36,000 ids, over the 32,767 bind parameters one query may carry. The lookup goes in chunks."""
+    from nous.heart.entity_profile import ID_CHUNK, LIST_LIMIT_MAX
+
+    agent = _agent()
+    live = await _keyed(session, agent, "zephyrine", {}, {})
+    dead = await _keyed(session, agent, "zephyrine", {"active": False})
+    keep = {str(f.id) for f in live}
+    rows = [
+        {
+            "key": f"entity {n}",
+            "lines": [
+                {"id": f"{n}-{i}", "text": "x", "fact_ids": [str(uuid.uuid4()) for _ in range(3)]} for i in range(12)
+            ],
+        }
+        for n in range(LIST_LIMIT_MAX)
+    ]
+    rows[0]["lines"].append({"id": "live", "text": "live", "fact_ids": sorted(keep)})
+    rows[-1]["lines"].append({"id": "dead", "text": "dead", "fact_ids": [str(dead[0].id), *sorted(keep)][:3]})
+    assert sum(len(line["fact_ids"]) for row in rows for line in row["lines"]) > 32_767 > ID_CHUNK
+
+    shown = await EntityProfileStore(db, agent).with_live_lines(rows, session=session)
+    assert [line["id"] for line in shown[0]["lines"]] == ["live"]
+    assert all(row["lines"] == [] for row in shown[1:])
+
+
+@pytest.mark.postgres_only
+async def test_the_live_id_lookup_joins_its_chunks(db, session, monkeypatch):
+    from nous.heart import entity_profile
+
+    agent = _agent()
+    facts = await _keyed(session, agent, "zephyrine", *({} for _ in range(5)), {"active": False})
+    monkeypatch.setattr(entity_profile, "ID_CHUNK", 2)
+    ids = {str(f.id) for f in facts} | {str(uuid.uuid4()), "not-a-uuid"}
+    assert await EntityProfileStore(db, agent).live_ids(ids, session=session) == {str(f.id) for f in facts[:5]}
+
+
+@pytest.mark.postgres_only
 async def test_a_held_profile_loses_its_lines_on_dead_facts_without_a_call(db, session):
     agent = _agent()
     f1, f2, _f3 = await _keyed(session, agent, "zephyrine", {}, {}, {})
@@ -783,7 +927,8 @@ async def test_a_call_whose_result_write_fails_is_counted_and_not_asked_again_fo
         assert (first["errors"], second["held"], len(llm.prompts)) == (1, 1, 1)
         store = EntityProfileStore(db, agent)
         assert await store.written_last_day() == len(llm.prompts)
-        assert (await store.get("zephyrine"))["status"] == "failed"
+        # No reply was judged (the result write failed): the row is as count_call left it.
+        assert (await store.get("zephyrine"))["status"] == "asked"
     finally:
         await _purge(db, agent)
 
@@ -809,7 +954,7 @@ async def test_one_keys_failed_result_write_leaves_the_others_row_committed_and_
         assert (stats["not_entity"], stats["errors"], llm.keys) == (1, 1, ["alder", "birchwood"])
         store = EntityProfileStore(db, agent)
         rows = await store.rows(["alder", "birchwood"])
-        assert (rows["alder"]["status"], rows["birchwood"]["status"]) == ("not_entity", "failed")
+        assert (rows["alder"]["status"], rows["birchwood"]["status"]) == ("not_entity", "asked")
         assert await store.written_last_day() == 2
     finally:
         await _purge(db, agent)

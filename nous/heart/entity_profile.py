@@ -6,7 +6,7 @@ least ``entity_profile_min_facts`` active, unsuperseded facts. The keys ``user``
 keys (``entity_profile_owner_keys``) are stored as ``owner`` without a model call. For any other key one model call,
 shown the key's newest facts, decides whether the key names an entity and writes its lines. A ``not_entity`` verdict is
 stored and asked again only when the key's active facts have doubled or 30 days have passed (a reply that could not be
-used: 7 days). Code then checks the lines with the profile card's
+used: 7 days; a call that got no reply: 24 hours). Code then checks the lines with the profile card's
 ``settle_entries`` (1 to 3 citations of the facts shown; more than half dropped keeps the old profile), drops a line
 that cites only the agent's own inferences or a fact that is no longer live, dates each line from its cited facts
 (never from the model) and drops whole lines from the end until the rendered profile fits. A key that has a profile is
@@ -79,6 +79,8 @@ FAILED_REASK = timedelta(days=7)
 # GET /entity-profiles: rows a list answers with by default, and at most.
 LIST_LIMIT_DEFAULT = 200
 LIST_LIMIT_MAX = 1000
+# The most fact ids one query looks up (one bind parameter each; asyncpg takes at most 32,767 a query).
+ID_CHUNK = 5000
 # What Postgres text and JSONB cannot store: NUL, and lone surrogates (not valid UTF-8).
 _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
 
@@ -136,6 +138,25 @@ def _storable(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _storable(v) for k, v in value.items()}
     return value
+
+
+class _ReplySeen:
+    """The LLM client, noting whether a reply came back. ``call_background_llm_structured`` answers None both for a
+    call that got no reply (the API was down, rate limited or timed out) and for an unusable reply; ``replied`` tells
+    the two apart."""
+
+    def __init__(self, client: LLMClient) -> None:
+        self._client = client
+        self.replied = False
+
+    @property
+    def supports_call_context(self) -> bool:
+        return getattr(self._client, "supports_call_context", False) is True
+
+    async def call(self, payload: dict[str, Any], **kwargs: Any) -> Any:
+        response = await self._client.call(payload, **kwargs)
+        self.replied = True
+        return response
 
 
 def _source_row(fact: Fact) -> str:
@@ -388,16 +409,20 @@ class EntityProfileStore:
                 parsed.append(uuid.UUID(i))
             except (TypeError, ValueError):
                 continue
+        live: set[str] = set()
         if not parsed:
-            return set()
+            return live
         async with _session_scope(self._db, session) as s:
-            stmt = select(Fact.id).where(
-                Fact.agent_id == self.agent_id,
-                Fact.id.in_(parsed),
-                Fact.active.is_(True),
-                Fact.superseded_by.is_(None),
-            )
-            return {str(i) for i in (await s.execute(stmt)).scalars()}
+            # In chunks: each id is one bind parameter, and the driver takes at most 32,767 in one query.
+            for start in range(0, len(parsed), ID_CHUNK):
+                stmt = select(Fact.id).where(
+                    Fact.agent_id == self.agent_id,
+                    Fact.id.in_(parsed[start : start + ID_CHUNK]),
+                    Fact.active.is_(True),
+                    Fact.superseded_by.is_(None),
+                )
+                live |= {str(i) for i in (await s.execute(stmt)).scalars()}
+        return live
 
     async def with_live_lines(self, rows: list[dict], session: AsyncSession | None = None) -> list[dict]:
         """``rows`` with only the lines whose cited facts are all active and unsuperseded now (one query)."""
@@ -490,10 +515,13 @@ class EntityProfileStore:
     async def count_call(
         self, key: str, *, fact_count: int, source_count: int, session: AsyncSession | None = None
     ) -> dict:
-        """A call about to be made: the row's ``written_at`` moves, so the call counts, and it keeps its lines and
-        digest, so a call whose result is never written leaves the profile as it was. A key with no row, or an
-        ``owner`` row (a key no longer named an owner key), becomes a ``failed`` row with an empty digest: what is
-        left if the result is never written."""
+        """A call about to be made: only ``written_at`` moves, so the call counts and the key is held for 24 hours.
+
+        Everything else stays until a reply is written: the status, the lines, the digest, ``fact_count`` (a
+        ``not_entity`` row's baseline) and ``updated_at`` (when the last reply was judged, which the rests are
+        measured from). So a call that gets no reply changes nothing else. A key with no row, or an ``owner`` row (a
+        key no longer named an owner key), becomes an ``asked`` row with an empty digest: a call made, no reply judged.
+        """
         async with _session_scope(self._db, session) as s:
             row = await self._row(s, key, lock=True)
             now = datetime.now(UTC)
@@ -504,19 +532,30 @@ class EntityProfileStore:
                     lines=[],
                     previous_lines=[],
                     rejected=[],
+                    fact_count=fact_count,
+                    source_count=source_count,
                     active=True,
                     created_at=now,
+                    updated_at=now,
                 )
                 s.add(row)
             if row.status in (None, "owner"):
-                row.status = "failed"
+                row.status = "asked"
                 row.source_hash = ""
-            row.fact_count = fact_count
-            row.source_count = source_count
             row.written_at = now
-            row.updated_at = now
             await s.flush()
             return _as_dict(row)
+
+    async def mark_failed(self, key: str, session: AsyncSession | None = None) -> None:
+        """An unusable reply to a key with no judged reply yet (``asked``) or an unusable one before (``failed``): the
+        row becomes ``failed`` and its rest starts now. A profile or a verdict is left as it was."""
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, key, lock=True)
+            if row is not None and row.status in ("asked", "failed"):
+                row.status = "failed"
+                row.source_hash = ""
+                row.updated_at = datetime.now(UTC)
+                await s.flush()
 
 
 def _new_stats() -> dict[str, Any]:
@@ -528,6 +567,7 @@ def _new_stats() -> dict[str, Any]:
         "not_entity": 0,
         "owner": 0,
         "failed_closed": 0,
+        "no_reply": 0,
         "unchanged": 0,
         "cleared": 0,
         "held": 0,
@@ -675,8 +715,10 @@ class EntityProfileWriter:
         not be used) is not visited again until they have passed, whatever changed, so the rows written in the last 24
         hours are the calls made in them. Only emptying a profile none of whose facts is left, which makes no call and
         moves no ``written_at``, is done at any time. A ``not_entity`` row waits until the key's active facts have
-        doubled or 30 days have passed, a ``failed`` row 7 days. A profile whose facts changed but which gets no new
-        lines (held, or past the day's calls) loses the lines that cite a fact no longer live, without a call.
+        doubled or 30 days have passed since its verdict, a ``failed`` row 7 days since its unusable reply (both from
+        ``updated_at``, which a call that gets no reply does not move); an ``asked`` row only its 24 hours. A profile
+        whose facts changed but which gets no new lines (held, or past the day's calls) loses the lines that cite a
+        fact no longer live, without a call.
         """
         interrupted = interrupted or (lambda: False)
         async with self._lock:
@@ -717,6 +759,8 @@ class EntityProfileWriter:
                         stats["inactive"] += 1
                         continue
                     written = datetime.fromisoformat(row["written_at"]) if row is not None else None
+                    # When the last reply was judged: a call that got no reply does not move it.
+                    judged = datetime.fromisoformat(row["updated_at"]) if row is not None else None
                     # Counted by written_last_day: the row stands for one call until 24 hours have passed.
                     held = row is not None and row["status"] != "owner" and written > since
                     if key in owners:
@@ -746,11 +790,11 @@ class EntityProfileWriter:
                         row is not None
                         and row["status"] == "not_entity"
                         and count < NOT_ENTITY_GROWTH * row["fact_count"]
-                        and written > now - NOT_ENTITY_REASK
+                        and judged > now - NOT_ENTITY_REASK
                     ):
                         stats["not_entity_resting"] += 1
                         continue
-                    if row is not None and row["status"] == "failed" and written > now - FAILED_REASK:
+                    if row is not None and row["status"] == "failed" and judged > now - FAILED_REASK:
                         stats["failed_resting"] += 1
                         continue
                     if calls_left <= 0:
@@ -823,19 +867,22 @@ class EntityProfileWriter:
         stats: dict[str, Any],
         session: AsyncSession | None,
     ) -> str:
-        """One model call for ``key`` and its write: ``written``, ``not_entity`` or ``failed_closed``.
+        """One model call for ``key`` and its write: ``written``, ``not_entity``, ``failed_closed`` or ``no_reply``.
 
         The call is counted before it is made: the row's ``written_at`` moves in a transaction of its own first (a new
-        key gets a ``failed`` row), so a crash, a cancellation or a failed result write still leaves the call counted
-        and the key held for 24 hours. If that write fails, no call is made.
+        key gets an ``asked`` row), so a crash, a cancellation or a failed result write still leaves the call counted
+        and the key held for 24 hours. If that write fails, no call is made. A call that gets no reply (the API was
+        down, rate limited or timed out) leaves the row as reserved; only an unusable reply makes an ``asked`` row
+        ``failed``, to rest 7 days.
         """
         sources = len(facts)
         async with _session_scope(self._db, session) as s:
             await self.store.count_call(key, fact_count=fact_count, source_count=sources, session=s)
         stats["asked"] += 1
+        client = _ReplySeen(self._llm)
         reply = _storable(
             await call_background_llm_structured(
-                client=self._llm,
+                client=client,
                 model=self._settings.background_model,
                 system_prompt=_SYSTEM_PROMPT,
                 user_message=build_prompt(key, facts, row, self._settings),
@@ -847,6 +894,11 @@ class EntityProfileWriter:
             )
         )
         verdict = reply.get("verdict") if isinstance(reply, dict) else None
+        if not client.replied:
+            # No reply to judge: the row stays as count_call left it, counted and held for 24 hours.
+            stats["no_reply"] += 1
+            logger.warning("Entity profile: no reply; the call is counted and the key is asked again after 24 hours")
+            return "no_reply"
         async with _session_scope(self._db, session) as s:
             if verdict == "not_entity":
                 await self.store.write(
@@ -873,11 +925,13 @@ class EntityProfileWriter:
                 stats["dead_dropped"] += len(lines) - len(kept)
                 lines = kept
             if not lines:
-                # The call was counted before it was made; the old profile is kept, without its dead lines.
+                # An unusable reply: the call was counted before it was made. A key with no judged reply yet becomes
+                # failed and rests 7 days; an old profile is kept, without its dead lines; a verdict stays.
                 stats["failed_closed"] += 1
                 logger.warning(
                     "Entity profile: reply not used, old profile kept (reply=%s)", "none" if reply is None else verdict
                 )
+                await self.store.mark_failed(key, session=s)
                 await self._prune(key, row, stats, s)
                 return "failed_closed"
             await self.store.write(

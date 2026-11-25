@@ -2360,7 +2360,7 @@ class EntityProfile(Base):
 
     Written by ``nous.heart.entity_profile``: the sleep phase and ``POST /entity-profiles/rebuild`` replace ``lines``
     (the old ones move to ``previous_lines``). Each line is ``{id, text, fact_ids, said_on, date_from}``. ``status``
-    is ``profile``, ``not_entity``, ``owner`` or ``failed``; ``active`` is the soft delete.
+    is ``profile``, ``not_entity``, ``owner``, ``asked`` or ``failed``; ``active`` is the soft delete.
     """
 
     __tablename__ = "entity_profile"

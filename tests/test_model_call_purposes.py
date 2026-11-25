@@ -380,6 +380,11 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a model call: the body of an incoming request to the second judge's settings routes (F118 PR 3), read "
         "from Starlette's stream and refused past 4096 bytes",
     ),
+    ("nous/heart/entity_profile.py", "_ReplySeen.call", "self._client.call"): (
+        1,
+        "passes on the request of call_background_llm_structured(purpose='entity_profile') with the call_context it "
+        "was given, and only notes that a reply came back (F119: a call with no reply is retried after a day)",
+    ),
 }
 
 _Site = tuple[str, str, str]

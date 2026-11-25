@@ -749,8 +749,8 @@ async def test_sleep_stack_wires_the_entity_profile_writer_behind_its_flag(db, f
 @pytest.mark.parametrize(("overrides", "on"), [({}, False), ({"NOUS_ENTITY_PROFILE_WRITER_ENABLED": "true"}, True)])
 async def test_a_sleep_asks_about_an_entity_only_when_the_arm_turns_the_writer_on(db, overrides, on) -> None:
     """A full sleep cycle over a key with enough facts: an eval arm that does not name the writer makes no profile
-    call and writes no row; an arm that turns it on asks the model about the key (the fake model refuses, so a
-    failed row is left)."""
+    call and writes no row; an arm that turns it on asks the model about the key (the fake model raises, so the
+    row is left as counted with no reply: asked)."""
     from conftest import MockEmbeddingProvider
     from sqlalchemy import select
 
@@ -787,7 +787,7 @@ async def test_a_sleep_asks_about_an_entity_only_when_the_arm_turns_the_writer_o
             rows = (await s.execute(select(EntityProfile).where(EntityProfile.agent_id == agent))).scalars().all()
         asked = [p for p in prompts if "store_entity_profile" in p or "entity key" in p]
         assert bool(asked) is on
-        assert [(r.entity_key, r.status) for r in rows] == ([("larkspur garden", "failed")] if on else [])
+        assert [(r.entity_key, r.status) for r in rows] == ([("larkspur garden", "asked")] if on else [])
     finally:
         assert await purge_agent(db, agent) == []
 
